@@ -135,7 +135,7 @@ All requests use: `Authorization: Bearer ${HA_TOKEN}` (available as environment 
 
 ## Turn on a light
 ```
-POST http://supervisor/core/api/services/light/turn_on
+POST http://homeassistant.local:8123/api/services/light/turn_on
 Authorization: Bearer ${HA_TOKEN}
 Content-Type: application/json
 
@@ -144,7 +144,7 @@ Content-Type: application/json
 
 ## Turn off a light
 ```
-POST http://supervisor/core/api/services/light/turn_off
+POST http://homeassistant.local:8123/api/services/light/turn_off
 Authorization: Bearer ${HA_TOKEN}
 Content-Type: application/json
 
@@ -153,7 +153,7 @@ Content-Type: application/json
 
 ## Set brightness (0-255)
 ```
-POST http://supervisor/core/api/services/light/turn_on
+POST http://homeassistant.local:8123/api/services/light/turn_on
 Authorization: Bearer ${HA_TOKEN}
 Content-Type: application/json
 
@@ -162,7 +162,7 @@ Content-Type: application/json
 
 ## Set climate temperature
 ```
-POST http://supervisor/core/api/services/climate/set_temperature
+POST http://homeassistant.local:8123/api/services/climate/set_temperature
 Authorization: Bearer ${HA_TOKEN}
 Content-Type: application/json
 
@@ -171,7 +171,7 @@ Content-Type: application/json
 
 ## Set HVAC mode (cool, heat, auto, dry, fan_only, off)
 ```
-POST http://supervisor/core/api/services/climate/set_hvac_mode
+POST http://homeassistant.local:8123/api/services/climate/set_hvac_mode
 Authorization: Bearer ${HA_TOKEN}
 Content-Type: application/json
 
@@ -180,13 +180,13 @@ Content-Type: application/json
 
 ## Get a specific entity's state
 ```
-GET http://supervisor/core/api/states/DOMAIN.ENTITY_NAME
+GET http://homeassistant.local:8123/api/states/DOMAIN.ENTITY_NAME
 Authorization: Bearer ${HA_TOKEN}
 ```
 
 ## Get all entity states
 ```
-GET http://supervisor/core/api/states
+GET http://homeassistant.local:8123/api/states
 Authorization: Bearer ${HA_TOKEN}
 ```
 
@@ -209,27 +209,27 @@ When the user asks to control a device or check a state, you MUST call the http_
 
 ### To turn on/off a light:
 Use http_request with:
-- url: http://supervisor/core/api/services/light/turn_on (or turn_off)
+- url: http://homeassistant.local:8123/api/services/light/turn_on (or turn_off)
 - method: POST
 - headers: {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
 - body: {"entity_id": "light.ENTITY_NAME"}
 
 ### To check entity state:
 Use http_request with:
-- url: http://supervisor/core/api/states/DOMAIN.ENTITY_NAME
+- url: http://homeassistant.local:8123/api/states/DOMAIN.ENTITY_NAME
 - method: GET
 - headers: {"Authorization": "Bearer ${HA_TOKEN}"}
 
 ### To set climate temperature:
 Use http_request with:
-- url: http://supervisor/core/api/services/climate/set_temperature
+- url: http://homeassistant.local:8123/api/services/climate/set_temperature
 - method: POST
 - headers: {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
 - body: {"entity_id": "climate.ENTITY_NAME", "temperature": NUMBER}
 
 ### To list all entities:
 Use http_request with:
-- url: http://supervisor/core/api/states
+- url: http://homeassistant.local:8123/api/states
 - method: GET
 - headers: {"Authorization": "Bearer ${HA_TOKEN}"}
 
