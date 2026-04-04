@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 0.7.0
+version: 0.7.1
 slug: zeroclaw
 description: Lightweight AI agent for home automation
 url: https://github.com/Nafjan/zeroclaw-ha-addon
@@ -17,8 +17,8 @@ options:
   telegram_allowed_users: ""
   mqtt_host: core-mosquitto
   mqtt_port: 1883
-  default_model: openai/gpt-4o-mini
-  complex_model: google/gemini-2.5-flash
+  default_model: anthropic/claude-sonnet-4-20250514
+  complex_model: anthropic/claude-sonnet-4-20250514
   log_level: info
 schema:
   openrouter_api_key: password
