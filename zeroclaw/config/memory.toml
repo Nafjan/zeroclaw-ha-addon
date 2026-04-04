@@ -1,0 +1,20 @@
+# Memory System Configuration
+# Hybrid: Markdown files for content + SQLite FTS5 index for search
+
+[memory]
+backend = "hybrid"
+path = "/data/memory"
+max_size_mb = 50
+
+[memory.files]
+soul = "/data/memory/SOUL.md"
+context = "/data/memory/CONTEXT.md"
+history = "/data/memory/HISTORY.md"
+
+[memory.rotation]
+history_max_entries = 500
+history_rotate_at = 1000
+
+[memory.search]
+engine = "sqlite_fts5"
+index_path = "/data/memory/search.db"

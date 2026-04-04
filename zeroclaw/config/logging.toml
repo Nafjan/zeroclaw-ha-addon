@@ -1,0 +1,9 @@
+# Logging Configuration
+# Structured JSON logs with rotation to protect eMMC
+
+[logging]
+format = "json"
+path = "/data/logs/zeroclaw.log"
+max_size_mb = 10
+max_files = 3          # 10 MB x 3 = 30 MB max, rotate oldest
+level = "info"         # Set to "debug" for troubleshooting

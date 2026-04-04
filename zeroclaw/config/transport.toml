@@ -1,0 +1,9 @@
+# Telegram Transport Configuration
+# Bot token injected via env var from HAOS encrypted options
+
+[transport.telegram]
+enabled = true
+bot_token = "{{env.ZEROCLAW_TELEGRAM_TOKEN}}"
+allowed_users = "{{env.ZEROCLAW_TELEGRAM_ALLOWED_USERS}}"
+polling_mode = "long_poll"       # No webhook = no inbound ports
+rate_limit_per_minute = 20

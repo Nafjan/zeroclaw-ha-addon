@@ -1,0 +1,43 @@
+# Home Assistant REST API Tool Definitions
+# ZeroClaw uses these to interact with HA Core via the Supervisor API proxy
+
+[tool]
+name = "home_assistant"
+description = "Control Home Assistant lights and climate, query sensors and entity states"
+
+[[tool.functions]]
+name = "call_service"
+description = "Call a Home Assistant service (e.g., turn on a light, set thermostat temperature). Only allowed for domains: light, climate, input_boolean, scene, script."
+endpoint = "http://supervisor/core/api/services/{{domain}}/{{service}}"
+method = "POST"
+headers = { "Authorization" = "Bearer {{env.ZEROCLAW_HA_TOKEN}}" }
+body = "{{payload}}"
+
+[[tool.functions]]
+name = "get_state"
+description = "Get the current state and attributes of a specific entity"
+endpoint = "http://supervisor/core/api/states/{{entity_id}}"
+method = "GET"
+headers = { "Authorization" = "Bearer {{env.ZEROCLAW_HA_TOKEN}}" }
+
+[[tool.functions]]
+name = "get_all_states"
+description = "List the state of all entities in Home Assistant"
+endpoint = "http://supervisor/core/api/states"
+method = "GET"
+headers = { "Authorization" = "Bearer {{env.ZEROCLAW_HA_TOKEN}}" }
+
+[[tool.functions]]
+name = "fire_event"
+description = "Fire a custom event in Home Assistant"
+endpoint = "http://supervisor/core/api/events/{{event_type}}"
+method = "POST"
+headers = { "Authorization" = "Bearer {{env.ZEROCLAW_HA_TOKEN}}" }
+body = "{{payload}}"
+
+[[tool.functions]]
+name = "get_services"
+description = "List all available services and their parameters"
+endpoint = "http://supervisor/core/api/services"
+method = "GET"
+headers = { "Authorization" = "Bearer {{env.ZEROCLAW_HA_TOKEN}}" }
