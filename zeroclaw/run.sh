@@ -254,5 +254,22 @@ SOULEOF
 
 bashio::log.info "Config generated | Model: ${DEFAULT_MODEL} | Telegram: enabled"
 
+# --- Clear stale session data on version change ---
+VERSION_FILE="${CONFIG_DIR}/workspace/.last_version"
+CURRENT_VERSION="0.7.2"
+if [ -f "${VERSION_FILE}" ]; then
+    LAST_VERSION="$(cat ${VERSION_FILE})"
+else
+    LAST_VERSION=""
+fi
+if [ "${LAST_VERSION}" != "${CURRENT_VERSION}" ]; then
+    bashio::log.info "Version changed (${LAST_VERSION} -> ${CURRENT_VERSION}), clearing sessions"
+    rm -f "${CONFIG_DIR}/workspace/sessions"*.db 2>/dev/null
+    rm -f "${CONFIG_DIR}/workspace/sessions"*.jsonl 2>/dev/null
+    rm -rf "${CONFIG_DIR}/workspace/sessions" 2>/dev/null
+    rm -f "${CONFIG_DIR}/brain.db" 2>/dev/null
+    echo "${CURRENT_VERSION}" > "${VERSION_FILE}"
+fi
+
 # --- Start ZeroClaw daemon ---
 exec zeroclaw daemon --config-dir "${CONFIG_DIR}"
