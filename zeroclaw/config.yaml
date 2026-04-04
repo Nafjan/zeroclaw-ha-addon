@@ -19,7 +19,7 @@ options:
   openrouter_api_key: ""
   ha_token: ""
   telegram_bot_token: ""
-  telegram_allowed_users: []
+  telegram_allowed_users: ""
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
   default_model: "deepseek/deepseek-chat-v3-0324"
@@ -30,8 +30,7 @@ schema:
   openrouter_api_key: password
   ha_token: password
   telegram_bot_token: password
-  telegram_allowed_users:
-    - int
+  telegram_allowed_users: str
   mqtt_host: str
   mqtt_port: port
   default_model: str
