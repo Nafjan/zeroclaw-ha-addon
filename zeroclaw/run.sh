@@ -25,16 +25,8 @@ export ZEROCLAW_DEFAULT_MODEL="${DEFAULT_MODEL}"
 export ZEROCLAW_COMPLEX_MODEL="${COMPLEX_MODEL}"
 export RUST_LOG="${LOG_LEVEL}"
 
-# --- Read Telegram allowed users as comma-separated list ---
-ALLOWED_USERS=""
-for user_id in $(bashio::config 'telegram_allowed_users'); do
-    if [ -z "${ALLOWED_USERS}" ]; then
-        ALLOWED_USERS="${user_id}"
-    else
-        ALLOWED_USERS="${ALLOWED_USERS},${user_id}"
-    fi
-done
-export ZEROCLAW_TELEGRAM_ALLOWED_USERS="${ALLOWED_USERS}"
+# --- Read Telegram allowed users (comma-separated string) ---
+export ZEROCLAW_TELEGRAM_ALLOWED_USERS="$(bashio::config 'telegram_allowed_users')"
 
 # --- Validate required credentials ---
 if [ -z "${ZEROCLAW_OPENROUTER_KEY}" ]; then
