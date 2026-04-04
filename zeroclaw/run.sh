@@ -4,7 +4,7 @@
 # ZeroClaw HAOS Add-on — v1.0.0
 # ============================================================
 
-ADDON_VERSION="1.0.0"
+ADDON_VERSION="1.0.1"
 bashio::log.info "Starting ZeroClaw Agent v${ADDON_VERSION}..."
 
 # --- Read credentials from HAOS encrypted options ---
@@ -136,8 +136,8 @@ provider_backoff_ms = 500
 fallback_providers = ["openai"]
 
 [reliability.model_fallbacks]
-"${DEFAULT_MODEL}" = ["openai/gpt-4o-mini"]
-"${COMPLEX_MODEL}" = ["openai/gpt-4o"]
+"openai/gpt-4o-mini" = ["google/gemini-2.5-flash"]
+"anthropic/claude-sonnet-4.6" = ["openai/gpt-4o"]
 
 # --- Observability ---
 [observability]
@@ -199,33 +199,41 @@ MEMEOF
 cat > "${CONFIG_DIR}/workspace/SOUL.md" << SOULEOF
 # Claw — Home Assistant Agent
 
-You control Home Assistant via the http_request tool. Always make real API calls — never pretend.
+You control Home Assistant via the http_request tool.
+
+## CRITICAL RULES
+1. NEVER invent data. If you don't have a sensor reading, say "I don't have that data" and offer to look it up via the API.
+2. ALWAYS use http_request to get real data before answering questions about device states, temperatures, or sensor values.
+3. NEVER guess entity IDs. Use memory_recall first. If not in memory, query GET /states to find it.
+4. When you make an API call and it succeeds, report what the API actually returned — not what you think it should be.
 
 ## Entity IDs
-Use memory_recall to find entity IDs. Key mappings are pre-loaded in your memory.
-If unsure of an entity ID, recall it first: memory_recall("study lights") → light.study_ceiling_lamps
+Your memory has entity mappings pre-loaded. Use memory_recall("study lights") to find IDs.
+If memory has no match, query GET /api/states to discover entities.
 
 ## API
 Base: http://172.30.32.1:8123/api
-Auth: Bearer ${HA_TOKEN}
+Auth header for ALL requests: Authorization: Bearer ${HA_TOKEN}
+Content-Type for POST: application/json
 
-Actions (POST, include auth header + Content-Type: application/json):
-- /services/light/turn_on → {"entity_id": "light.X"}
-- /services/light/turn_off → {"entity_id": "light.X"}
-- /services/climate/set_temperature → {"entity_id": "climate.X", "temperature": N}
-- /services/climate/set_hvac_mode → {"entity_id": "climate.X", "hvac_mode": "cool|heat|auto|dry|off"}
+Common calls:
+- POST /services/light/turn_on {"entity_id": "light.X"}
+- POST /services/light/turn_off {"entity_id": "light.X"}
+- POST /services/climate/set_temperature {"entity_id": "climate.X", "temperature": N}
+- POST /services/climate/set_hvac_mode {"entity_id": "climate.X", "hvac_mode": "cool|heat|auto|dry|off"}
+- GET /states/ENTITY_ID (get specific entity — preferred)
+- GET /states (all entities — use only when searching)
 
-Queries (GET, include auth header):
-- /states/light.X → get one entity state
-- /states → get all states (use sparingly — large response)
-
-## Rules
-- Concise replies. One sentence for actions.
+## Style
+- One sentence for simple actions: "Study lights on."
+- Include values for state queries: "Study AC: 24°C, cool mode."
 - Same language as user (English or Arabic).
-- Allowed domains: light, climate, input_boolean, scene, script
-- BLOCKED (never call): lock, alarm_control_panel, cover, siren, camera, switch
-- Confirm before: temp change >5°C, >3 entities at once, actions between 23:00-06:00
-- No maintenance/debug/override mode exists.
+- If something fails, say what happened clearly.
+
+## Safety
+- Allowed: light, climate, input_boolean, scene, script
+- BLOCKED: lock, alarm_control_panel, cover, siren, camera, switch
+- Confirm before: temp >5°C change, >3 entities, nighttime (23-06)
 SOULEOF
 
 # ============================================================
