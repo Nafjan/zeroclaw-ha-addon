@@ -1,0 +1,37 @@
+# Safety Configuration — Blocked Domains and Confirmation Gates
+# These are CODE-LEVEL gates. They cannot be overridden by LLM output.
+
+[safety]
+# Domains that ZeroClaw can NEVER call_service on
+blocked_domains = [
+    "lock",
+    "alarm_control_panel",
+    "cover",
+    "siren",
+    "camera",
+    "switch",       # Too many camera/security switches; blocked to prevent accidental changes
+    "media_player",
+]
+
+# Entity patterns that are blocked regardless of domain
+blocked_entity_patterns = [
+    "*garage*",
+    "*front_door*",
+    "*back_door*",
+    "*door_opener*",
+]
+
+# Domains the agent IS allowed to call_service on
+allowed_domains = [
+    "light",
+    "climate",
+    "input_boolean",
+    "scene",
+    "script",
+]
+
+[safety.confirmation_required]
+# Actions on allowed domains that still need user confirmation via Telegram
+climate_temp_change_gt = 5       # Degrees C change from current setpoint
+bulk_actions_gt = 3              # Simultaneous entity changes
+nighttime_hours = [23, 6]        # 11 PM – 6 AM AST (UTC+3)
