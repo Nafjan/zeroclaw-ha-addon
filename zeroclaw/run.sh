@@ -81,6 +81,11 @@ max_tool_iterations = 10
 max_history_messages = 50
 max_context_tokens = 32000
 
+[autonomy]
+level = "full"
+workspace_only = false
+max_actions_per_hour = 100
+
 [memory]
 backend = "sqlite"
 auto_save = true
