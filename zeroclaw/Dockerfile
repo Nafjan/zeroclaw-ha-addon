@@ -11,7 +11,7 @@ COPY run.sh /
 RUN chmod +x /run.sh
 
 RUN mkdir -p /data/memory /data/logs /data/tools
-COPY config/ /data/
+COPY data-config/ /data/
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD pgrep zeroclaw || exit 1
