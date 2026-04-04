@@ -55,9 +55,6 @@ base_url = "https://openrouter.ai/api/v1"
 api_path = "/chat/completions"
 wire_api = "chat_completions"
 
-[channels]
-telegram = true
-
 [channels_config]
 message_timeout_secs = 300
 ack_reactions = true
