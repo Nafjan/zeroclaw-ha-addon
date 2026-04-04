@@ -51,4 +51,4 @@ bashio::log.info "Complex model: ${COMPLEX_MODEL}"
 bashio::log.info "Log level: ${LOG_LEVEL}"
 
 # --- Start ZeroClaw ---
-exec zeroclaw daemon --config /data/zeroclaw.toml
+exec zeroclaw daemon --config-dir /data
