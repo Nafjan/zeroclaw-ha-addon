@@ -125,7 +125,7 @@ runtime_trace_max_entries = 200
 TOMLEOF
 
 # --- Write HA control skill with token injected ---
-cat > "${CONFIG_DIR}/workspace/skills/home-assistant/SKILL.md" << 'SKILLEOF'
+cat > "${CONFIG_DIR}/workspace/skills/home-assistant/SKILL.md" << SKILLEOF
 # Home Assistant Control
 
 You can control Home Assistant by making HTTP requests to the Supervisor API proxy.
