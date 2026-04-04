@@ -1,19 +1,86 @@
-# ZeroClaw Main Configuration
-# Secrets are injected via environment variables from HAOS encrypted options
-# NEVER put API keys or tokens directly in this file
+# ZeroClaw Configuration for Home Assistant Green
+# API keys read from env vars: ZEROCLAW_API_KEY, TELEGRAM_BOT_TOKEN
 
-[llm]
-provider = "openai-compatible"
-endpoint = "https://openrouter.ai/api/v1"
-api_key = "{{env.ZEROCLAW_OPENROUTER_KEY}}"
-default_model = "{{env.ZEROCLAW_DEFAULT_MODEL}}"
-timeout_seconds = 30
-max_retries = 3
+# === LLM Provider ===
+default_provider = "openrouter"
+default_model = "deepseek/deepseek-chat-v3-0324"
+default_temperature = 0.7
+provider_timeout_secs = 30
 
-[llm.routing]
-complex_model = "{{env.ZEROCLAW_COMPLEX_MODEL}}"
-complex_triggers = ["multi-step", "automation-suggest", "anomaly", "debug", "analyze", "compare", "why", "pattern", "suggest"]
+[model_providers.openrouter]
+name = "openai"
+base_url = "https://openrouter.ai/api/v1"
+api_path = "/chat/completions"
+wire_api = "chat_completions"
 
+# === Channels ===
+[channels]
+telegram = true
+
+[channels_config]
+message_timeout_secs = 300
+ack_reactions = true
+show_tool_calls = false
+session_persistence = true
+session_backend = "sqlite"
+
+[channels_config.telegram]
+stream_mode = "partial"
+draft_update_interval_ms = 1000
+interrupt_on_new_message = false
+mention_only = false
+
+# === Gateway ===
+[gateway]
+port = 42617
+host = "0.0.0.0"
+require_pairing = false
+session_persistence = true
+
+# === Agent ===
 [agent]
-soul_file = "/data/memory/SOUL.md"
-tools_dir = "/data/tools"
+compact_context = true
+max_tool_iterations = 10
+max_history_messages = 50
+max_context_tokens = 32000
+parallel_tools = false
+
+# === Memory ===
+[memory]
+backend = "sqlite"
+auto_save = true
+hygiene_enabled = true
+archive_after_days = 30
+purge_after_days = 180
+search_mode = "bm25"
+
+# === HTTP Request Tool (for HA REST API) ===
+[http_request]
+enabled = true
+allowed_domains = ["supervisor", "core-mosquitto", "localhost"]
+max_response_size = 1000000
+timeout_secs = 30
+allow_private_hosts = true
+
+# === Cost Tracking ===
+[cost]
+enabled = true
+daily_limit_usd = 2.0
+monthly_limit_usd = 20.0
+warn_at_percent = 80
+
+[cost.enforcement]
+mode = "warn"
+route_down_model = "deepseek/deepseek-chat-v3-0324"
+reserve_percent = 10
+
+# === Reliability ===
+[reliability]
+provider_retries = 2
+provider_backoff_ms = 500
+
+# === Observability ===
+[observability]
+backend = "log"
+runtime_trace_mode = "rolling"
+runtime_trace_max_entries = 200
