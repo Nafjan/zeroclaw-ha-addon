@@ -23,6 +23,10 @@ export TELEGRAM_BOT_TOKEN="${TELEGRAM_TOKEN}"
 export HA_TOKEN="${HA_TOKEN}"
 export RUST_LOG="${LOG_LEVEL}"
 
+# SUPERVISOR_TOKEN is auto-injected by HAOS when hassio_api=true
+# Use it if HA_TOKEN is the hassio token, or use the user-provided token
+bashio::log.info "SUPERVISOR_TOKEN present: $([ -n "${SUPERVISOR_TOKEN}" ] && echo yes || echo no)"
+
 # --- Validate ---
 if [ -z "${OPENROUTER_KEY}" ]; then
     bashio::log.fatal "OpenRouter API key not configured!"
@@ -94,7 +98,7 @@ search_mode = "bm25"
 
 [http_request]
 enabled = true
-allowed_domains = ["supervisor", "core-mosquitto", "localhost", "127.0.0.1"]
+allowed_domains = ["supervisor", "core-mosquitto", "localhost", "127.0.0.1", "homeassistant.local", "*"]
 max_response_size = 1000000
 timeout_secs = 30
 allow_private_hosts = true

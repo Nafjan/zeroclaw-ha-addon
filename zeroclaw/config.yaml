@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 0.5.1
+version: 0.5.2
 slug: zeroclaw
 description: Lightweight AI agent for home automation
 url: https://github.com/Nafjan/zeroclaw-ha-addon
@@ -8,6 +8,8 @@ arch:
 init: false
 startup: application
 boot: auto
+hassio_api: true
+homeassistant_api: true
 options:
   openrouter_api_key: ""
   ha_token: ""
