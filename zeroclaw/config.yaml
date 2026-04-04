@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 0.4.0
+version: 0.4.1
 slug: zeroclaw
 description: Lightweight AI agent for home automation
 url: https://github.com/Nafjan/zeroclaw-ha-addon
