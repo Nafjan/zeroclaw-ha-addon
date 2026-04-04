@@ -1,8 +1,8 @@
 name: "ZeroClaw Agent"
 version: "0.1.0"
 slug: "zeroclaw"
-description: "Lightweight AI agent for home automation — Rust-based, cloud LLM via OpenRouter"
-url: "https://github.com/zeroclaw-labs/zeroclaw"
+description: "Lightweight AI agent for home automation"
+url: "https://github.com/Nafjan/zeroclaw-ha-addon"
 arch:
   - aarch64
 startup: application
@@ -10,11 +10,9 @@ boot: auto
 init: false
 homeassistant_api: true
 hassio_api: true
-
 map:
   - config:rw
   - share:rw
-
 options:
   openrouter_api_key: ""
   ha_token: ""
@@ -25,7 +23,6 @@ options:
   default_model: "deepseek/deepseek-chat-v3-0324"
   complex_model: "anthropic/claude-sonnet-4"
   log_level: "info"
-
 schema:
   openrouter_api_key: password
   ha_token: password
@@ -36,9 +33,3 @@ schema:
   default_model: str
   complex_model: str
   log_level: list(debug|info|warn|error)
-
-resources:
-  memory_limit: 256M
-
-environment:
-  RUST_LOG: info
