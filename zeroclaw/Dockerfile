@@ -1,11 +1,14 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-# Install runtime dependencies for dynamically linked binary
+# The pre-built binary is linked against glibc.
+# HAOS Alpine base uses musl, so install glibc compatibility layer.
 RUN apk add --no-cache \
-    libc6-compat \
     ca-certificates \
-    curl
+    curl \
+    gcompat
+
+# gcompat provides a full glibc shim for musl, including fcntl64 and __res_init
 
 # Copy the pre-built aarch64 binary
 COPY zeroclaw /usr/local/bin/zeroclaw
