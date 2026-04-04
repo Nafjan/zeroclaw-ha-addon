@@ -1,0 +1,40 @@
+# MQTT Configuration — Event-driven home automation
+# Connects to HA's Mosquitto broker for real-time state changes
+
+[mqtt]
+host = "core-mosquitto"
+port = 1883
+client_id = "zeroclaw-agent"
+reconnect_interval_sec = 5
+keepalive_sec = 60
+
+[[mqtt.subscriptions]]
+topic = "homeassistant/+/+/state"
+description = "All HA entity state changes"
+
+[[mqtt.subscriptions]]
+topic = "zigbee2mqtt/+"
+description = "Direct Zigbee device events via Zigbee2MQTT"
+
+[mqtt.filtering]
+# Only these domains trigger LLM analysis
+escalation_domains = ["binary_sensor", "climate", "sensor"]
+
+# Debounce: same entity within this window → only latest event processed
+debounce_seconds = 10
+
+# High-frequency sensors to ignore entirely (never reach LLM)
+ignore_entity_patterns = [
+    "sensor.*_power",
+    "sensor.*_energy",
+    "sensor.*_voltage",
+    "sensor.*_download_speed*",
+    "sensor.*_upload_speed*",
+    "sensor.*_battery_level",
+    "sensor.*_battery_state",
+    "sensor.*_charger_type",
+    "sensor.*_geocoded_location",
+    "sensor.sun_*",
+    "sensor.backup_*",
+    "binary_sensor.*_snooze",
+]

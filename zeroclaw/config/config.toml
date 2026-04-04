@@ -1,0 +1,19 @@
+# ZeroClaw Main Configuration
+# Secrets are injected via environment variables from HAOS encrypted options
+# NEVER put API keys or tokens directly in this file
+
+[llm]
+provider = "openai-compatible"
+endpoint = "https://openrouter.ai/api/v1"
+api_key = "{{env.ZEROCLAW_OPENROUTER_KEY}}"
+default_model = "{{env.ZEROCLAW_DEFAULT_MODEL}}"
+timeout_seconds = 30
+max_retries = 3
+
+[llm.routing]
+complex_model = "{{env.ZEROCLAW_COMPLEX_MODEL}}"
+complex_triggers = ["multi-step", "automation-suggest", "anomaly", "debug", "analyze", "compare", "why", "pattern", "suggest"]
+
+[agent]
+soul_file = "/data/memory/SOUL.md"
+tools_dir = "/data/tools"
