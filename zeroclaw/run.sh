@@ -1,8 +1,8 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v1.1.0
+# ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="1.1.0"
+ADDON_VERSION="1.2.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Credentials ---
@@ -25,7 +25,8 @@ for var in OPENROUTER_KEY TELEGRAM_TOKEN HA_TOKEN; do
 done
 
 CONFIG_DIR="/data"
-mkdir -p "${CONFIG_DIR}/workspace/skills/home-assistant"
+WS="${CONFIG_DIR}/workspace"
+mkdir -p "${WS}/skills/ha"
 
 # ==============================================================
 # config.toml
@@ -65,7 +66,6 @@ allowed_users = ["${TELEGRAM_USERS}"]
 stream_mode = "partial"
 draft_update_interval_ms = 1500
 interrupt_on_new_message = true
-mention_only = false
 
 [gateway]
 port = 42617
@@ -93,6 +93,7 @@ response_cache_enabled = true
 response_cache_ttl_minutes = 2
 snapshot_enabled = true
 auto_hydrate = true
+conversation_retention_days = 30
 
 [http_request]
 enabled = true
@@ -128,113 +129,253 @@ runtime_trace_max_entries = 300
 TOMLEOF
 
 # ==============================================================
-# MEMORY_SNAPSHOT.md — entity mappings + home context
+# SOUL.md — agent identity and behavioral rules ONLY
 # ==============================================================
-cat > "${CONFIG_DIR}/workspace/MEMORY_SNAPSHOT.md" << 'MEMEOF'
-# Entity ID Reference
+cat > "${WS}/SOUL.md" << 'SOULEOF'
+You are Claw, a home automation assistant. You help the user control their smart home via Telegram.
 
-## Lights
-study ceiling lamps: light.study_ceiling_lamps
-study spotlights left: light.study_spotlights_left
-study spotlights right: light.study_spotlights_right
-living room: light.living_room
-bedroom: light.bedroom
-left bedside: light.left_bedside
-right bedside: light.right_bedside
-garden lights: light.garden_lights
-nursery ceiling lamp: light.nursery_ceiling_lamp
-master bathroom left: light.master_bathroom_light_left
-master bathroom right: light.master_bathroom_light_right
-floor lamp: light.bedroom_repeater_lamp_switch
-olive tree lights: light.olive_tree_lights
-stairs night light: light.downstairs_switch_2_left
-upstairs light: light.downstairs_switch_right
-under stairs: light.downstairs_switch_left
-monitor lights: light.monitor_lights
-tv lights: light.tv_lights
-all lights: light.all_lights
-
-## ACs
-study AC: climate.room_air_conditioner
-master bedroom AC: climate.gr_acunit_6400_02_608d
-living room AC: climate.gr_acunit_6400_02_10b6
-majlis AC: climate.gr_acunit_6400_02_7a25
-hall AC: climate.hall_ac
-entrance hall AC: climate.entrance_hall_ac
-food area AC: climate.food_area_ac
-nursery AC: climate.nursery
-
-## Other
-weather: weather.pirateweather
-MEMEOF
-
-# ==============================================================
-# SOUL.md — system prompt with few-shot examples
-# ==============================================================
-cat > "${CONFIG_DIR}/workspace/SOUL.md" << SOULEOF
-You are Claw, a home automation agent. You control devices by calling the http_request tool against the Home Assistant API.
-
-RULES:
-- NEVER fabricate data. If you lack a reading, call the API first.
-- NEVER guess entity IDs. Look them up via memory_recall or GET /api/states.
-- Keep replies short: one line for actions, two for status queries.
+## Behavior
+- Be concise. One sentence for actions, two for queries.
 - Match the user's language (English or Arabic).
-- Allowed domains: light, climate, input_boolean, scene, script.
-- Blocked domains (never call): lock, alarm_control_panel, cover, siren, camera, switch.
-- Ask before: temperature change >5°C, controlling >3 devices, or acting between 23:00–06:00.
+- Never fabricate data. If you don't know a value, look it up with a tool call first.
+- When you learn something new about the home (a new device, a preference, a pattern), save it with memory_store using category "core" so you remember it next time.
 
-API BASE: http://172.30.32.1:8123/api
-AUTH HEADER (use on every request): Authorization: Bearer ${HA_TOKEN}
+## Safety
+- Allowed domains: light, climate, input_boolean, scene, script
+- Blocked (never call): lock, alarm_control_panel, cover, siren, camera, switch
+- If asked to control a blocked domain: "That's outside my scope. Use the HA app."
+- Ask before: temperature change >5°C, controlling >3 devices, nighttime actions (23:00–06:00)
 
-EXAMPLES OF CORRECT TOOL USE:
-
-User: "Turn on the study lights"
-1. memory_recall("study lights") → light.study_ceiling_lamps
-2. http_request(url="http://172.30.32.1:8123/api/services/light/turn_on", method="POST", headers={"Authorization":"Bearer ${HA_TOKEN}","Content-Type":"application/json"}, body={"entity_id":"light.study_ceiling_lamps"})
-3. Reply: "Study lights on."
-
-User: "What's the study AC set to?"
-1. memory_recall("study AC") → climate.room_air_conditioner
-2. http_request(url="http://172.30.32.1:8123/api/states/climate.room_air_conditioner", method="GET", headers={"Authorization":"Bearer ${HA_TOKEN}"})
-3. Read temperature and hvac_mode from response.
-4. Reply: "Study AC: 24°C, cool mode."
-
-User: "Turn off the bedroom lights and the garden lights"
-1. memory_recall("bedroom lights") → light.bedroom
-2. memory_recall("garden lights") → light.garden_lights
-3. http_request(url="http://172.30.32.1:8123/api/services/light/turn_off", method="POST", headers={"Authorization":"Bearer ${HA_TOKEN}","Content-Type":"application/json"}, body={"entity_id":"light.bedroom"})
-4. http_request(url="http://172.30.32.1:8123/api/services/light/turn_off", method="POST", headers={"Authorization":"Bearer ${HA_TOKEN}","Content-Type":"application/json"}, body={"entity_id":"light.garden_lights"})
-5. Reply: "Bedroom and garden lights off."
-
-User: "Lock the front door"
-Reply: "That's a blocked domain. You can control locks directly in the HA app."
+## Learning
+- When the user corrects you or tells you something new, store it: memory_store(key="descriptive_key", content="the fact", category="core")
+- When you discover a new entity ID from the API, store the mapping: memory_store(key="entity_FRIENDLY_NAME", content="ENTITY_ID", category="core")
+- Before guessing, always check: memory_recall(query="relevant keywords")
 SOULEOF
 
 # ==============================================================
-# SKILL.md
+# TOOLS.md — how to use tools for HA control
 # ==============================================================
-cat > "${CONFIG_DIR}/workspace/skills/home-assistant/SKILL.md" << SKILLEOF
-# Home Assistant API
+cat > "${WS}/TOOLS.md" << TOOLSEOF
+## Home Assistant API
 
-Base: http://172.30.32.1:8123/api
-Auth: Bearer ${HA_TOKEN}
+Use the http_request tool to control devices. Always include the auth header.
 
-POST /services/light/turn_on {"entity_id":"light.X"}
-POST /services/light/turn_off {"entity_id":"light.X"}
-POST /services/light/turn_on {"entity_id":"light.X","brightness":0-255}
-POST /services/climate/set_temperature {"entity_id":"climate.X","temperature":N}
-POST /services/climate/set_hvac_mode {"entity_id":"climate.X","hvac_mode":"cool"}
-GET /states/ENTITY_ID
-GET /states
+### Headers for every request
+Authorization: Bearer ${HA_TOKEN}
+Content-Type: application/json (for POST only)
 
-Allowed: light, climate, input_boolean, scene, script
-Blocked: lock, alarm_control_panel, cover, siren, camera, switch
+### Patterns
+Turn on light:    POST http://172.30.32.1:8123/api/services/light/turn_on     {"entity_id":"light.X"}
+Turn off light:   POST http://172.30.32.1:8123/api/services/light/turn_off    {"entity_id":"light.X"}
+Set brightness:   POST http://172.30.32.1:8123/api/services/light/turn_on     {"entity_id":"light.X","brightness":0-255}
+Set temperature:  POST http://172.30.32.1:8123/api/services/climate/set_temperature  {"entity_id":"climate.X","temperature":N}
+Set HVAC mode:    POST http://172.30.32.1:8123/api/services/climate/set_hvac_mode    {"entity_id":"climate.X","hvac_mode":"cool|heat|auto|dry|off"}
+Get entity state: GET  http://172.30.32.1:8123/api/states/ENTITY_ID
+List all states:  GET  http://172.30.32.1:8123/api/states  (use sparingly)
+
+### Workflow for every device command
+1. memory_recall("device name") to get entity_id
+2. http_request to HA API with that entity_id
+3. Report the result concisely
+TOOLSEOF
+
+# ==============================================================
+# USER.md — home context
+# ==============================================================
+cat > "${WS}/USER.md" << 'USEREOF'
+## Home context
+- Owner: Yousef
+- Location: Al Khobar, Saudi Arabia (AST, UTC+3)
+- Platform: Home Assistant Green
+
+## Quick reference
+- "study lights" = light.study_ceiling_lamps (group of 8 ceiling lights)
+- "bedroom lights" = light.bedroom (left + right bedside)
+- "study AC" = climate.room_air_conditioner
+- "master bedroom AC" = climate.gr_acunit_6400_02_608d
+- "living room AC" = climate.gr_acunit_6400_02_10b6
+- All entity mappings are in memory (use memory_recall)
+USEREOF
+
+# ==============================================================
+# HA Skill with callable tools
+# ==============================================================
+cat > "${WS}/skills/ha/SKILL.md" << SKILLEOF
+---
+name: "ha"
+description: "Home Assistant device control"
+version: "1.0.0"
+tags: ["home", "automation", "iot"]
+---
+
+# Home Assistant Control
+
+Control lights, climate, and query device states via the HA REST API.
+
+Entity IDs are stored in agent memory. Use memory_recall to look them up.
+
+[[tools]]
+name = "light_on"
+description = "Turn on a light. Provide the entity_id (e.g. light.living_room)."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/light/turn_on"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+
+[[tools]]
+name = "light_off"
+description = "Turn off a light. Provide the entity_id."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/light/turn_off"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+
+[[tools]]
+name = "set_temperature"
+description = "Set AC/climate temperature. Provide entity_id and temperature."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/climate/set_temperature"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+
+[[tools]]
+name = "get_state"
+description = "Get current state of any HA entity. Provide the full entity_id."
+kind = "http"
+method = "GET"
+url = "http://172.30.32.1:8123/api/states/{entity_id}"
+headers = {"Authorization": "Bearer ${HA_TOKEN}"}
+
+[[tools]]
+name = "list_entities"
+description = "List all HA entities and their states. Use sparingly — large response."
+kind = "http"
+method = "GET"
+url = "http://172.30.32.1:8123/api/states"
+headers = {"Authorization": "Bearer ${HA_TOKEN}"}
 SKILLEOF
+
+# ==============================================================
+# MEMORY_SNAPSHOT.md — pre-seeded entity knowledge
+# ==============================================================
+cat > "${WS}/MEMORY_SNAPSHOT.md" << 'MEMEOF'
+### entity_study_ceiling_lamps
+
+light.study_ceiling_lamps — group of 8 ceiling lights in the study
+
+### entity_study_spotlights_left
+
+light.study_spotlights_left
+
+### entity_study_spotlights_right
+
+light.study_spotlights_right
+
+### entity_living_room
+
+light.living_room
+
+### entity_bedroom
+
+light.bedroom — group containing light.left_bedside and light.right_bedside
+
+### entity_garden_lights
+
+light.garden_lights — outdoor garden
+
+### entity_nursery_lamp
+
+light.nursery_ceiling_lamp
+
+### entity_master_bathroom_left
+
+light.master_bathroom_light_left
+
+### entity_master_bathroom_right
+
+light.master_bathroom_light_right
+
+### entity_floor_lamp
+
+light.bedroom_repeater_lamp_switch — bedroom floor lamp
+
+### entity_olive_tree_lights
+
+light.olive_tree_lights — group of 3 olive tree lights in living room
+
+### entity_stairs_night_light
+
+light.downstairs_switch_2_left — stairs/downstairs night light
+
+### entity_upstairs_light
+
+light.downstairs_switch_right
+
+### entity_under_stairs
+
+light.downstairs_switch_left
+
+### entity_monitor_lights
+
+light.monitor_lights — study desk monitors
+
+### entity_tv_lights
+
+light.tv_lights — group: light.tv_1, light.tv_2, light.tv_3
+
+### entity_all_lights
+
+light.all_lights — all 43 lights
+
+### entity_study_ac
+
+climate.room_air_conditioner — study room AC
+
+### entity_master_bedroom_ac
+
+climate.gr_acunit_6400_02_608d — master bedroom AC
+
+### entity_living_room_ac
+
+climate.gr_acunit_6400_02_10b6 — living room / downstairs AC
+
+### entity_majlis_ac
+
+climate.gr_acunit_6400_02_7a25 — majlis AC
+
+### entity_hall_ac
+
+climate.hall_ac
+
+### entity_entrance_hall_ac
+
+climate.entrance_hall_ac
+
+### entity_food_area_ac
+
+climate.food_area_ac
+
+### entity_nursery_ac
+
+climate.nursery — nursery AC
+
+### entity_weather
+
+weather.pirateweather — local weather data
+
+### user_language_preference
+
+Yousef communicates in English and Arabic. Match his language.
+
+### home_location
+
+Al Khobar, Saudi Arabia. Timezone AST (UTC+3).
+MEMEOF
 
 bashio::log.info "Ready | ${DEFAULT_MODEL} + ${COMPLEX_MODEL}"
 
 # --- Session clear on version change ---
-VF="${CONFIG_DIR}/workspace/.last_version"
+VF="${WS}/.last_version"
 LV=""; [ -f "$VF" ] && LV="$(cat $VF)"
 if [ "$LV" != "${ADDON_VERSION}" ]; then
     bashio::log.info "Clearing sessions (${LV} -> ${ADDON_VERSION})"
