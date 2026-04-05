@@ -141,8 +141,8 @@ You are Claw, a home automation assistant. You help the user control their smart
 - When you learn something new about the home (a new device, a preference, a pattern), save it with memory_store using category "core" so you remember it next time.
 
 ## Safety
-- Allowed domains: light, climate, input_boolean, scene, script
-- Blocked (never call): lock, alarm_control_panel, cover, siren, camera, switch
+- Allowed domains: light, climate, cover, input_boolean, scene, script
+- Blocked (never call): lock, alarm_control_panel, siren, camera, switch
 - If asked to control a blocked domain: "That's outside my scope. Use the HA app."
 - Ask before: temperature change >5°C, controlling >3 devices, nighttime actions (23:00–06:00)
 
@@ -170,6 +170,9 @@ Turn off light:   POST http://172.30.32.1:8123/api/services/light/turn_off    {"
 Set brightness:   POST http://172.30.32.1:8123/api/services/light/turn_on     {"entity_id":"light.X","brightness":0-255}
 Set temperature:  POST http://172.30.32.1:8123/api/services/climate/set_temperature  {"entity_id":"climate.X","temperature":N}
 Set HVAC mode:    POST http://172.30.32.1:8123/api/services/climate/set_hvac_mode    {"entity_id":"climate.X","hvac_mode":"cool|heat|auto|dry|off"}
+Open curtain:     POST http://172.30.32.1:8123/api/services/cover/open_cover       {"entity_id":"cover.X"}
+Close curtain:    POST http://172.30.32.1:8123/api/services/cover/close_cover      {"entity_id":"cover.X"}
+Stop curtain:     POST http://172.30.32.1:8123/api/services/cover/stop_cover       {"entity_id":"cover.X"}
 Get entity state: GET  http://172.30.32.1:8123/api/states/ENTITY_ID
 List all states:  GET  http://172.30.32.1:8123/api/states  (use sparingly)
 
@@ -194,6 +197,8 @@ cat > "${WS}/USER.md" << 'USEREOF'
 - "study AC" = climate.room_air_conditioner
 - "master bedroom AC" = climate.gr_acunit_6400_02_608d
 - "living room AC" = climate.gr_acunit_6400_02_10b6
+- "master bedroom curtains" = cover.master_bedroom_curtains
+- 7 curtains total (master bedroom, FA blackout/chiffon, hall blackout/chiffon, EH blackout/chiffon)
 - All entity mappings are in memory (use memory_recall)
 USEREOF
 
@@ -245,6 +250,30 @@ kind = "http"
 method = "GET"
 url = "http://172.30.32.1:8123/api/states/{entity_id}"
 headers = {"Authorization": "Bearer ${HA_TOKEN}"}
+
+[[tools]]
+name = "open_cover"
+description = "Open a curtain/cover. Provide the entity_id (e.g. cover.master_bedroom_curtains)."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/cover/open_cover"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+
+[[tools]]
+name = "close_cover"
+description = "Close a curtain/cover. Provide the entity_id."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/cover/close_cover"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+
+[[tools]]
+name = "stop_cover"
+description = "Stop a curtain/cover mid-movement. Provide the entity_id."
+kind = "http"
+method = "POST"
+url = "http://172.30.32.1:8123/api/services/cover/stop_cover"
+headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
 
 [[tools]]
 name = "list_entities"
@@ -362,6 +391,34 @@ climate.nursery — nursery AC
 ### entity_weather
 
 weather.pirateweather — local weather data
+
+### entity_master_bedroom_curtains
+
+cover.master_bedroom_curtains — master bedroom curtains
+
+### entity_blackout_fa_curtain
+
+cover.blackout_fa_curtain — family area blackout curtain
+
+### entity_chiffon_fa_curtain
+
+cover.chiffon_fa_curtain — family area chiffon curtain
+
+### entity_blackout_hall_curtain
+
+cover.blackout_hall_curtain — hall blackout curtain
+
+### entity_chiffon_hall_curtain
+
+cover.chiffon_hall_curtain — hall chiffon curtain
+
+### entity_chiffon_eh_curtain
+
+cover.chiffon_eh_curtain — entrance hall chiffon curtain
+
+### entity_blackout_eh_curtain
+
+cover.blackout_eh_curtain — entrance hall blackout curtain
 
 ### user_language_preference
 
