@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.0.1"
+ADDON_VERSION="2.1.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Write helper scripts ---
@@ -64,6 +64,21 @@ cat > /usr/local/bin/ha-state << SCRIPT
 #!/bin/sh
 # Usage: ha-state <entity_id>
 curl -s -H "Authorization: Bearer ${HA_TOKEN}" "${HA_URL}/states/\$1" | jq '{entity_id: .entity_id, state: .state, friendly_name: .attributes.friendly_name, temperature: .attributes.temperature, current_temperature: .attributes.current_temperature}'
+SCRIPT
+
+cat > /usr/local/bin/ha-logbook << SCRIPT
+#!/bin/sh
+# Usage: ha-logbook [entity_id] — last 24h of events, optionally filtered
+if [ -n "\$1" ]; then
+    curl -s -H "Authorization: Bearer ${HA_TOKEN}" "${HA_URL}/logbook/$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)?entity=\$1&end_time=$(date -u +%Y-%m-%dT%H:%M:%S)" | jq -r '.[] | "\(.when): \(.name) \(.message)"' 2>/dev/null || echo "Could not fetch logbook"
+else
+    curl -s -H "Authorization: Bearer ${HA_TOKEN}" "${HA_URL}/logbook/$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)" | jq -r '.[-20:] | .[] | "\(.when): \(.name) \(.message)"' 2>/dev/null || echo "Could not fetch logbook"
+fi
+SCRIPT
+
+cat > /usr/local/bin/ha-errors << SCRIPT
+#!/bin/sh
+curl -s -H "Authorization: Bearer ${HA_TOKEN}" "${HA_URL}/error_log" | tail -30
 SCRIPT
 
 chmod +x /usr/local/bin/ha-*
@@ -322,6 +337,18 @@ name = "close_cover"
 description = "Close a curtain. Pass JSON: '{\"entity_id\":\"cover.X\"}'"
 kind = "shell"
 command = "ha-action cover/close_cover"
+
+[[tools]]
+name = "logbook"
+description = "Get recent device activity log. Optionally pass an entity_id to filter. Shows what happened and when."
+kind = "shell"
+command = "ha-logbook"
+
+[[tools]]
+name = "error_log"
+description = "Get HA system error log. Shows recent errors and warnings."
+kind = "shell"
+command = "ha-errors"
 SKILLEOF
 
 # ==============================================================
