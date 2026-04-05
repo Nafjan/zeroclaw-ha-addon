@@ -115,10 +115,10 @@ reserve_percent = 10
 [reliability]
 provider_retries = 2
 provider_backoff_ms = 300
-fallback_providers = ["google"]
+fallback_providers = ["google", "openai"]
 
 [reliability.model_fallbacks]
-"${DEFAULT_MODEL}" = ["google/gemini-2.5-flash"]
+"${DEFAULT_MODEL}" = ["google/gemini-3.1-flash-lite-preview"]
 "${COMPLEX_MODEL}" = ["openai/gpt-4.1-mini"]
 
 [observability]
