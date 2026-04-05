@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="1.5.0"
+ADDON_VERSION="2.0.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Credentials ---
@@ -133,64 +133,53 @@ TOMLEOF
 # SOUL.md — agent identity and behavioral rules ONLY
 # ==============================================================
 cat > "${WS}/SOUL.md" << 'SOULEOF'
-You are Claw, a home automation agent. You report REAL device states from API calls. You NEVER guess.
+You are Claw, a home automation agent. You ONLY report data from tool calls. You NEVER invent readings.
 
-## TIER 1 — ABSOLUTE RULES (never violate)
-- Every device state you report MUST come from an http_request response. No exceptions.
-- If http_request fails, say "Couldn't reach HA" — never fill in a guess.
-- Allowed: light, climate, cover, input_boolean, scene, script.
-- Blocked: lock, alarm_control_panel, siren, camera, switch.
+## RULES
+1. Every value you report MUST come from a tool call response. No exceptions.
+2. Use the ha.* skill tools — they return clean, filtered data. NEVER use raw http_request with GET /api/states (too large).
+3. For "which lights are on" → call ha.lights_on. For AC status → call ha.ac_status. For sensors → call ha.sensor_status.
+4. For actions: ha.light_on, ha.light_off, ha.set_temperature, ha.open_cover, ha.close_cover.
+5. For "turn off ALL lights" → use entity_id "light.all_lights" with ha.light_off.
+6. Keep replies short: 1-2 sentences. Match user's language.
+7. Allowed: light, climate, cover. Blocked: lock, alarm, siren, camera, switch.
+8. When you learn something new, store it with memory_store(category="core").
+9. If a tool fails, say "Couldn't reach HA" — never guess.
 
-## TIER 2 — OUTPUT FORMAT
-- Max 200 characters for simple actions.
-- Actions: "Study lights on." / "Bedroom AC set to 24°C."
-- Status: "Lights on: study ceiling, nursery, stairs night light."
-- Errors: "HA unreachable, try again."
-- NO explanations, NO caveats, NO "let me check" preamble. Just act and report.
-
-## TIER 3 — HOW TO ACT
-For CONTROL requests → POST to HA API immediately. One http_request per device.
-For STATUS requests → GET /api/states ONCE, filter the JSON by domain, report results.
-For UNKNOWN entity IDs → GET /api/states ONCE, search the response, save the mapping with memory_store.
-
-## WRONG (never do this):
-- "The study lights might be on" ← WRONG, call the API
-- "Let me check... I think..." ← WRONG, just call and report
-- Calling memory_recall 5 times in a loop ← WRONG, call GET /states once
-- "I don't have that data available" without trying the API ← WRONG
+## WRONG:
+- Inventing sensor values without calling ha.sensor_status
+- Saying "lights might be on" without calling ha.lights_on
+- Using http_request GET /api/states (532KB response, will be truncated and wrong)
 
 ## RIGHT:
-- User: "lights on?" → GET /states → filter light.* where state=on → "On: study ceiling, nursery."
-- User: "study AC temp?" → GET /states/climate.room_air_conditioner → "Study AC: 24°C, cool."
-- User: "turn off garden" → POST /services/light/turn_off {entity_id:light.garden_lights} → "Garden lights off."
-
-## LEARNING
-When you discover something new (entity ID, user preference, correction), save it:
-memory_store(key="descriptive_key", content="the fact", category="core")
+- "Which lights are on?" → call ha.lights_on → report the list
+- "Turn off everything" → call ha.light_off with {"entity_id":"light.all_lights"} → "All lights off."
+- "AC status?" → call ha.ac_status → report temps and modes
 SOULEOF
 
 # ==============================================================
 # TOOLS.md — how to use tools for HA control
 # ==============================================================
-cat > "${WS}/TOOLS.md" << TOOLSEOF
-## HA API Reference
+cat > "${WS}/TOOLS.md" << 'TOOLSEOF'
+## Available ha.* tools
 
-Base URL: http://172.30.32.1:8123/api
-Auth: Authorization: Bearer ${HA_TOKEN}
+STATUS QUERIES (return clean text, not raw JSON):
+- ha.lights_on — which lights are currently on
+- ha.ac_status — all AC temperatures and modes
+- ha.cover_status — curtain open/closed states
+- ha.sensor_status — soil moisture and temperature sensors
+- ha.get_entity — get one specific entity by ID
 
-CONTROL (POST, add Content-Type: application/json):
-/services/light/turn_on      {"entity_id":"light.X"}
-/services/light/turn_off     {"entity_id":"light.X"}
-/services/climate/set_temperature  {"entity_id":"climate.X","temperature":N}
-/services/climate/set_hvac_mode    {"entity_id":"climate.X","hvac_mode":"cool"}
-/services/cover/open_cover   {"entity_id":"cover.X"}
-/services/cover/close_cover  {"entity_id":"cover.X"}
+CONTROL ACTIONS (pass JSON body as argument):
+- ha.light_on '{"entity_id":"light.X"}'
+- ha.light_off '{"entity_id":"light.X"}'  (use light.all_lights for all)
+- ha.set_temperature '{"entity_id":"climate.X","temperature":N}'
+- ha.set_hvac_mode '{"entity_id":"climate.X","hvac_mode":"cool"}'
+- ha.open_cover '{"entity_id":"cover.X"}'
+- ha.close_cover '{"entity_id":"cover.X"}'
 
-QUERY (GET):
-/states              → all entities (use this for status questions)
-/states/ENTITY_ID    → single entity
-
-IMPORTANT: For "which lights are on", "temperature", "status" questions — just call GET /states ONCE. Don't call memory_recall in a loop.
+DO NOT use raw http_request with GET /api/states — it returns 532KB of data that will be truncated.
+Use ha.* tools instead — they return filtered, clean responses.
 TOOLSEOF
 
 # ==============================================================
@@ -219,80 +208,78 @@ USEREOF
 cat > "${WS}/skills/ha/SKILL.md" << SKILLEOF
 ---
 name: "ha"
-description: "Home Assistant device control"
-version: "1.0.0"
-tags: ["home", "automation", "iot"]
+description: "Home Assistant device control and status"
+version: "2.0.0"
+tags: ["home", "automation"]
 ---
 
 # Home Assistant Control
 
-Control lights, climate, and query device states via the HA REST API.
+[[tools]]
+name = "lights_on"
+description = "List which lights are currently ON. Returns only lit lights with friendly names."
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for l in states.light %}{% if l.state == \\\\\"on\\\\\" and l.entity_id != \\\\\"light.all_lights\\\\\" %}{{ l.name }}: {{ l.entity_id }}\\n{% endif %}{% endfor %}\"}'"
 
-Entity IDs are stored in agent memory. Use memory_recall to look them up.
+[[tools]]
+name = "ac_status"
+description = "Get status of all ACs/climate devices. Shows temperature and mode."
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for c in states.climate %}{% if c.state != \\\\\"unavailable\\\\\" %}{{ c.name }}: {{ c.state }}, set:{{ c.attributes.temperature }}°C, current:{{ c.attributes.current_temperature }}°C\\n{% endif %}{% endfor %}\"}'"
+
+[[tools]]
+name = "cover_status"
+description = "Get status of all curtains/covers. Shows open/closed state."
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for c in states.cover %}{{ c.name }}: {{ c.state }}\\n{% endfor %}\"}'"
+
+[[tools]]
+name = "sensor_status"
+description = "Get soil moisture and temperature sensors. For garden/plant monitoring."
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for s in states.sensor %}{% if \\\\\"soil\\\\\" in s.entity_id or \\\\\"moisture\\\\\" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\\n{% endif %}{% endfor %}\"}'"
 
 [[tools]]
 name = "light_on"
-description = "Turn on a light. Provide the entity_id (e.g. light.living_room)."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/light/turn_on"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+description = "Turn on a light. Pass entity_id as body: {\"entity_id\":\"light.X\"}"
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/light/turn_on' -d"
 
 [[tools]]
 name = "light_off"
-description = "Turn off a light. Provide the entity_id."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/light/turn_off"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+description = "Turn off a light. Pass entity_id as body: {\"entity_id\":\"light.X\"}. Use light.all_lights to turn off ALL lights."
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/light/turn_off' -d"
 
 [[tools]]
 name = "set_temperature"
-description = "Set AC/climate temperature. Provide entity_id and temperature."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/climate/set_temperature"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+description = "Set AC temperature. Body: {\"entity_id\":\"climate.X\",\"temperature\":N}"
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/climate/set_temperature' -d"
 
 [[tools]]
-name = "get_state"
-description = "Get current state of any HA entity. Provide the full entity_id."
-kind = "http"
-method = "GET"
-url = "http://172.30.32.1:8123/api/states/{entity_id}"
-headers = {"Authorization": "Bearer ${HA_TOKEN}"}
+name = "set_hvac_mode"
+description = "Set AC mode (cool/heat/auto/dry/off). Body: {\"entity_id\":\"climate.X\",\"hvac_mode\":\"cool\"}"
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/climate/set_hvac_mode' -d"
 
 [[tools]]
 name = "open_cover"
-description = "Open a curtain/cover. Provide the entity_id (e.g. cover.master_bedroom_curtains)."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/cover/open_cover"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+description = "Open curtain. Body: {\"entity_id\":\"cover.X\"}"
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/cover/open_cover' -d"
 
 [[tools]]
 name = "close_cover"
-description = "Close a curtain/cover. Provide the entity_id."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/cover/close_cover"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
+description = "Close curtain. Body: {\"entity_id\":\"cover.X\"}"
+kind = "shell"
+command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/cover/close_cover' -d"
 
 [[tools]]
-name = "stop_cover"
-description = "Stop a curtain/cover mid-movement. Provide the entity_id."
-kind = "http"
-method = "POST"
-url = "http://172.30.32.1:8123/api/services/cover/stop_cover"
-headers = {"Authorization": "Bearer ${HA_TOKEN}", "Content-Type": "application/json"}
-
-[[tools]]
-name = "list_entities"
-description = "List all HA entities and their states. Use sparingly — large response."
-kind = "http"
-method = "GET"
-url = "http://172.30.32.1:8123/api/states"
-headers = {"Authorization": "Bearer ${HA_TOKEN}"}
+name = "get_entity"
+description = "Get state of ONE specific entity by ID. Returns JSON with state and attributes."
+kind = "shell"
+command = "curl -s -H 'Authorization: Bearer ${HA_TOKEN}' 'http://172.30.32.1:8123/api/states/'"
 SKILLEOF
 
 # ==============================================================
