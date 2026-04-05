@@ -2,7 +2,7 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 # Static musl binary — no runtime dependencies needed
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates curl jq
 
 COPY zeroclaw-bin /usr/local/bin/zeroclaw
 RUN chmod +x /usr/local/bin/zeroclaw
