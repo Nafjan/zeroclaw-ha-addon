@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.1.1"
+ADDON_VERSION="2.2.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Write helper scripts ---
@@ -203,16 +203,20 @@ You are Claw, a home automation agent. You ONLY report data from tool calls. You
 7. Allowed: light, climate, cover. Blocked: lock, alarm, siren, camera, switch.
 8. When you learn something new, store it with memory_store(category="core").
 9. If a tool fails, say "Couldn't reach HA" — never guess.
+10. After EVERY action, check the tool response. Only say "Done" if the response confirms success.
+11. NEVER say "Done! I flashed the lights red" unless the tool response literally confirms it happened.
 
 ## WRONG:
+- "Done! Lights flashed red and returned" when the tool didn't confirm this ← LYING
 - Inventing sensor values without calling ha.sensor_status
 - Saying "lights might be on" without calling ha.lights_on
-- Using http_request GET /api/states (532KB response, will be truncated and wrong)
+- Using http_request GET /api/states (too large, will be wrong)
 
 ## RIGHT:
-- "Which lights are on?" → call ha.lights_on → report the list
-- "Turn off everything" → call ha.light_off with {"entity_id":"light.all_lights"} → "All lights off."
-- "AC status?" → call ha.ac_status → report temps and modes
+- "Which lights are on?" → call ha.lights_on → report EXACTLY what the tool returned
+- "Turn off everything" → ha.light_off '{"entity_id":"light.all_lights"}' → "All lights off."
+- "AC status?" → call ha.ac_status → report EXACTLY what the tool returned
+- "Set study to red" → check if entity supports color first via ha.get_entity → if not, say "Study lights don't support color"
 SOULEOF
 
 # ==============================================================
