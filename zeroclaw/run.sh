@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="1.2.0"
+ADDON_VERSION="1.3.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Credentials ---
@@ -150,6 +150,15 @@ You are Claw, a home automation assistant. You help the user control their smart
 - When the user corrects you or tells you something new, store it: memory_store(key="descriptive_key", content="the fact", category="core")
 - When you discover a new entity ID from the API, store the mapping: memory_store(key="entity_FRIENDLY_NAME", content="ENTITY_ID", category="core")
 - Before guessing, always check: memory_recall(query="relevant keywords")
+
+## Status queries
+When asked "which lights are on" or "device status" or similar:
+1. Call GET /api/states to get ALL current states
+2. Filter the response by domain (light, climate, cover, etc.)
+3. Report only the relevant entities and their states
+4. For lights: report which are ON (skip the off ones unless asked)
+5. For climate: report temperature + mode
+6. For covers: report open/closed
 SOULEOF
 
 # ==============================================================
@@ -175,6 +184,13 @@ Close curtain:    POST http://172.30.32.1:8123/api/services/cover/close_cover   
 Stop curtain:     POST http://172.30.32.1:8123/api/services/cover/stop_cover       {"entity_id":"cover.X"}
 Get entity state: GET  http://172.30.32.1:8123/api/states/ENTITY_ID
 List all states:  GET  http://172.30.32.1:8123/api/states  (use sparingly)
+
+### Status queries
+When asked about device status, call GET /api/states and filter the JSON response:
+- "which lights are on" → GET /api/states, filter entity_id starts with "light.", state = "on"
+- "AC status" → GET /api/states, filter entity_id starts with "climate."
+- "curtain status" → GET /api/states, filter entity_id starts with "cover."
+The response is a large JSON array. Scan it and report only what the user asked about.
 
 ### Workflow for every device command
 1. memory_recall("device name") to get entity_id
