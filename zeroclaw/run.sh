@@ -2,8 +2,11 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.0.0"
+ADDON_VERSION="2.0.1"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
+
+# --- Write helper scripts ---
+mkdir -p /usr/local/bin
 
 # --- Credentials ---
 OPENROUTER_KEY="$(bashio::config 'openrouter_api_key')"
@@ -27,6 +30,43 @@ done
 CONFIG_DIR="/data"
 WS="${CONFIG_DIR}/workspace"
 mkdir -p "${WS}/skills/ha"
+
+# --- Write HA helper scripts ---
+HA_URL="http://172.30.32.1:8123/api"
+
+cat > /usr/local/bin/ha-lights-on << SCRIPT
+#!/bin/sh
+curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" -H "Content-Type: application/json" "${HA_URL}/template" -d '{"template":"{% for l in states.light %}{% if l.state == \"on\" and l.entity_id != \"light.all_lights\" %}{{ l.name }}: {{ l.entity_id }}\n{% endif %}{% endfor %}"}'
+SCRIPT
+
+cat > /usr/local/bin/ha-ac-status << SCRIPT
+#!/bin/sh
+curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" -H "Content-Type: application/json" "${HA_URL}/template" -d '{"template":"{% for c in states.climate %}{% if c.state != \"unavailable\" %}{{ c.name }}: {{ c.state }}, set:{{ c.attributes.temperature }}C, now:{{ c.attributes.current_temperature }}C\n{% endif %}{% endfor %}"}'
+SCRIPT
+
+cat > /usr/local/bin/ha-cover-status << SCRIPT
+#!/bin/sh
+curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" -H "Content-Type: application/json" "${HA_URL}/template" -d '{"template":"{% for c in states.cover %}{{ c.name }}: {{ c.state }}\n{% endfor %}"}'
+SCRIPT
+
+cat > /usr/local/bin/ha-sensors << SCRIPT
+#!/bin/sh
+curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" -H "Content-Type: application/json" "${HA_URL}/template" -d '{"template":"{% for s in states.sensor %}{% if \"soil\" in s.entity_id or \"moisture\" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\n{% endif %}{% endfor %}"}'
+SCRIPT
+
+cat > /usr/local/bin/ha-action << SCRIPT
+#!/bin/sh
+# Usage: ha-action <service_path> <json_body>
+curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" -H "Content-Type: application/json" "${HA_URL}/services/\$1" -d "\$2"
+SCRIPT
+
+cat > /usr/local/bin/ha-state << SCRIPT
+#!/bin/sh
+# Usage: ha-state <entity_id>
+curl -s -H "Authorization: Bearer ${HA_TOKEN}" "${HA_URL}/states/\$1" | jq '{entity_id: .entity_id, state: .state, friendly_name: .attributes.friendly_name, temperature: .attributes.temperature, current_temperature: .attributes.current_temperature}'
+SCRIPT
+
+chmod +x /usr/local/bin/ha-*
 
 # ==============================================================
 # config.toml
@@ -205,81 +245,83 @@ USEREOF
 # ==============================================================
 # HA Skill with callable tools
 # ==============================================================
-cat > "${WS}/skills/ha/SKILL.md" << SKILLEOF
+cat > "${WS}/skills/ha/SKILL.md" << 'SKILLEOF'
 ---
 name: "ha"
-description: "Home Assistant device control and status"
-version: "2.0.0"
+description: "Home Assistant device control and status queries"
+version: "2.0.1"
 tags: ["home", "automation"]
 ---
 
 # Home Assistant Control
 
+Use these tools for ALL device interactions. They return clean, filtered data.
+
 [[tools]]
 name = "lights_on"
-description = "List which lights are currently ON. Returns only lit lights with friendly names."
+description = "List which lights are currently ON. Returns light names and entity IDs."
 kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for l in states.light %}{% if l.state == \\\\\"on\\\\\" and l.entity_id != \\\\\"light.all_lights\\\\\" %}{{ l.name }}: {{ l.entity_id }}\\n{% endif %}{% endfor %}\"}'"
+command = "ha-lights-on"
 
 [[tools]]
 name = "ac_status"
-description = "Get status of all ACs/climate devices. Shows temperature and mode."
+description = "Get all AC/climate status: mode, set temperature, current temperature."
 kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for c in states.climate %}{% if c.state != \\\\\"unavailable\\\\\" %}{{ c.name }}: {{ c.state }}, set:{{ c.attributes.temperature }}°C, current:{{ c.attributes.current_temperature }}°C\\n{% endif %}{% endfor %}\"}'"
+command = "ha-ac-status"
 
 [[tools]]
 name = "cover_status"
-description = "Get status of all curtains/covers. Shows open/closed state."
+description = "Get all curtain/cover status: open or closed."
 kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for c in states.cover %}{{ c.name }}: {{ c.state }}\\n{% endfor %}\"}'"
+command = "ha-cover-status"
 
 [[tools]]
 name = "sensor_status"
-description = "Get soil moisture and temperature sensors. For garden/plant monitoring."
+description = "Get soil moisture and temperature sensors for garden monitoring."
 kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/template' -d '{\"template\": \"{% for s in states.sensor %}{% if \\\\\"soil\\\\\" in s.entity_id or \\\\\"moisture\\\\\" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\\n{% endif %}{% endfor %}\"}'"
-
-[[tools]]
-name = "light_on"
-description = "Turn on a light. Pass entity_id as body: {\"entity_id\":\"light.X\"}"
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/light/turn_on' -d"
-
-[[tools]]
-name = "light_off"
-description = "Turn off a light. Pass entity_id as body: {\"entity_id\":\"light.X\"}. Use light.all_lights to turn off ALL lights."
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/light/turn_off' -d"
-
-[[tools]]
-name = "set_temperature"
-description = "Set AC temperature. Body: {\"entity_id\":\"climate.X\",\"temperature\":N}"
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/climate/set_temperature' -d"
-
-[[tools]]
-name = "set_hvac_mode"
-description = "Set AC mode (cool/heat/auto/dry/off). Body: {\"entity_id\":\"climate.X\",\"hvac_mode\":\"cool\"}"
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/climate/set_hvac_mode' -d"
-
-[[tools]]
-name = "open_cover"
-description = "Open curtain. Body: {\"entity_id\":\"cover.X\"}"
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/cover/open_cover' -d"
-
-[[tools]]
-name = "close_cover"
-description = "Close curtain. Body: {\"entity_id\":\"cover.X\"}"
-kind = "shell"
-command = "curl -s -X POST -H 'Authorization: Bearer ${HA_TOKEN}' -H 'Content-Type: application/json' 'http://172.30.32.1:8123/api/services/cover/close_cover' -d"
+command = "ha-sensors"
 
 [[tools]]
 name = "get_entity"
-description = "Get state of ONE specific entity by ID. Returns JSON with state and attributes."
+description = "Get state of one specific entity. Pass entity_id as argument, e.g. 'climate.room_air_conditioner'"
 kind = "shell"
-command = "curl -s -H 'Authorization: Bearer ${HA_TOKEN}' 'http://172.30.32.1:8123/api/states/'"
+command = "ha-state"
+
+[[tools]]
+name = "light_on"
+description = "Turn on a light. Pass JSON body, e.g. '{\"entity_id\":\"light.living_room\"}'"
+kind = "shell"
+command = "ha-action light/turn_on"
+
+[[tools]]
+name = "light_off"
+description = "Turn off a light. Use light.all_lights for ALL. Pass JSON body."
+kind = "shell"
+command = "ha-action light/turn_off"
+
+[[tools]]
+name = "set_temperature"
+description = "Set AC temperature. Pass JSON: '{\"entity_id\":\"climate.X\",\"temperature\":24}'"
+kind = "shell"
+command = "ha-action climate/set_temperature"
+
+[[tools]]
+name = "set_hvac_mode"
+description = "Set AC mode. Pass JSON: '{\"entity_id\":\"climate.X\",\"hvac_mode\":\"cool\"}'"
+kind = "shell"
+command = "ha-action climate/set_hvac_mode"
+
+[[tools]]
+name = "open_cover"
+description = "Open a curtain. Pass JSON: '{\"entity_id\":\"cover.X\"}'"
+kind = "shell"
+command = "ha-action cover/open_cover"
+
+[[tools]]
+name = "close_cover"
+description = "Close a curtain. Pass JSON: '{\"entity_id\":\"cover.X\"}'"
+kind = "shell"
+command = "ha-action cover/close_cover"
 SKILLEOF
 
 # ==============================================================
