@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.1.0"
+ADDON_VERSION="2.1.1"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Write helper scripts ---
@@ -137,8 +137,11 @@ max_context_tokens = 12000
 
 [autonomy]
 level = "full"
-workspace_only = true
-max_actions_per_hour = 100
+workspace_only = false
+max_actions_per_hour = 200
+allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-action", "ha-state", "ha-logbook", "ha-errors", "curl", "jq", "cat", "echo", "ls", "grep", "head", "tail"]
+require_approval_for_medium_risk = false
+block_high_risk_commands = false
 
 [memory]
 backend = "sqlite"
