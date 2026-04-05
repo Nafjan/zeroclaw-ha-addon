@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.2.0"
+ADDON_VERSION="2.2.1"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Write helper scripts ---
@@ -178,8 +178,8 @@ provider_backoff_ms = 300
 fallback_providers = ["google", "openai"]
 
 [reliability.model_fallbacks]
-"moonshotai/kimi-k2.5" = ["openai/gpt-4.1-nano"]
-"${COMPLEX_MODEL}" = ["moonshotai/kimi-k2.5"]
+"google/gemini-3.1-flash-lite-preview" = ["openai/gpt-4.1-nano"]
+"${COMPLEX_MODEL}" = ["google/gemini-3.1-flash-lite-preview"]
 
 [observability]
 backend = "log"
