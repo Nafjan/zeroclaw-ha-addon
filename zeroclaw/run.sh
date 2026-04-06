@@ -2,7 +2,7 @@
 
 # ZeroClaw HAOS Add-on v1.2.0
 
-ADDON_VERSION="2.3.0"
+ADDON_VERSION="2.4.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # --- Write helper scripts ---
@@ -197,6 +197,8 @@ Output format: Plain text, max 200 chars. No markdown headers. No emoji. No expl
 Language: Match user (English or Arabic).
 
 ## Tool routing (follow exactly):
+
+ENTITY LOOKUP → memory_recall first. Entity mappings are pre-loaded. Example: memory_recall("stairs") returns light.downstairs_switch_2_left.
 
 STATUS question → call the matching ha.* query tool → relay its output verbatim:
 - lights → ha.lights_on
@@ -417,15 +419,19 @@ light.olive_tree_lights — group of 3 olive tree lights in living room
 
 ### entity_stairs_night_light
 
-light.downstairs_switch_2_left — stairs/downstairs night light
+light.downstairs_switch_2_left — stairs night light / downstairs night light
 
 ### entity_upstairs_light
 
-light.downstairs_switch_right
+light.downstairs_switch_right — upstairs light / stairs upstairs
 
-### entity_under_stairs
+### entity_under_stairs_light
 
-light.downstairs_switch_left
+light.downstairs_switch_left — under stairs light
+
+### stairs_lights
+
+Three stair-related lights: light.downstairs_switch_2_left (stairs night light), light.downstairs_switch_right (upstairs), light.downstairs_switch_left (under stairs)
 
 ### entity_monitor_lights
 
