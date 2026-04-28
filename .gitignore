@@ -1,0 +1,13 @@
+# Never commit private home data
+CONTEXT.md
+**/CONTEXT.md
+
+# Never commit secrets or credentials
+*.env
+.env*
+
+# Daily review logs (private, local only)
+reviews/
+
+# Build artifacts
+*.tar.gz
