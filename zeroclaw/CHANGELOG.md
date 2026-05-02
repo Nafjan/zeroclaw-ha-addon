@@ -1,5 +1,56 @@
 # Changelog
 
+## 3.1.0 (May 2026) — Creation skill, reverse triggers, test coverage
+
+**New behavior:** the agent can now propose new HA scenes and automations through
+the existing approval flow. The user owns every persistent change — nothing lands
+in `/config/scenes.yaml` or `/config/automations.yaml` until you reply `YES <id>`.
+
+### New features
+- **Creation skill (gated by `enable_creation_skill`, off by default).** Three new
+  helpers, all approval-gated:
+  - `ha-create-scene <id> '<name>' '<json states>'` → drafts a ticket, on approval
+    appends to `/config/scenes.yaml` and reloads HA.
+  - `ha-create-automation <alias> '<yaml>'` → yq-validated YAML (must include both
+    `trigger:` and `action:`), drafts ticket, on approval appends to
+    `/config/automations.yaml` and reloads HA.
+  - `ha-create-routine <name> '<json steps>'` → agent-side macro stored in
+    `/data/routines/`. Each step still routes through `ha-action-guarded` when the
+    routine runs, so policy still applies per step.
+- **`ha-apply-creation <id>`** — applies an approved creation ticket. Will refuse
+  unless the user's `YES <id>` reply already wrote the approval marker.
+- **`ha-run-routine <name>`** — invokes a saved routine.
+- **Reverse-trigger pattern documented.** `CREATION.md` (auto-generated only when
+  the skill is on) explains how to wire HA `rest_command` → ZeroClaw webhook so HA
+  automations can wake the agent for conditional reasoning.
+
+### Quality / infrastructure
+- **Policy engine extracted.** Decision logic moved out of the run.sh heredoc into
+  a pure shell function `lib/policy-decide.sh`. Same verdicts, no embedded
+  HA-token side effects, no file writes.
+- **36 bats unit tests** (`zeroclaw/tests/policy_decide.bats`) covering domain
+  defaults, hard-block deny list, mode tuning, extras precedence, climate delta,
+  bulk-action escalation, quiet hours edge cases, and bad input.
+- **GitHub Actions CI** (`.github/workflows/test.yml`) runs the bats suite and
+  shellcheck on every push and PR.
+- **Per-field config translations** (`zeroclaw/translations/en.yaml`). Every
+  add-on option now has a clear name and one-paragraph description in the HA
+  Configuration tab — directly addresses the "config is not clear" feedback from
+  v3.0.0 deployment.
+
+### Bug fixes & robustness
+- `policy-decide` now parses `temperature` from the action body via `jq` when
+  available and a `sed` fallback otherwise — survives minimal containers and is
+  testable without `jq` installed locally.
+- Bulk-action count is computed server-side (`jq`-based) and exported as
+  `POLICY_BULK_COUNT` rather than re-implementing JSON-array parsing in pure shell.
+
+### Notes
+- Creation skill stays **off by default**. Toggle `enable_creation_skill: true`
+  in add-on options after you've used v3.0 long enough to trust the policy gate.
+- The agent **never deletes** persistent HA objects (scenes, automations). Removal
+  is a manual edit of the YAML file or the HA UI — same as before.
+
 ## 3.0.0 (April 2026) — Foundation: smart, grounded, scheduled, safe
 
 **Breaking changes:** the agent can no longer call `ha-action` directly. All write actions
