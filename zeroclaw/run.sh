@@ -1,8 +1,9 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.0.0 — policy-gated, self-scheduling, audited
+# ZeroClaw HAOS Add-on v3.1.0 — adds creation skill + reverse triggers
+# (policy engine extracted into /opt/zeroclaw/lib/policy-decide.sh, bats-tested)
 
-ADDON_VERSION="3.0.0"
+ADDON_VERSION="3.1.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -212,8 +213,17 @@ POLEOF
 fi
 
 # ==============================================================
+# Install pure-function policy decider from /opt/zeroclaw/lib/
+# (covered by zeroclaw/tests/policy_decide.bats — see CI)
+# ==============================================================
+install -m 0755 /opt/zeroclaw/lib/policy-decide.sh /usr/local/bin/policy-decide
+
+# ==============================================================
 # ha-action-guarded — the policy-enforced action gate
 # The unguarded ha-action-raw is NOT in the agent's allowed_commands.
+# Decision logic lives in /usr/local/bin/policy-decide (pure shell,
+# unit-tested). This wrapper handles ticket apply, climate baseline
+# fetch, and execution/audit/Telegram side-effects.
 # ==============================================================
 cat > /usr/local/bin/ha-action-guarded << SCRIPT
 #!/bin/sh
@@ -226,14 +236,15 @@ cat > /usr/local/bin/ha-action-guarded << SCRIPT
 
 set -e
 
-POLICY_MODE_VAL="${POLICY_MODE}"
-POLICY_QUIET_CONFIRM_VAL="${POLICY_QUIET_CONFIRM}"
-POLICY_BULK_THRESHOLD_VAL="${POLICY_BULK_THRESHOLD}"
-POLICY_CLIMATE_DELTA_VAL="${POLICY_CLIMATE_DELTA}"
-QUIET_HOURS_VAL="${QUIET_HOURS}"
-EXTRA_DENY="${POLICY_EXTRA_DENY}"
-EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"
-EXTRA_ALLOW="${POLICY_EXTRA_ALLOW}"
+# Export policy environment so /usr/local/bin/policy-decide sees it.
+export POLICY_MODE="${POLICY_MODE}"
+export POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM}"
+export POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD}"
+export POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA}"
+export QUIET_HOURS="${QUIET_HOURS}"
+export EXTRA_DENY="${POLICY_EXTRA_DENY}"
+export EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"
+export EXTRA_ALLOW="${POLICY_EXTRA_ALLOW}"
 
 # --- Apply-ticket short circuit ---
 if [ "\$1" = "--apply-ticket" ]; then
@@ -259,99 +270,26 @@ DOMAIN=\${SERVICE%%/*}
 ACTION=\${SERVICE##*/}
 ENTITY=\$(echo "\$BODY" | jq -r '.entity_id // ""' 2>/dev/null)
 
-# --- Quick-fire pattern check (extras) ---
-match_glob() {
-    pat="\$1"; val="\$2"
-    case "\$val" in \$pat) return 0 ;; *) return 1 ;; esac
-}
-
-VERDICT=""
-
-# Extras: deny first, then allow, then confirm
-IFS=',' ; for pat in \$EXTRA_DENY; do
-    [ -n "\$pat" ] && match_glob "\$pat" "\$ENTITY" && VERDICT="deny:extra_deny:\$pat"
-done
-for pat in \$EXTRA_ALLOW; do
-    [ -n "\$pat" ] && [ -z "\$VERDICT" ] && match_glob "\$pat" "\$ENTITY" && VERDICT="allow:extra_allow"
-done
-for pat in \$EXTRA_CONFIRM; do
-    [ -n "\$pat" ] && [ -z "\$VERDICT" ] && match_glob "\$pat" "\$ENTITY" && VERDICT="confirm:extra_confirm"
-done
-unset IFS
-
-# --- Built-in deny list (always enforced) ---
-if [ -z "\$VERDICT" ]; then
-    case "\$DOMAIN" in
-        lock|alarm_control_panel|camera|device_tracker)
-            VERDICT="deny:hard_block:\$DOMAIN" ;;
-    esac
+# Bulk-action count: number of entity_ids in the body (server-side because
+# we don't want to JSON-parse arrays in the pure-function decider).
+BULK_COUNT=\$(echo "\$BODY" | jq -r '
+    if (.entity_id | type) == "array" then (.entity_id | length)
+    elif (.entity_id | type) == "string" then 1
+    else 0 end
+' 2>/dev/null)
+if [ -n "\$BULK_COUNT" ] && [ "\$BULK_COUNT" -gt 1 ]; then
+    export POLICY_BULK_COUNT="\$BULK_COUNT"
 fi
 
-# --- Domain defaults (mode-tuned) ---
-if [ -z "\$VERDICT" ]; then
-    case "\$DOMAIN" in
-        light|scene|script|input_boolean|input_number|input_select|media_player)
-            VERDICT="allow:default" ;;
-        climate)
-            VERDICT="climate_check" ;;
-        cover|switch)
-            if [ "\$POLICY_MODE_VAL" = "permissive" ]; then
-                VERDICT="allow:permissive"
-            else
-                VERDICT="confirm:default_\$DOMAIN"
-            fi ;;
-        *)
-            if [ "\$POLICY_MODE_VAL" = "strict" ]; then
-                VERDICT="deny:strict_unknown_domain:\$DOMAIN"
-            else
-                VERDICT="confirm:unknown_domain:\$DOMAIN"
-            fi ;;
-    esac
+# Climate baseline: live fetch from HA so the pure decider can compare.
+if [ "\$DOMAIN" = "climate" ] && [ "\$ACTION" = "set_temperature" ] && [ -n "\$ENTITY" ]; then
+    CUR=\$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
+        "${HA_URL}/states/\$ENTITY" 2>/dev/null | \
+        jq -r '.attributes.current_temperature // .attributes.temperature // empty')
+    [ -n "\$CUR" ] && export POLICY_CLIMATE_CURRENT="\$CUR"
 fi
 
-# --- Climate delta check ---
-if [ "\$VERDICT" = "climate_check" ]; then
-    if [ "\$ACTION" = "set_temperature" ]; then
-        TARGET=\$(echo "\$BODY" | jq -r '.temperature // empty')
-        CUR=\$(curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
-            "${HA_URL}/states/\$ENTITY" 2>/dev/null | \
-            jq -r '.attributes.current_temperature // .attributes.temperature // empty')
-        if [ -n "\$TARGET" ] && [ -n "\$CUR" ]; then
-            DELTA=\$(awk -v a="\$TARGET" -v b="\$CUR" 'BEGIN{d=a-b;if(d<0)d=-d;print int(d+0.5)}')
-            if [ "\$DELTA" -gt "\$POLICY_CLIMATE_DELTA_VAL" ]; then
-                VERDICT="confirm:climate_delta_\${DELTA}c"
-            else
-                VERDICT="allow:climate_within_delta"
-            fi
-        else
-            VERDICT="allow:climate_no_baseline"
-        fi
-    else
-        VERDICT="allow:climate_\${ACTION}"
-    fi
-fi
-
-# --- Quiet hours ---
-if [ "\$POLICY_QUIET_CONFIRM_VAL" = "true" ]; then
-    NOW_H=\$(date +%H)
-    QH_START=\$(echo "\$QUIET_HOURS_VAL" | cut -d- -f1 | cut -d: -f1 | sed 's/^0*//')
-    QH_END=\$(echo "\$QUIET_HOURS_VAL" | cut -d- -f2 | cut -d: -f1 | sed 's/^0*//')
-    [ -z "\$QH_START" ] && QH_START=0; [ -z "\$QH_END" ] && QH_END=0
-    NOW_H=\$(echo "\$NOW_H" | sed 's/^0*//'); [ -z "\$NOW_H" ] && NOW_H=0
-    IN_QUIET=0
-    if [ "\$QH_START" -gt "\$QH_END" ]; then
-        # spans midnight (23-06)
-        if [ "\$NOW_H" -ge "\$QH_START" ] || [ "\$NOW_H" -lt "\$QH_END" ]; then IN_QUIET=1; fi
-    else
-        if [ "\$NOW_H" -ge "\$QH_START" ] && [ "\$NOW_H" -lt "\$QH_END" ]; then IN_QUIET=1; fi
-    fi
-    if [ "\$IN_QUIET" = "1" ]; then
-        case "\$VERDICT" in
-            allow:*) VERDICT="confirm:quiet_hours_\${NOW_H}h" ;;
-        esac
-    fi
-fi
-
+VERDICT=\$(/usr/local/bin/policy-decide "\$DOMAIN" "\$ACTION" "\$ENTITY" "\$BODY")
 KIND=\${VERDICT%%:*}
 
 # --- Audit row + execute ---
@@ -586,6 +524,176 @@ Pending approvals: \${PENDING}
 WSEOF
 SCRIPT
 
+# ==============================================================
+# v3.1 — Creation skill helpers (gated on enable_creation_skill)
+# All three drafters write a creation ticket and exit 2; nothing
+# touches HA until ha-apply-creation runs against an approved marker.
+# ==============================================================
+cat > /usr/local/bin/ha-create-scene << SCRIPT
+#!/bin/sh
+# Usage: ha-create-scene '<scene_id>' '<friendly_name>' '<json_entity_states>'
+#   e.g. ha-create-scene movie_night 'Movie night' \\
+#        '{"light.living_room":{"state":"on","brightness":76}}'
+set -e
+[ "${ENABLE_CREATION}" != "true" ] && { echo "Creation skill is disabled. Enable in add-on options."; exit 1; }
+SID="\$1"; NAME="\$2"; STATES="\$3"
+[ -z "\$SID" ] || [ -z "\$NAME" ] || [ -z "\$STATES" ] && { echo "Usage: ha-create-scene <id> <name> <json_states>"; exit 1; }
+echo "\$STATES" | jq empty 2>/dev/null || { echo "ERROR: states must be valid JSON object"; exit 1; }
+
+UUID=\$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "\$RANDOM-\$RANDOM-\$\$")
+SHORT=\$(echo "\$UUID" | cut -c1-8)
+EXP=\$(( \$(date -u +%s) + 1800 ))
+TICKET="/data/pending/\${SHORT}.json"
+mkdir -p /data/pending
+SUMMARY="CREATE scene.\${SID} (\${NAME}) — \$(echo "\$STATES" | jq 'keys | length') entities"
+PAYLOAD=\$(jq -nc --arg sid "\$SID" --arg name "\$NAME" --argjson states "\$STATES" \\
+    '{kind:"scene",scene_id:\$sid,friendly_name:\$name,entities:\$states}')
+jq -nc \\
+  --arg uuid "\$SHORT" --arg svc "scene/create" --argjson p "\$PAYLOAD" \\
+  --arg sum "\$SUMMARY" --arg verdict "confirm:create_scene" \\
+  --argjson exp \$EXP --argjson cre \$(date -u +%s) \\
+  '{uuid:\$uuid,service:\$svc,payload:\$p,summary:\$sum,expires_at:\$exp,created_at:\$cre,verdict:\$verdict}' \\
+  > "\$TICKET"
+MSG="🆕 Create scene? (\${SHORT})
+\${SUMMARY}
+Reply  YES \${SHORT}  to create, or  NO \${SHORT}  to discard.
+Expires in 30 min."
+curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
+  --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
+/usr/local/bin/zc-audit-write confirm "scene/create" "\$PAYLOAD" "creation_ticket=\${SHORT}"
+echo "CONFIRM_PENDING ticket=\${SHORT} kind=create_scene"
+exit 2
+SCRIPT
+
+cat > /usr/local/bin/ha-create-automation << SCRIPT
+#!/bin/sh
+# Usage: ha-create-automation '<alias>' '<yaml_body>'
+#   yaml_body must start with 'trigger:' and 'action:' (HA automation YAML).
+#   Validated by yq before queueing.
+set -e
+[ "${ENABLE_CREATION}" != "true" ] && { echo "Creation skill is disabled. Enable in add-on options."; exit 1; }
+ALIAS="\$1"; YBODY="\$2"
+[ -z "\$ALIAS" ] || [ -z "\$YBODY" ] && { echo "Usage: ha-create-automation <alias> <yaml>"; exit 1; }
+
+# Validate YAML — HA automations need at minimum trigger + action.
+TMPF=\$(mktemp)
+printf 'alias: %s\\n%s\\n' "\$ALIAS" "\$YBODY" > "\$TMPF"
+if ! yq eval '.trigger and .action' "\$TMPF" 2>/dev/null | grep -q true; then
+    rm -f "\$TMPF"
+    echo "ERROR: YAML must include both 'trigger:' and 'action:' keys."; exit 1
+fi
+YAML_ESCAPED=\$(jq -Rs . < "\$TMPF")
+rm -f "\$TMPF"
+
+UUID=\$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "\$RANDOM-\$RANDOM-\$\$")
+SHORT=\$(echo "\$UUID" | cut -c1-8)
+EXP=\$(( \$(date -u +%s) + 1800 ))
+TICKET="/data/pending/\${SHORT}.json"
+mkdir -p /data/pending
+SUMMARY="CREATE automation '\${ALIAS}' (appends to /config/automations.yaml)"
+PAYLOAD=\$(jq -nc --arg al "\$ALIAS" --argjson y "\$YAML_ESCAPED" \\
+    '{kind:"automation",alias:\$al,yaml:\$y}')
+jq -nc \\
+  --arg uuid "\$SHORT" --arg svc "automation/create" --argjson p "\$PAYLOAD" \\
+  --arg sum "\$SUMMARY" --arg verdict "confirm:create_automation" \\
+  --argjson exp \$EXP --argjson cre \$(date -u +%s) \\
+  '{uuid:\$uuid,service:\$svc,payload:\$p,summary:\$sum,expires_at:\$exp,created_at:\$cre,verdict:\$verdict}' \\
+  > "\$TICKET"
+MSG="🆕 Create automation? (\${SHORT})
+\${SUMMARY}
+Reply  YES \${SHORT}  to create, or  NO \${SHORT}  to discard.
+Expires in 30 min."
+curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
+  --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
+/usr/local/bin/zc-audit-write confirm "automation/create" "\$PAYLOAD" "creation_ticket=\${SHORT}"
+echo "CONFIRM_PENDING ticket=\${SHORT} kind=create_automation"
+exit 2
+SCRIPT
+
+cat > /usr/local/bin/ha-create-routine << 'SCRIPT'
+#!/bin/sh
+# Usage: ha-create-routine '<name>' '<json_steps_array>'
+#   Routines are agent-side only — stored in /data/routines/, not sent to HA.
+#   The agent invokes them later by name. No approval needed (they don't
+#   touch HA until executed; each step still goes through ha-action-guarded).
+set -e
+NAME="$1"; STEPS="$2"
+[ -z "$NAME" ] || [ -z "$STEPS" ] && { echo "Usage: ha-create-routine <name> <json_steps>"; exit 1; }
+echo "$STEPS" | jq -e 'type=="array"' >/dev/null 2>&1 || { echo "ERROR: steps must be a JSON array"; exit 1; }
+mkdir -p /data/routines
+SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+F="/data/routines/${SAFE}.json"
+jq -n --arg n "$NAME" --argjson s "$STEPS" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{name:$n,steps:$s,created_at:$ts}' > "$F"
+echo "Routine '$NAME' saved. Invoke with: ha-run-routine '$NAME'"
+SCRIPT
+
+cat > /usr/local/bin/ha-run-routine << 'SCRIPT'
+#!/bin/sh
+# Usage: ha-run-routine '<name>'   — runs each step through ha-action-guarded.
+NAME="$1"
+[ -z "$NAME" ] && { echo "Usage: ha-run-routine <name>"; exit 1; }
+SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+F="/data/routines/${SAFE}.json"
+[ ! -f "$F" ] && { echo "ERROR: routine '$NAME' not found"; exit 1; }
+echo "Running routine: $NAME"
+jq -c '.steps[]' "$F" | while read -r step; do
+    SVC=$(echo "$step" | jq -r .service)
+    BODY=$(echo "$step" | jq -c .payload)
+    echo "  → $SVC"
+    /usr/local/bin/ha-action-guarded "$SVC" "$BODY" || echo "  (step failed or pending approval)"
+done
+SCRIPT
+
+cat > /usr/local/bin/ha-apply-creation << SCRIPT
+#!/bin/sh
+# Usage: ha-apply-creation <id8>
+# Apply an approved creation ticket — scene → /config/scenes.yaml,
+# automation → /config/automations.yaml + reload, routine → already saved.
+set -e
+[ "${ENABLE_CREATION}" != "true" ] && { echo "Creation skill is disabled."; exit 1; }
+UUID="\$1"
+MARKER="/data/approved/\${UUID}.marker"
+TICKET="/data/pending/\${UUID}.json"
+[ ! -f "\$MARKER" ] && { echo "ERROR: ticket \${UUID} not approved"; exit 1; }
+[ ! -f "\$TICKET" ] && { echo "ERROR: ticket \${UUID} missing"; exit 1; }
+
+KIND=\$(jq -r .payload.kind "\$TICKET")
+case "\$KIND" in
+  scene)
+    SID=\$(jq -r .payload.scene_id "\$TICKET")
+    NAME=\$(jq -r .payload.friendly_name "\$TICKET")
+    ENTITIES=\$(jq -c .payload.entities "\$TICKET")
+    SCENES_F="/config/scenes.yaml"
+    [ ! -f "\$SCENES_F" ] && echo "[]" > "\$SCENES_F"
+    # Append YAML scene entry. Use yq for safe merge.
+    NEW=\$(jq -nc --arg id "\$SID" --arg name "\$NAME" --argjson e "\$ENTITIES" \\
+          '{id:\$id,name:\$name,entities:\$e}')
+    yq eval -i ". += [\$NEW]" "\$SCENES_F"
+    curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" \\
+        "${HA_URL}/services/scene/reload" >/dev/null 2>&1 || true
+    /usr/local/bin/zc-audit-write apply "scene/create" "\$ENTITIES" "scene=\${SID};ticket=\${UUID}"
+    rm -f "\$MARKER" "\$TICKET"
+    echo "Scene '\${NAME}' (scene.\${SID}) created and reloaded." ;;
+  automation)
+    ALIAS=\$(jq -r .payload.alias "\$TICKET")
+    YAML=\$(jq -r .payload.yaml "\$TICKET")
+    AUTOS_F="/config/automations.yaml"
+    [ ! -f "\$AUTOS_F" ] && echo "[]" > "\$AUTOS_F"
+    TMP=\$(mktemp)
+    printf '%s\\n' "\$YAML" > "\$TMP"
+    yq eval -i ". += [load(\"\$TMP\")]" "\$AUTOS_F"
+    rm -f "\$TMP"
+    curl -s -X POST -H "Authorization: Bearer ${HA_TOKEN}" \\
+        "${HA_URL}/services/automation/reload" >/dev/null 2>&1 || true
+    /usr/local/bin/zc-audit-write apply "automation/create" "{\"alias\":\"\${ALIAS}\"}" "ticket=\${UUID}"
+    rm -f "\$MARKER" "\$TICKET"
+    echo "Automation '\${ALIAS}' created and reloaded." ;;
+  *)
+    echo "ERROR: unknown creation kind: \$KIND"; exit 1 ;;
+esac
+SCRIPT
+
 # Make every helper executable
 chmod +x /usr/local/bin/ha-* /usr/local/bin/zc-*
 
@@ -645,7 +753,7 @@ max_context_tokens = ${MAX_CONTEXT_TOKENS}
 level = "full"
 workspace_only = false
 max_actions_per_hour = ${MAX_ACTIONS_PER_HOUR}
-allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "zc-schedule", "zc-schedule-once", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-approve", "zc-reject", "curl", "jq", "cat", "echo", "ls", "grep", "head", "tail", "date"]
+allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "ha-create-scene", "ha-create-automation", "ha-create-routine", "ha-run-routine", "ha-apply-creation", "zc-schedule", "zc-schedule-once", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-approve", "zc-reject", "curl", "jq", "cat", "echo", "ls", "grep", "head", "tail", "date"]
 require_approval_for_medium_risk = false
 block_high_risk_commands = false
 
@@ -776,6 +884,124 @@ decide quickly. Keep summaries one-line and concrete.
 ## Lessons (auto-loaded from LESSONS.md if present)
 SOULEOF
 
+# v3.1: Creation skill paragraph appended only when enabled
+if [ "${ENABLE_CREATION}" = "true" ]; then
+cat >> "${WS}/SOUL.md" << 'SOULEXT'
+
+## Creation skill (v3.1, enabled)
+You can propose new HA objects. Every creation is approval-gated and persistent
+(scenes append to /config/scenes.yaml, automations to /config/automations.yaml).
+- ha-create-scene <id> '<friendly name>' '<json entity_states>'
+- ha-create-automation <alias> '<yaml with trigger: and action: keys>'
+- ha-create-routine <name> '<json steps array>'   (agent-side macro)
+Each create-* helper returns CONFIRM_PENDING ticket=<id>. Tell the user the
+plain-English summary and ticket id. After they reply YES <id>:
+  1. zc-approve "<verbatim YES <id>>"
+  2. ha-apply-creation <id>     (for scene/automation; routines persist immediately)
+  3. Write a one-line outcome.
+See CREATION.md for templates and validation rules.
+SOULEXT
+fi
+
+# v3.1: CREATION.md skill doc (only when enabled — keeps prompt small otherwise)
+if [ "${ENABLE_CREATION}" = "true" ]; then
+cat > "${WS}/CREATION.md" << 'CREATEEOF'
+# Creation Skill (v3.1)
+
+You may draft three kinds of HA objects. All go through the standard approval
+ticket flow — nothing is created in HA until the user replies YES <id> and you
+call `ha-apply-creation <id>`.
+
+## 1. Scene — group of entity states activated by name
+Use when the user says: "create a scene called X that...".
+
+Template:
+```
+ha-create-scene <scene_id> '<friendly name>' '{
+  "light.living_room": {"state": "on", "brightness": 200},
+  "light.tv_lights":   {"state": "on", "brightness": 80},
+  "climate.living_room_ac": {"state": "cool", "temperature": 22}
+}'
+```
+Rules:
+- scene_id: lowercase + underscores only (e.g. `movie_night`, not `Movie Night`).
+- States must be valid JSON; the helper rejects malformed input before queueing.
+- After approval, the scene is callable via `scene.<scene_id>` in HA.
+
+## 2. Automation — trigger → action with optional condition
+Use when the user says: "every morning at 7 turn on study lights" or similar.
+
+Template:
+```
+ha-create-automation '<alias>' "trigger:
+  - platform: time
+    at: '07:00:00'
+condition:
+  - condition: time
+    weekday: [mon, tue, wed, thu, fri]
+action:
+  - service: light.turn_on
+    target:
+      entity_id: light.study_ceiling_lamps"
+```
+Rules:
+- YAML must contain BOTH `trigger:` and `action:` keys (validated by yq).
+- Use `service:` (not `action:`) inside the action list — that's HA's syntax.
+- For complex conditional + agent-evaluated automations, prefer the
+  reverse-trigger pattern (see below).
+
+## 3. Routine — agent-side macro (no HA persistence)
+Use for multi-step sequences that don't need HA's automation engine.
+
+Template:
+```
+ha-create-routine 'good_night' '[
+  {"service":"light/turn_off","payload":{"entity_id":"light.all_lights"}},
+  {"service":"climate/set_temperature","payload":{"entity_id":"climate.bedroom","temperature":21}},
+  {"service":"cover/close_cover","payload":{"entity_id":"cover.master_bedroom_curtains"}}
+]'
+```
+Then invoke later: `ha-run-routine 'good_night'` — each step runs through
+ha-action-guarded, so policy still applies per step.
+
+## Reverse-trigger pattern (HA fires → agent decides → asks user)
+For "every night at 11 IF any AC is on, ASK me before turning it off":
+1. Have HA call the ZeroClaw webhook at 23:00 with a structured message.
+2. The agent receives that message, calls zc-world-state to evaluate the
+   condition with current state, and drafts an action ticket if needed.
+3. User approves or denies in chat.
+
+The user must add this rest_command to /config/configuration.yaml ONCE:
+```yaml
+rest_command:
+  zeroclaw_message:
+    url: http://<addon-ip>:42617/webhook
+    method: POST
+    headers:
+      content-type: application/json
+    payload: '{"message": "{{ message }}"}'
+```
+Then any HA automation can wake the agent:
+```yaml
+trigger:
+  - platform: time
+    at: '23:00:00'
+action:
+  - service: rest_command.zeroclaw_message
+    data:
+      message: "23:00 check — any AC still on? Ask if so."
+```
+
+## Pitfalls
+- DO NOT call ha-apply-creation before the user approves — it will refuse.
+- DO NOT auto-deploy automations the user only said they "might" want.
+- Keep automations narrow and explainable — one trigger, one action, one alias.
+- If the user wants to delete a created automation, instruct them to remove it
+  from /config/automations.yaml manually. The agent does NOT delete persistent
+  HA objects (deletion is a prohibited action).
+CREATEEOF
+fi
+
 # Empty LESSONS.md (auto-hydrated by ZeroClaw on startup)
 [ ! -f "${WS}/LESSONS.md" ] && cat > "${WS}/LESSONS.md" << 'LESSEOF'
 # Lessons Learned (auto-prepended to every prompt)
@@ -846,7 +1072,7 @@ cat > "${WS}/skills/ha/SKILL.md" << 'SKILLEOF'
 ---
 name: "ha"
 description: "Home Assistant device control — read-only queries and policy-gated actions"
-version: "3.0.0"
+version: "3.1.0"
 tags: ["home", "automation", "policy"]
 ---
 
@@ -958,6 +1184,42 @@ description = "Bridge a user 'NO <id>' message. Pass the verbatim user message."
 kind = "shell"
 command = "zc-reject"
 SKILLEOF
+
+# v3.1: append creation tools to the ha skill only when the feature is on
+if [ "${ENABLE_CREATION}" = "true" ]; then
+cat >> "${WS}/skills/ha/SKILL.md" << 'CRSKILLEOF'
+
+[[tools]]
+name = "create_scene"
+description = "Draft a new HA scene. Args: <scene_id> '<friendly name>' '<json entity_states>'. Returns CONFIRM_PENDING ticket=<id8>; relay it to user. After 'YES <id>' approval: zc.approve then ha.apply_creation <id>."
+kind = "shell"
+command = "ha-create-scene"
+
+[[tools]]
+name = "create_automation"
+description = "Draft a new HA automation. Args: <alias> '<yaml with trigger: and action: keys>'. Returns CONFIRM_PENDING ticket=<id8>. yq validates the YAML before queueing."
+kind = "shell"
+command = "ha-create-automation"
+
+[[tools]]
+name = "create_routine"
+description = "Save an agent-side macro of action steps. Args: <name> '<json array of {service,payload}>'. No approval — but each step still goes through ha-action-guarded when run."
+kind = "shell"
+command = "ha-create-routine"
+
+[[tools]]
+name = "run_routine"
+description = "Run a previously-saved routine by name. Each step goes through ha-action-guarded."
+kind = "shell"
+command = "ha-run-routine"
+
+[[tools]]
+name = "apply_creation"
+description = "Apply an APPROVED creation ticket. Args: <id8>. Persists scene → /config/scenes.yaml or automation → /config/automations.yaml then reloads HA."
+kind = "shell"
+command = "ha-apply-creation"
+CRSKILLEOF
+fi
 
 # ==============================================================
 # MEMORY_SNAPSHOT.md — preserved entity knowledge
