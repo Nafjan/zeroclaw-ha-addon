@@ -1,9 +1,9 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.0 — adds creation skill + reverse triggers
+# ZeroClaw HAOS Add-on v3.1.1 — Telegram inline-keyboard approval chips
 # (policy engine extracted into /opt/zeroclaw/lib/policy-decide.sh, bats-tested)
 
-ADDON_VERSION="3.1.0"
+ADDON_VERSION="3.1.1"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -218,6 +218,183 @@ fi
 # ==============================================================
 install -m 0755 /opt/zeroclaw/lib/policy-decide.sh /usr/local/bin/policy-decide
 
+# Allowed-user list for the callback-query watcher (so it can verify
+# inline-keyboard taps come from a real owner, not a randomer).
+mkdir -p /data
+echo "${TELEGRAM_USERS}" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$' > /data/.tg_users || true
+
+# ==============================================================
+# tg-send-approval — render a Telegram message with inline-keyboard
+# chips ([✅ Approve] / [❌ Reject] / [💬 Discuss]) and persist the
+# returned message_id back into the ticket so the callback watcher
+# can edit-in-place after the user taps a chip.
+# ==============================================================
+cat > /usr/local/bin/tg-send-approval << SCRIPT
+#!/bin/sh
+# Usage: tg-send-approval <ticket_short_id> "<text>"
+set -e
+SHORT="\$1"; TEXT="\$2"
+[ -z "\$SHORT" ] || [ -z "\$TEXT" ] && { echo "Usage: tg-send-approval <id8> <text>"; exit 1; }
+TICKET="/data/pending/\${SHORT}.json"
+[ ! -f "\$TICKET" ] && { echo "ERROR: ticket missing"; exit 1; }
+
+# 2 rows: row 1 has approve+reject, row 2 has discuss.
+KEYBOARD=\$(jq -nc --arg id "\$SHORT" '{
+  inline_keyboard: [
+    [
+      {text: "✅ Approve", callback_data: ("zcv1:approve:" + \$id)},
+      {text: "❌ Reject",  callback_data: ("zcv1:reject:"  + \$id)}
+    ],
+    [
+      {text: "💬 Discuss", callback_data: ("zcv1:discuss:" + \$id)}
+    ]
+  ]
+}')
+
+RESP=\$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
+  -H "Content-Type: application/json" \\
+  -d "\$(jq -nc --arg cid "${FIRST_USER}" --arg t "\$TEXT" --argjson kb "\$KEYBOARD" \\
+        '{chat_id:\$cid, text:\$t, reply_markup:\$kb}')" \\
+  2>/dev/null)
+
+MID=\$(echo "\$RESP" | jq -r '.result.message_id // empty')
+if [ -n "\$MID" ]; then
+    # Atomic-ish update: rewrite ticket with message_id appended.
+    TMP=\$(mktemp)
+    jq --argjson m "\$MID" '. + {tg_message_id:\$m}' "\$TICKET" > "\$TMP" && mv "\$TMP" "\$TICKET"
+fi
+SCRIPT
+
+# ==============================================================
+# tg-callback-watcher — long-polls Telegram for callback_query
+# events from the inline-keyboard chips and applies tickets directly.
+# Validates from.id against /data/.tg_users so a bot DM from a stranger
+# can't approve anything.
+#
+# Wire format: callback_data = "zcv1:<verb>:<id8>" where verb is one
+# of approve|reject|discuss.
+# ==============================================================
+cat > /usr/local/bin/tg-callback-watcher << SCRIPT
+#!/bin/sh
+set -u
+TOKEN="${TELEGRAM_TOKEN}"
+OFFSET_F="/data/.tg_offset"
+USERS_F="/data/.tg_users"
+GW="${GW}"
+[ -f "\$OFFSET_F" ] || echo 0 > "\$OFFSET_F"
+
+answer_cb() {
+    cb_id="\$1"; text="\$2"
+    curl -s -X POST "https://api.telegram.org/bot\${TOKEN}/answerCallbackQuery" \\
+        --data-urlencode "callback_query_id=\$cb_id" \\
+        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+}
+
+edit_msg() {
+    chat_id="\$1"; msg_id="\$2"; new_text="\$3"
+    # Strip the inline keyboard by passing reply_markup={} on edit.
+    curl -s -X POST "https://api.telegram.org/bot\${TOKEN}/editMessageText" \\
+        -H "Content-Type: application/json" \\
+        -d "\$(jq -nc --arg c "\$chat_id" --argjson m "\$msg_id" --arg t "\$new_text" \\
+              '{chat_id:\$c, message_id:\$m, text:\$t}')" >/dev/null 2>&1 || true
+}
+
+send_msg() {
+    chat_id="\$1"; text="\$2"
+    curl -s -X POST "https://api.telegram.org/bot\${TOKEN}/sendMessage" \\
+        --data-urlencode "chat_id=\$chat_id" \\
+        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+}
+
+is_allowed_user() {
+    uid="\$1"
+    [ ! -f "\$USERS_F" ] && return 1
+    grep -Fx "\$uid" "\$USERS_F" >/dev/null 2>&1
+}
+
+while true; do
+    OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || echo 0)
+    # Long-poll up to 25s. allowed_updates restricts to callback_query
+    # so we don't fight ZeroClaw's own message channel for normal text.
+    RESP=\$(curl -s --max-time 30 \\
+        "https://api.telegram.org/bot\${TOKEN}/getUpdates?offset=\${OFFSET}&timeout=25&allowed_updates=%5B%22callback_query%22%5D" \\
+        2>/dev/null)
+    OK=\$(echo "\$RESP" | jq -r '.ok // false' 2>/dev/null)
+    if [ "\$OK" != "true" ]; then
+        sleep 5
+        continue
+    fi
+
+    NEW_OFFSET=\$(echo "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ] && echo \$((NEW_OFFSET + 1)) > "\$OFFSET_F"
+
+    echo "\$RESP" | jq -c '.result[]?' 2>/dev/null | while read -r upd; do
+        CB_ID=\$(echo "\$upd" | jq -r '.callback_query.id // empty')
+        DATA=\$(echo "\$upd"  | jq -r '.callback_query.data // empty')
+        FROM=\$(echo "\$upd"  | jq -r '.callback_query.from.id // empty')
+        FROM_NAME=\$(echo "\$upd" | jq -r '.callback_query.from.first_name // "user"')
+        CHAT_ID=\$(echo "\$upd" | jq -r '.callback_query.message.chat.id // empty')
+        MSG_ID=\$(echo "\$upd"  | jq -r '.callback_query.message.message_id // empty')
+        [ -z "\$CB_ID" ] && continue
+
+        if ! is_allowed_user "\$FROM"; then
+            answer_cb "\$CB_ID" "Not authorized."
+            continue
+        fi
+        case "\$DATA" in
+            zcv1:*) ;;
+            *) answer_cb "\$CB_ID" "Unknown chip."; continue ;;
+        esac
+        VERB=\$(echo "\$DATA" | cut -d: -f2)
+        SHORT=\$(echo "\$DATA" | cut -d: -f3)
+        TICKET="/data/pending/\${SHORT}.json"
+
+        if [ ! -f "\$TICKET" ]; then
+            answer_cb "\$CB_ID" "Ticket expired or already actioned."
+            [ -n "\$MSG_ID" ] && edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"
+            continue
+        fi
+
+        SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        SVC=\$(jq -r '.service // ""' "\$TICKET")
+        KIND=\$(jq -r '.payload.kind // "action"' "\$TICKET")
+
+        case "\$VERB" in
+          approve)
+              mkdir -p /data/approved
+              touch "/data/approved/\${SHORT}.marker"
+              # Apply path depends on whether this is a creation ticket.
+              if [ "\$KIND" = "scene" ] || [ "\$KIND" = "automation" ]; then
+                  OUT=\$(/usr/local/bin/ha-apply-creation "\$SHORT" 2>&1 || echo "(apply failed)")
+              else
+                  OUT=\$(/usr/local/bin/ha-action-guarded --apply-ticket "\$SHORT" 2>&1 || echo "(apply failed)")
+              fi
+              answer_cb "\$CB_ID" "Applied."
+              edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
+\${OUT}"
+              # Wake the agent so it can log/learn from the outcome.
+              curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
+                  -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" '{message:\$m}')" \\
+                  >/dev/null 2>&1 || true
+              ;;
+          reject)
+              rm -f "\$TICKET" "/data/approved/\${SHORT}.marker"
+              answer_cb "\$CB_ID" "Rejected."
+              edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"
+              ;;
+          discuss)
+              answer_cb "\$CB_ID" "Tell me more."
+              send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"
+              # Don't delete the ticket: discussion may end with approval.
+              ;;
+          *)
+              answer_cb "\$CB_ID" "Unknown verb: \$VERB"
+              ;;
+        esac
+    done
+done
+SCRIPT
+
 # ==============================================================
 # ha-action-guarded — the policy-enforced action gate
 # The unguarded ha-action-raw is NOT in the agent's allowed_commands.
@@ -315,6 +492,7 @@ case "\$KIND" in
         EXP=\$(( \$(date -u +%s) + 1800 ))
         TICKET="/data/pending/\${SHORT}.json"
         SUMMARY="\${SERVICE} on \${ENTITY:-(no entity)} — \$VERDICT"
+        mkdir -p /data/pending
         cat > "\$TICKET" << TEOF
 {
   "uuid": "\${SHORT}",
@@ -326,14 +504,16 @@ case "\$KIND" in
   "verdict": "\${VERDICT}"
 }
 TEOF
-        # Telegram heads-up to the user
+        # v3.1.1: send with inline-keyboard chips. Falls back gracefully
+        # to text-only "YES <id>"/"NO <id>" if Telegram refuses markup.
         MSG="⚠️ Approval needed (\${SHORT})
 \${SUMMARY}
-Reply  YES \${SHORT}  to apply, or  NO \${SHORT}  to reject.
+Tap a chip below — or reply YES \${SHORT} / NO \${SHORT}.
 Expires in 30 min."
-        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-          --data-urlencode "chat_id=${FIRST_USER}" \
-          --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
+        /usr/local/bin/tg-send-approval "\${SHORT}" "\$MSG" >/dev/null 2>&1 || \\
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
+            --data-urlencode "chat_id=${FIRST_USER}" \\
+            --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
         /usr/local/bin/zc-audit-write confirm "\$SERVICE" "\$BODY" "ticket=\${SHORT};\${VERDICT}"
         echo "CONFIRM_PENDING ticket=\${SHORT} reason=\${VERDICT}"
         exit 2 ;;
@@ -556,10 +736,11 @@ jq -nc \\
   > "\$TICKET"
 MSG="🆕 Create scene? (\${SHORT})
 \${SUMMARY}
-Reply  YES \${SHORT}  to create, or  NO \${SHORT}  to discard.
+Tap a chip — or reply YES \${SHORT} / NO \${SHORT}.
 Expires in 30 min."
+/usr/local/bin/tg-send-approval "\${SHORT}" "\$MSG" >/dev/null 2>&1 || \\
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
-  --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
+    --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
 /usr/local/bin/zc-audit-write confirm "scene/create" "\$PAYLOAD" "creation_ticket=\${SHORT}"
 echo "CONFIRM_PENDING ticket=\${SHORT} kind=create_scene"
 exit 2
@@ -601,10 +782,11 @@ jq -nc \\
   > "\$TICKET"
 MSG="🆕 Create automation? (\${SHORT})
 \${SUMMARY}
-Reply  YES \${SHORT}  to create, or  NO \${SHORT}  to discard.
+Tap a chip — or reply YES \${SHORT} / NO \${SHORT}.
 Expires in 30 min."
+/usr/local/bin/tg-send-approval "\${SHORT}" "\$MSG" >/dev/null 2>&1 || \\
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \\
-  --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
+    --data-urlencode "chat_id=${FIRST_USER}" --data-urlencode "text=\${MSG}" >/dev/null 2>&1 || true
 /usr/local/bin/zc-audit-write confirm "automation/create" "\$PAYLOAD" "creation_ticket=\${SHORT}"
 echo "CONFIRM_PENDING ticket=\${SHORT} kind=create_automation"
 exit 2
@@ -695,7 +877,7 @@ esac
 SCRIPT
 
 # Make every helper executable
-chmod +x /usr/local/bin/ha-* /usr/local/bin/zc-*
+chmod +x /usr/local/bin/ha-* /usr/local/bin/zc-* /usr/local/bin/tg-*
 
 # ==============================================================
 # config.toml
@@ -1426,6 +1608,20 @@ find /data/approved -name '*.marker' -mmin +60                     -delete 2>/de
     CLEAN_MSG="@noop cleanup tick"
     curl -s -X POST "${GW}/api/cron" -H "Content-Type: application/json" \
         -d "$(jq -nc --arg n zc_pending_cleanup --arg s '0 * * * *' --arg c "$CLEAN_MSG" '{name:$n,schedule:$s,command:$c}')" >/dev/null 2>&1
+) &
+
+# ==============================================================
+# Telegram callback-query watcher (v3.1.1) — handles inline-keyboard
+# chip taps for approval tickets. Auto-restarts on crash.
+# ==============================================================
+(
+    while true; do
+        /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
+            bashio::log.info "[tg-cb] $line"
+        done
+        bashio::log.warn "tg-callback-watcher exited; restarting in 5s"
+        sleep 5
+    done
 ) &
 
 # ==============================================================
