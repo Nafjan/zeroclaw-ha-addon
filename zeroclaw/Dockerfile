@@ -7,6 +7,10 @@ RUN apk add --no-cache ca-certificates curl jq yq findutils coreutils
 COPY zeroclaw-bin /usr/local/bin/zeroclaw
 RUN chmod +x /usr/local/bin/zeroclaw
 
+# Policy library — pure-shell verdict decider, covered by bats tests
+COPY lib/ /opt/zeroclaw/lib/
+RUN chmod +x /opt/zeroclaw/lib/*.sh
+
 COPY run.sh /
 RUN chmod +x /run.sh
 
