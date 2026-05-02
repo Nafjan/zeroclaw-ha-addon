@@ -1,9 +1,9 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.1 — Telegram inline-keyboard approval chips
+# ZeroClaw HAOS Add-on v3.1.2 — Telegram inline-keyboard approval chips
 # (policy engine extracted into /opt/zeroclaw/lib/policy-decide.sh, bats-tested)
 
-ADDON_VERSION="3.1.1"
+ADDON_VERSION="3.1.2"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -266,13 +266,17 @@ fi
 SCRIPT
 
 # ==============================================================
-# tg-callback-watcher — long-polls Telegram for callback_query
-# events from the inline-keyboard chips and applies tickets directly.
-# Validates from.id against /data/.tg_users so a bot DM from a stranger
-# can't approve anything.
+# tg-callback-watcher — single owner of the Telegram bot socket.
+# Long-polls ALL updates (messages + callback_query) because Telegram
+# permits only one getUpdates client per bot. Replaces ZeroClaw's
+# built-in Telegram channel entirely:
+#   • .message      → validate sender, forward text to gateway /webhook,
+#                     send the agent's response back via sendMessage
+#   • .callback_query → validate sender, apply the ticket directly,
+#                     edit message in place, ping agent for audit
 #
-# Wire format: callback_data = "zcv1:<verb>:<id8>" where verb is one
-# of approve|reject|discuss.
+# Wire format for chips: callback_data = "zcv1:<verb>:<id8>" where verb
+# is one of approve|reject|discuss.
 # ==============================================================
 cat > /usr/local/bin/tg-callback-watcher << SCRIPT
 #!/bin/sh
@@ -292,7 +296,7 @@ answer_cb() {
 
 edit_msg() {
     chat_id="\$1"; msg_id="\$2"; new_text="\$3"
-    # Strip the inline keyboard by passing reply_markup={} on edit.
+    # Strip the inline keyboard by omitting reply_markup on edit.
     curl -s -X POST "https://api.telegram.org/bot\${TOKEN}/editMessageText" \\
         -H "Content-Type: application/json" \\
         -d "\$(jq -nc --arg c "\$chat_id" --argjson m "\$msg_id" --arg t "\$new_text" \\
@@ -306,18 +310,44 @@ send_msg() {
         --data-urlencode "text=\$text" >/dev/null 2>&1 || true
 }
 
+send_typing() {
+    chat_id="\$1"
+    curl -s -X POST "https://api.telegram.org/bot\${TOKEN}/sendChatAction" \\
+        --data-urlencode "chat_id=\$chat_id" \\
+        --data-urlencode "action=typing" >/dev/null 2>&1 || true
+}
+
 is_allowed_user() {
     uid="\$1"
     [ ! -f "\$USERS_F" ] && return 1
     grep -Fx "\$uid" "\$USERS_F" >/dev/null 2>&1
 }
 
+# Forward an inbound text message to the gateway and relay the response.
+handle_message() {
+    chat_id="\$1"; from_id="\$2"; text="\$3"
+    if ! is_allowed_user "\$from_id"; then
+        send_msg "\$chat_id" "Not authorized."
+        return
+    fi
+    [ -z "\$text" ] && return
+    send_typing "\$chat_id"
+    BODY=\$(jq -nc --arg m "\$text" '{message:\$m}')
+    RESP=\$(curl -s --max-time 60 -X POST "\${GW}/webhook" \\
+        -H "Content-Type: application/json" -d "\$BODY" 2>/dev/null)
+    REPLY=\$(echo "\$RESP" | jq -r '.response // .reply // .text // empty' 2>/dev/null)
+    [ -z "\$REPLY" ] && REPLY="(no response)"
+    # Telegram message limit is 4096 chars; truncate defensively.
+    REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
+    send_msg "\$chat_id" "\$REPLY"
+}
+
 while true; do
     OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || echo 0)
-    # Long-poll up to 25s. allowed_updates restricts to callback_query
-    # so we don't fight ZeroClaw's own message channel for normal text.
+    # Long-poll up to 25s for both message + callback_query updates.
+    # We are the SOLE poller for this bot — ZC's telegram channel is disabled.
     RESP=\$(curl -s --max-time 30 \\
-        "https://api.telegram.org/bot\${TOKEN}/getUpdates?offset=\${OFFSET}&timeout=25&allowed_updates=%5B%22callback_query%22%5D" \\
+        "https://api.telegram.org/bot\${TOKEN}/getUpdates?offset=\${OFFSET}&timeout=25&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D" \\
         2>/dev/null)
     OK=\$(echo "\$RESP" | jq -r '.ok // false' 2>/dev/null)
     if [ "\$OK" != "true" ]; then
@@ -329,13 +359,23 @@ while true; do
     [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ] && echo \$((NEW_OFFSET + 1)) > "\$OFFSET_F"
 
     echo "\$RESP" | jq -c '.result[]?' 2>/dev/null | while read -r upd; do
+        # Branch on update kind. message and callback_query are mutually exclusive.
+        MSG_TEXT=\$(echo "\$upd" | jq -r '.message.text // empty')
+        if [ -n "\$MSG_TEXT" ]; then
+            M_CHAT=\$(echo "\$upd" | jq -r '.message.chat.id // empty')
+            M_FROM=\$(echo "\$upd" | jq -r '.message.from.id // empty')
+            handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" &
+            continue
+        fi
+
         CB_ID=\$(echo "\$upd" | jq -r '.callback_query.id // empty')
+        [ -z "\$CB_ID" ] && continue
+
         DATA=\$(echo "\$upd"  | jq -r '.callback_query.data // empty')
         FROM=\$(echo "\$upd"  | jq -r '.callback_query.from.id // empty')
         FROM_NAME=\$(echo "\$upd" | jq -r '.callback_query.from.first_name // "user"')
         CHAT_ID=\$(echo "\$upd" | jq -r '.callback_query.message.chat.id // empty')
         MSG_ID=\$(echo "\$upd"  | jq -r '.callback_query.message.message_id // empty')
-        [ -z "\$CB_ID" ] && continue
 
         if ! is_allowed_user "\$FROM"; then
             answer_cb "\$CB_ID" "Not authorized."
@@ -356,14 +396,12 @@ while true; do
         fi
 
         SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
-        SVC=\$(jq -r '.service // ""' "\$TICKET")
         KIND=\$(jq -r '.payload.kind // "action"' "\$TICKET")
 
         case "\$VERB" in
           approve)
               mkdir -p /data/approved
               touch "/data/approved/\${SHORT}.marker"
-              # Apply path depends on whether this is a creation ticket.
               if [ "\$KIND" = "scene" ] || [ "\$KIND" = "automation" ]; then
                   OUT=\$(/usr/local/bin/ha-apply-creation "\$SHORT" 2>&1 || echo "(apply failed)")
               else
@@ -372,7 +410,6 @@ while true; do
               answer_cb "\$CB_ID" "Applied."
               edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
-              # Wake the agent so it can log/learn from the outcome.
               curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
                   -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" '{message:\$m}')" \\
                   >/dev/null 2>&1 || true
@@ -385,7 +422,6 @@ while true; do
           discuss)
               answer_cb "\$CB_ID" "Tell me more."
               send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"
-              # Don't delete the ticket: discussion may end with approval.
               ;;
           *)
               answer_cb "\$CB_ID" "Unknown verb: \$VERB"
@@ -504,7 +540,7 @@ case "\$KIND" in
   "verdict": "\${VERDICT}"
 }
 TEOF
-        # v3.1.1: send with inline-keyboard chips. Falls back gracefully
+        # v3.1.2: send with inline-keyboard chips. Falls back gracefully
         # to text-only "YES <id>"/"NO <id>" if Telegram refuses markup.
         MSG="⚠️ Approval needed (\${SHORT})
 \${SUMMARY}
@@ -912,12 +948,11 @@ session_persistence = true
 session_backend = "sqlite"
 debounce_ms = 300
 
-[channels_config.telegram]
-bot_token = "${TELEGRAM_TOKEN}"
-allowed_users = [${USERS_TOML}]
-stream_mode = "partial"
-draft_update_interval_ms = 1500
-interrupt_on_new_message = true
+# NOTE: ZeroClaw's built-in Telegram channel is intentionally disabled here.
+# tg-callback-watcher (below) owns the Telegram bot socket exclusively because
+# Telegram only allows ONE getUpdates client per bot. The watcher long-polls
+# all updates, validates against /data/.tg_users, forwards .message text to
+# the gateway webhook, and applies .callback_query taps directly.
 
 [gateway]
 port = 42617
@@ -1611,7 +1646,7 @@ find /data/approved -name '*.marker' -mmin +60                     -delete 2>/de
 ) &
 
 # ==============================================================
-# Telegram callback-query watcher (v3.1.1) — handles inline-keyboard
+# Telegram callback-query watcher (v3.1.2) — handles inline-keyboard
 # chip taps for approval tickets. Auto-restarts on crash.
 # ==============================================================
 (
