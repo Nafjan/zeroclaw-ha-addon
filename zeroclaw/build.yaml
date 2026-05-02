@@ -1,0 +1,7 @@
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.19
+labels:
+  org.opencontainers.image.title: "ZeroClaw Agent"
+  org.opencontainers.image.description: "AI home automation agent — policy-gated, self-scheduling, audited"
+  org.opencontainers.image.source: "https://github.com/Nafjan/zeroclaw-ha-addon"
+  org.opencontainers.image.licenses: "MIT"
