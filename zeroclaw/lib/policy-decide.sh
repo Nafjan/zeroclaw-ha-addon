@@ -61,6 +61,9 @@ fi
 # ---------------------------------------------------------------------------
 match_glob() {
     pat="$1"; val="$2"
+    # shellcheck disable=SC2254
+    # Intentional: $pat is a user-supplied glob and MUST stay unquoted so
+    # case treats it as a pattern (e.g. "light.kids_*"), not a literal.
     case "$val" in
         $pat) return 0 ;;
         *)    return 1 ;;
