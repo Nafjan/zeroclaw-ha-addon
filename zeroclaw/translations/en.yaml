@@ -1,0 +1,191 @@
+configuration:
+  # ─────── Credentials ───────
+  openrouter_api_key:
+    name: "OpenRouter API key"
+    description: >-
+      Your OpenRouter key (https://openrouter.ai). The agent uses OpenRouter to
+      reach both the cheap default model (Gemini Flash) and the smarter complex
+      model (Claude Sonnet). Required.
+  ha_token:
+    name: "Home Assistant long-lived token"
+    description: >-
+      Settings → Profile → Security → Long-lived access tokens → Create token.
+      Used to call the HA REST API from inside the add-on. Required.
+  telegram_bot_token:
+    name: "Telegram bot token"
+    description: >-
+      Token from @BotFather. The agent uses this to receive commands and to
+      send approval tickets and reports. Required.
+  telegram_allowed_users:
+    name: "Telegram allowed user IDs"
+    description: >-
+      Comma-separated numeric Telegram user IDs that are allowed to message
+      the agent. Anyone else is silently ignored. Find your ID via @userinfobot.
+
+  # ─────── Models & logging ───────
+  default_model:
+    name: "Default model (cheap)"
+    description: >-
+      Used for trivia, lookups, and simple actions. Default:
+      google/gemini-3.1-flash-lite-preview. Pick any OpenRouter model slug.
+  complex_model:
+    name: "Complex model (smart)"
+    description: >-
+      Used for creation drafts, daily reports, and reflection. Default:
+      anthropic/claude-sonnet-4.6.
+  log_level:
+    name: "Log level"
+    description: >-
+      How chatty the add-on log is. 'info' is the right default; switch to
+      'debug' only when troubleshooting.
+
+  # ─────── Cost & safety budgets ───────
+  daily_cost_limit_usd:
+    name: "Daily cost limit (USD)"
+    description: >-
+      When today's spend exceeds 80% of this value, the agent flips to
+      cheap-model-only mode and pings you once. A hard guardrail — the agent
+      will not silently burn through your wallet.
+  monthly_cost_limit_usd:
+    name: "Monthly cost limit (USD)"
+    description: "Soft monthly cap reported alongside daily cost."
+  max_actions_per_hour:
+    name: "Max actions per hour"
+    description: >-
+      Rate-limit on guarded HA actions. Acts as a runaway-loop circuit breaker.
+
+  # ─────── Agent runtime budgets ───────
+  max_tool_iterations:
+    name: "Max tool iterations per turn"
+    description: >-
+      How many tool calls the agent may chain in a single user message before
+      it must stop and reply. Lower = cheaper, higher = more capable.
+  max_history_messages:
+    name: "Max conversation history (messages)"
+    description: >-
+      How many recent messages are kept in the live context window. Older
+      messages remain in memory but aren't auto-injected.
+  max_context_tokens:
+    name: "Max context tokens"
+    description: "Hard cap on prompt size sent to the model."
+  provider_max_tokens:
+    name: "Provider max output tokens"
+    description: >-
+      Cap on the model's response length. Tool-call-heavy turns need more —
+      2048 is a good default; raise if you see truncated tool calls.
+  response_cache_ttl_minutes:
+    name: "Response cache TTL (minutes)"
+    description: "Identical user messages within this window return the cached reply."
+  conversation_retention_days:
+    name: "Conversation retention (days)"
+    description: "How long full conversation transcripts are kept on disk."
+
+  # ─────── Home context ───────
+  home_location:
+    name: "Home location"
+    description: >-
+      Free-form (e.g. 'Al Khobar, Saudi Arabia'). Used in the system prompt and
+      for timezone-aware report scheduling.
+  home_languages:
+    name: "Home languages"
+    description: >-
+      Comma-separated ISO codes (e.g. 'en,ar'). The agent will reply in
+      whichever language you write to it in.
+  quiet_hours:
+    name: "Quiet hours"
+    description: >-
+      'HH:MM-HH:MM' window where lights and climate actions need explicit
+      confirmation regardless of their normal verdict (set
+      'Quiet hours require confirm' below to enable).
+  confirmation_temp_delta_c:
+    name: "Climate confirm delta (°C)"
+    description: >-
+      Used by SOUL.md examples — climate changes larger than this are
+      flagged in the agent's prompt as 'big change, double-check first'.
+      The deterministic policy threshold is the separate field below.
+
+  # ─────── Reports & observer ───────
+  daily_report_time:
+    name: "Daily report time (local, HH:MM)"
+    description: >-
+      What time the agent sends you the daily summary. Local time — converted
+      to UTC internally based on your home location's offset.
+  daily_report_enabled:
+    name: "Send daily report"
+    description: "Disable if you don't want the daily summary."
+  observer_enabled:
+    name: "Enable proactive observer"
+    description: >-
+      Periodic check that lets the agent flag anomalies, repeating patterns,
+      and forgotten devices. Suppresses NOOP responses so it doesn't spam.
+  observer_interval_minutes:
+    name: "Observer interval (minutes)"
+    description: "How often the observer runs. 15 is a good balance."
+
+  # ─────── Phase switches ───────
+  enable_creation_skill:
+    name: "Enable creation skill (v3.1)"
+    description: >-
+      Lets the agent draft scenes, automations, and routines through the
+      approval flow. Off by default — turn on once you've used v3.0 long
+      enough to trust the policy gate.
+  enable_learning_loops:
+    name: "Enable learning loops (v3.2)"
+    description: >-
+      Nightly reflection, LESSONS.md distillation from corrections, and skill
+      acquisition. Off by default — coming in v3.2.
+
+  # ─────── Audit & undo ───────
+  enable_undo:
+    name: "Enable zc-undo"
+    description: >-
+      Allows the agent (and you, by saying 'undo that') to revert recent
+      actions inside a 1-hour window using the audit log.
+  audit_retention_days:
+    name: "Audit log retention (days)"
+    description: >-
+      Daily JSONL files older than this are pruned at startup.
+
+  # ─────── Policy engine ───────
+  policy_mode:
+    name: "Policy mode"
+    description: >-
+      strict = confirm everything · balanced = sensible defaults (recommended) ·
+      permissive = allow most · custom = ignore presets and use only the
+      explicit lists below + /config/zeroclaw_policy.yaml.
+  policy_quiet_hours_require_confirm:
+    name: "Require confirm during quiet hours"
+    description: >-
+      During 'Quiet hours', lights and climate actions need approval even if
+      they'd normally be auto-allowed.
+  policy_bulk_action_threshold:
+    name: "Bulk action threshold"
+    description: >-
+      An action that targets this many or more entities at once requires
+      approval. Stops 'turn off all lights' from happening accidentally.
+  policy_climate_delta_confirm_c:
+    name: "Climate delta needing confirm (°C)"
+    description: >-
+      Setpoint changes larger than this trigger an approval ticket. Default 3.
+  policy_extra_deny:
+    name: "Extra DENY entries"
+    description: >-
+      Patterns the agent must never act on — overrides everything else. Use
+      shell-style wildcards. Example: switch.water_heater, light.kids_*.
+  policy_extra_confirm:
+    name: "Extra CONFIRM entries"
+    description: "Patterns that always require approval, regardless of preset."
+  policy_extra_allow:
+    name: "Extra ALLOW entries"
+    description: >-
+      Patterns to auto-allow even if the preset would have asked. Use sparingly.
+  policy_trust_enabled:
+    name: "Enable trust promotion"
+    description: >-
+      After you approve the same action shape N times, the policy auto-promotes
+      it to allow. You get a notification and can demote it from Telegram.
+  policy_trust_promote_after:
+    name: "Trust promote after N approvals"
+    description: "How many approvals it takes to auto-promote a confirm to allow."
+
+network: {}
