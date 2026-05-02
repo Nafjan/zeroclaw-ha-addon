@@ -1,5 +1,38 @@
 # Changelog
 
+## 3.1.1 (May 2026) — Telegram inline-keyboard approval chips
+
+**UX upgrade.** Approval tickets now ship with tappable chips instead of
+text-only "reply YES <id>".
+
+### What changed
+- New `tg-send-approval` helper renders Telegram messages with an
+  inline keyboard: **[✅ Approve]** **[❌ Reject]** on row 1, **[💬 Discuss]**
+  on row 2. The returned `message_id` is persisted into the ticket so
+  the watcher can edit-in-place after the user taps.
+- New `tg-callback-watcher` sidecar long-polls
+  `getUpdates?allowed_updates=["callback_query"]` and:
+  - validates `from.id` against the add-on's `telegram_allowed_users`,
+  - applies the ticket directly (action → `ha-action-guarded --apply-ticket`,
+    creation → `ha-apply-creation`),
+  - calls `answerCallbackQuery` to dismiss the spinner,
+  - edits the original message to show "✅ Approved by …: <outcome>"
+    or "❌ Rejected by …",
+  - pings the agent webhook so the audit trail stays unified.
+- Auto-restart loop wraps the watcher (5s back-off on crash).
+- Text-only "YES <id>" / "NO <id>" replies still work as a fallback.
+
+### Why
+Tapping a chip is one motion, no typing, no copy-paste of the id. Also
+removes a class of failures where the LLM tried to fabricate the YES
+text (zc-approve still rejects those, but with chips the user just
+doesn't see that path).
+
+### Files touched
+- `zeroclaw/run.sh` — adds two helpers + watcher background loop;
+  `ha-action-guarded`, `ha-create-scene`, `ha-create-automation` now
+  send via `tg-send-approval` with curl fallback.
+
 ## 3.1.0 (May 2026) — Creation skill, reverse triggers, test coverage
 
 **New behavior:** the agent can now propose new HA scenes and automations through
