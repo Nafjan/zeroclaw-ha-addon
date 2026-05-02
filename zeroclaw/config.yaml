@@ -1,7 +1,7 @@
 name: ZeroClaw Agent
-version: 2.5.1
+version: 3.0.0
 slug: zeroclaw
-description: AI home automation agent
+description: AI home automation agent — policy-gated, self-scheduling, audited
 url: https://github.com/Nafjan/zeroclaw-ha-addon
 arch:
   - aarch64
@@ -10,14 +10,64 @@ startup: application
 boot: auto
 hassio_api: true
 homeassistant_api: true
+map:
+  - config:rw
 options:
+  # --- Credentials (required) ---
   openrouter_api_key: ""
   ha_token: ""
   telegram_bot_token: ""
   telegram_allowed_users: ""
+
+  # --- Models ---
   default_model: google/gemini-3.1-flash-lite-preview
   complex_model: anthropic/claude-sonnet-4.6
   log_level: info
+
+  # --- Cost / safety budgets ---
+  daily_cost_limit_usd: 5.0
+  monthly_cost_limit_usd: 20.0
+  max_actions_per_hour: 200
+
+  # --- Agent runtime budgets ---
+  max_tool_iterations: 8
+  max_history_messages: 30
+  max_context_tokens: 16000
+  provider_max_tokens: 2048
+  response_cache_ttl_minutes: 2
+  conversation_retention_days: 30
+
+  # --- Home context (used in SOUL.md and world-state) ---
+  home_location: "Al Khobar, Saudi Arabia"
+  home_languages: "en,ar"
+  quiet_hours: "23:00-06:00"
+  confirmation_temp_delta_c: 3
+
+  # --- Reports & observer ---
+  daily_report_time: "08:00"
+  daily_report_enabled: true
+  observer_enabled: true
+  observer_interval_minutes: 15
+
+  # --- Phase switches ---
+  enable_creation_skill: false
+  enable_learning_loops: false
+
+  # --- Audit & undo ---
+  enable_undo: true
+  audit_retention_days: 30
+
+  # --- Policy engine ---
+  policy_mode: balanced
+  policy_quiet_hours_require_confirm: true
+  policy_bulk_action_threshold: 3
+  policy_climate_delta_confirm_c: 3
+  policy_extra_deny: []
+  policy_extra_confirm: []
+  policy_extra_allow: []
+  policy_trust_enabled: true
+  policy_trust_promote_after: 5
+
 schema:
   openrouter_api_key: password
   ha_token: password
@@ -26,3 +76,43 @@ schema:
   default_model: str
   complex_model: str
   log_level: list(debug|info|warn|error)
+
+  daily_cost_limit_usd: float
+  monthly_cost_limit_usd: float
+  max_actions_per_hour: int(50,1000)
+
+  max_tool_iterations: int(2,20)
+  max_history_messages: int(5,100)
+  max_context_tokens: int(2000,128000)
+  provider_max_tokens: int(512,8192)
+  response_cache_ttl_minutes: int(0,60)
+  conversation_retention_days: int(1,365)
+
+  home_location: str
+  home_languages: str
+  quiet_hours: str
+  confirmation_temp_delta_c: int(1,20)
+
+  daily_report_time: str
+  daily_report_enabled: bool
+  observer_enabled: bool
+  observer_interval_minutes: int(5,120)
+
+  enable_creation_skill: bool
+  enable_learning_loops: bool
+
+  enable_undo: bool
+  audit_retention_days: int(1,365)
+
+  policy_mode: list(strict|balanced|permissive|custom)
+  policy_quiet_hours_require_confirm: bool
+  policy_bulk_action_threshold: int(2,50)
+  policy_climate_delta_confirm_c: int(1,20)
+  policy_extra_deny:
+    - str
+  policy_extra_confirm:
+    - str
+  policy_extra_allow:
+    - str
+  policy_trust_enabled: bool
+  policy_trust_promote_after: int(2,50)
