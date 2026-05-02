@@ -1,5 +1,36 @@
 # Changelog
 
+## 3.1.2 (May 2026) — Single-owner Telegram socket (fixes 409 polling conflict)
+
+**Bug fix.** v3.1.1 introduced a `tg-callback-watcher` sidecar that
+long-polled `getUpdates`, but ZeroClaw's built-in Telegram channel was
+*also* polling — Telegram only allows one `getUpdates` client per bot,
+so the two were fighting and the logs were spammed with
+`Conflict: terminated by other getUpdates request` warnings.
+
+### Fix
+- The watcher is now the **sole owner** of the Telegram bot socket. It
+  long-polls *all* update kinds (`message` + `callback_query`) and:
+  - **`.message`** → validates `from.id`, forwards the text to the
+    gateway `/webhook`, sends the agent's response back via
+    `sendMessage` (with a `typing…` action while waiting).
+  - **`.callback_query`** → existing chip-tap logic (apply ticket,
+    edit message in place, ping agent for audit).
+- `[channels_config.telegram]` is removed from the generated
+  `config.toml` so ZeroClaw no longer starts its own Telegram channel.
+
+### Trade-offs
+- Lost: ZC's streaming/partial-typing-indicator on long replies. The
+  shell relay sends the final response in one `sendMessage`. Worth it
+  to get rid of the polling race.
+- Lost: ZC's per-message ack reaction. The watcher sends a `typing…`
+  chat action instead, which is arguably more familiar.
+- Kept: chip approval UX, allowlist enforcement, callback validation.
+
+### Files touched
+- `zeroclaw/run.sh` — removes `[channels_config.telegram]` block,
+  rewrites `tg-callback-watcher` to handle both update kinds.
+
 ## 3.1.1 (May 2026) — Telegram inline-keyboard approval chips
 
 **UX upgrade.** Approval tickets now ship with tappable chips instead of
