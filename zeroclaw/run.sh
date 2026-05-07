@@ -1,9 +1,10 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.3 — lessons loop, model routing, musl-safe ha-logbook
-# (policy engine extracted into /opt/zeroclaw/lib/policy-decide.sh, bats-tested)
+# ZeroClaw HAOS Add-on v3.1.3.1 — lessons loop hotfix
+# (registers zc.set_outcome / zc.lesson_add as first-class tools, widens
+#  correction regex to cover negation phrasings)
 
-ADDON_VERSION="3.1.3"
+ADDON_VERSION="3.1.3.1"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -338,16 +339,28 @@ handle_message() {
     # If the previous turn produced an outcome AND the user's reply opens with
     # a correction marker, fire a synthetic learning prompt to the gateway in
     # the background. The agent will produce a one-line lesson and persist it
-    # via zc-lesson-add. We only fire when /data/.last_outcome exists, so a
+    # via zc.lesson_add. We only fire when /data/.last_outcome exists, so a
     # bare "no" in response to a question (no outcome stored) won't trigger.
+    # v3.1.3.1: regex widened to catch "they're not on", "didn't work",
+    # "still off", "isn't", "nothing happened" — common real corrections that
+    # don't open with the "no/wrong" markers.
     LAST_OUTCOME_FILE="/data/.last_outcome"
     if [ -f "\$LAST_OUTCOME_FILE" ]; then
-        case "\$text" in
-            [Nn]o|"no "*|"No "*|"no,"*|"No,"*|"no."*|"No."*|"no!"*|"No!"*|[Ww]rong*|[Aa]ctually*|"that's wrong"*|"not that"*|"I meant"*|"i meant"*|لا|"لا "*|"لا،"*|"لا,"*|غلط*)
+        # Lowercase + trim leading whitespace for matching only
+        tlc=\$(printf '%s' "\$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')
+        case "\$tlc" in
+            no|"no "*|"no,"*|"no."*|"no!"*|wrong*|actually*|"that's wrong"*|"not that"*|"i meant"*|\
+            "they're not"*|"theyre not"*|"they are not"*|"they aren't"*|"they arent"*|\
+            "it's not"*|"its not"*|"it is not"*|"it isn't"*|"it isnt"*|\
+            "isn't"*|"isnt"*|"didn't"*|"didnt"*|"did not"*|\
+            "still off"*|"still on"*|"still not"*|"still nothing"*|\
+            "nothing happened"*|"nothing changed"*|"that didn't"*|"that didnt"*|\
+            "doesn't work"*|"doesnt work"*|"not working"*|"didn't work"*|"didnt work"*|\
+            لا|"لا "*|"لا،"*|"لا,"*|غلط*|"ما اشتغل"*|"ماشتغل"*|"مو شغال"*|"لسه"*|"لسة"*)
                 LAST=\$(cat "\$LAST_OUTCOME_FILE" 2>/dev/null)
                 rm -f "\$LAST_OUTCOME_FILE"
                 if [ -n "\$LAST" ]; then
-                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then call zc-lesson-add with it. Do not message the user — this is a silent learning hook."
+                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then call zc.lesson_add with it. Do not message the user — this is a silent learning hook."
                     CBODY=\$(jq -nc --arg m "\$CP" '{message:\$m}')
                     (curl -s --max-time 60 -X POST "\${GW}/webhook" \\
                         -H "Content-Type: application/json" -d "\$CBODY" >/dev/null 2>&1) &
@@ -1170,14 +1183,27 @@ Default route is fast (${DEFAULT_MODEL}). Switch to the reasoning route when ANY
 To switch routes, prepend your first scratchpad/reasoning line with the literal token
 [[reasoning]]. The runtime reads it; it does not appear in your reply to the user.
 
-## Outcome tracking (lessons loop)
+## Outcome tracking (lessons loop) — REQUIRED after real actions
 After every turn that produced a real action (NOT a status query, greeting, or
-"already at" no-op), call exactly once:
-    zc-set-outcome "<the same one-line outcome you just wrote to the user>"
-This lets the runtime detect a correction in the user's NEXT message ("no", "wrong",
-"actually...", "لا", "غلط") and silently write a lesson to LESSONS.md, which is
-auto-prepended to your prompt on the next turn. Do not call zc-lesson-add yourself
-unless invoked by an explicit "User correction received." prompt.
+"already at" no-op), invoke the registered tool exactly once:
+    zc.set_outcome "<the same one-line outcome you just wrote to the user>"
+This is a real tool — call it like ha.action_guarded or memory_recall. The shell
+helper underneath is /usr/local/bin/zc-set-outcome; it writes /data/.last_outcome.
+
+Concrete example for a turn that just turned on study lights:
+  ha.action_guarded 'light/turn_on' '{"entity_id":"light.study_ceiling_lamps"}'
+  → "Study ceiling lamps on."
+  zc.set_outcome "Study ceiling lamps on."
+
+If you skip zc.set_outcome the lessons loop cannot fire on the user's next reply
+and the agent will not learn from corrections. Skipping it is a SOUL violation.
+
+The runtime detects a correction in the user's NEXT message (e.g. "no", "wrong",
+"actually", "they're not on", "didn't work", "still off", "لا", "غلط") and
+silently writes a lesson to LESSONS.md, which auto-prepends to your prompt on the
+next turn. Do NOT call zc.lesson_add yourself unless invoked by an explicit
+"User correction received." synthetic prompt — that hook is reserved for the
+runtime.
 
 ## Allowed action domains
 light, climate, cover, scene, script, input_boolean, input_number, input_select, media_player
@@ -1491,6 +1517,18 @@ name = "reject"
 description = "Bridge a user 'NO <id>' message. Pass the verbatim user message."
 kind = "shell"
 command = "zc-reject"
+
+[[tools]]
+name = "set_outcome"
+description = "Record the one-line outcome of a real action so the lessons loop can detect a user correction in the NEXT message. Call EXACTLY ONCE per action turn with the same outcome line you wrote to the user. Do NOT call after status queries, greetings, or 'already at' no-ops."
+kind = "shell"
+command = "zc-set-outcome"
+
+[[tools]]
+name = "lesson_add"
+description = "Append a one-line lesson (≤80 chars) to LESSONS.md. Reserved for the synthetic 'User correction received.' prompt — do not call from regular turns."
+kind = "shell"
+command = "zc-lesson-add"
 SKILLEOF
 
 # v3.1: append creation tools to the ha skill only when the feature is on
