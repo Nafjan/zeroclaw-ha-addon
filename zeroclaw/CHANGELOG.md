@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.1.3 (May 2026) — Lessons loop, model routing, musl-safe ha-logbook
+
+**Self-improvement primitives.** v3.1.2 had `LESSONS.md` auto-prepended to every
+prompt but no mechanism to populate it. The agent never learned from corrections.
+v3.1.3 wires the loop end-to-end with three targeted fixes (~130 lines net,
+single PR, no runtime rebuild).
+
+### Fixes
+
+1. **Lessons loop (the missing 50 lines).**
+   - New helper `zc-set-outcome` — agent calls it after every real action with
+     the same one-line outcome it wrote to the user. Persists to
+     `/data/.last_outcome`.
+   - New helper `zc-lesson-add` — appends a deduped, 80-char-capped line to
+     `${WS}/LESSONS.md`. FIFO-capped at 50 lessons so prompt overhead stays
+     bounded.
+   - `tg-callback-watcher` `handle_message` now detects correction markers in
+     incoming text (`no`, `wrong`, `actually`, `I meant`, `لا`, `غلط`, …). When
+     `/data/.last_outcome` exists AND the user replies with a correction, the
+     watcher fires a synthetic background prompt to the gateway asking the
+     agent to generate one lesson and call `zc-lesson-add`. The user's normal
+     reply is still forwarded; the learning hook runs silently in parallel.
+
+2. **Model routing directive in `SOUL.md`.** New `## Model routing` section
+   tells the agent when to switch from the fast model (gemini-flash-lite) to
+   the reasoning model (claude-sonnet-4.6). Trigger keywords (`create`,
+   `automate`, `schedule`, `why`, `debug`, `plan`, `every`, `all of`),
+   ≥3 tool calls already used, mixed Arabic+English with technical terms, or
+   drafting a scene/automation/routine. Switch is signalled with the in-band
+   token `[[reasoning]]` on the first scratch line. Pairs with the existing
+   `[[model_routes]]` config in `config.toml`.
+
+3. **`ha-logbook` musl-safe date math.** The previous version used
+   `date -u -d @<epoch>`, a GNU coreutils extension that is not available on
+   Alpine/musl. The script silently fell back to `$NOW`, returning empty 24-hour
+   windows — so the agent saw no logbook history and concluded "nothing to learn
+   from." Replaced with `awk strftime` which works on BusyBox.
+
+### What this changes for the agent's behavior
+
+- After a correction, the next turn's prompt opens with a freshly-saved lesson.
+  Repeating the same mistake costs more than learning from it.
+- Complex turns route to the reasoning model only when warranted. Simple
+  status queries stay on the cheap model. Cost stays flat.
+- `ha-logbook climate.bedroom` and `ha-logbook` (no args) actually return data,
+  so the daily review can spot HA-side anomalies.
+
+### Files touched
+
+- `zeroclaw/run.sh` — `ha-logbook` heredoc; new `zc-set-outcome` and
+  `zc-lesson-add` helpers; `handle_message` correction-detection branch;
+  SOUL.md `## Model routing` and `## Outcome tracking` blocks; `allowed_commands`
+  registers the two new helpers; `ADDON_VERSION` bump.
+- `zeroclaw/config.yaml` — version bump.
+- `docs/runbooks/lessons-loop.md` — new runbook covering correction triggers,
+  manual verification, and rollback if the loop misfires.
+
+### Verification
+
+72-hour soak window with explicit metric: ≥3 distinct lessons logged from real
+corrections AND ≥1 case of NOT repeating a previously-corrected mistake. If the
+metric fails after 72h+48h extension, evaluate Hermes Agent migration as
+documented in the project plan.
+
 ## 3.1.2 (May 2026) — Single-owner Telegram socket (fixes 409 polling conflict)
 
 **Bug fix.** v3.1.1 introduced a `tg-callback-watcher` sidecar that
