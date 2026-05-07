@@ -1,9 +1,9 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.2 — Telegram inline-keyboard approval chips
+# ZeroClaw HAOS Add-on v3.1.3 — lessons loop, model routing, musl-safe ha-logbook
 # (policy engine extracted into /opt/zeroclaw/lib/policy-decide.sh, bats-tested)
 
-ADDON_VERSION="3.1.2"
+ADDON_VERSION="3.1.3"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -134,14 +134,16 @@ SCRIPT
 
 cat > /usr/local/bin/ha-logbook << SCRIPT
 #!/bin/sh
+# v3.1.3: musl/BusyBox-safe date math via awk strftime
+# (Alpine date does not implement GNU coreutils -d @<epoch>.)
 NOW=\$(date -u +%Y-%m-%dT%H:%M:%S)
-AGO24=\$(date -u -d @\$(( \$(date +%s) - 86400 )) +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "\$NOW")
+AGO24=\$(awk 'BEGIN{print strftime("%Y-%m-%dT%H:%M:%S", systime()-86400)}')
+AGO1=\$(awk  'BEGIN{print strftime("%Y-%m-%dT%H:%M:%S", systime()-3600)}')
 if [ -n "\$1" ]; then
     curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
       "${HA_URL}/logbook/\${AGO24}?entity=\$1&end_time=\${NOW}" | \
       jq -r '.[] | "\(.when): \(.name) \(.message)"' 2>/dev/null || echo "No logbook data"
 else
-    AGO1=\$(date -u -d @\$(( \$(date +%s) - 3600 )) +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "\$NOW")
     curl -s -H "Authorization: Bearer ${HA_TOKEN}" \
       "${HA_URL}/logbook/\${AGO1}" | \
       jq -r '.[-20:] | .[] | "\(.when): \(.name) \(.message)"' 2>/dev/null || echo "No logbook data"
@@ -331,6 +333,29 @@ handle_message() {
         return
     fi
     [ -z "\$text" ] && return
+
+    # v3.1.3: correction-detection branch.
+    # If the previous turn produced an outcome AND the user's reply opens with
+    # a correction marker, fire a synthetic learning prompt to the gateway in
+    # the background. The agent will produce a one-line lesson and persist it
+    # via zc-lesson-add. We only fire when /data/.last_outcome exists, so a
+    # bare "no" in response to a question (no outcome stored) won't trigger.
+    LAST_OUTCOME_FILE="/data/.last_outcome"
+    if [ -f "\$LAST_OUTCOME_FILE" ]; then
+        case "\$text" in
+            [Nn]o|"no "*|"No "*|"no,"*|"No,"*|"no."*|"No."*|"no!"*|"No!"*|[Ww]rong*|[Aa]ctually*|"that's wrong"*|"not that"*|"I meant"*|"i meant"*|لا|"لا "*|"لا،"*|"لا,"*|غلط*)
+                LAST=\$(cat "\$LAST_OUTCOME_FILE" 2>/dev/null)
+                rm -f "\$LAST_OUTCOME_FILE"
+                if [ -n "\$LAST" ]; then
+                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then call zc-lesson-add with it. Do not message the user — this is a silent learning hook."
+                    CBODY=\$(jq -nc --arg m "\$CP" '{message:\$m}')
+                    (curl -s --max-time 60 -X POST "\${GW}/webhook" \\
+                        -H "Content-Type: application/json" -d "\$CBODY" >/dev/null 2>&1) &
+                fi
+                ;;
+        esac
+    fi
+
     send_typing "\$chat_id"
     BODY=\$(jq -nc --arg m "\$text" '{message:\$m}')
     RESP=\$(curl -s --max-time 60 -X POST "\${GW}/webhook" \\
@@ -666,6 +691,53 @@ echo "REJECTED ${SHORT}"
 SCRIPT
 
 # ==============================================================
+# v3.1.3 lessons loop — self-improvement primitives
+# ==============================================================
+# zc-set-outcome — agent records the one-line outcome of a completed action
+# so the next user message can be classified as a correction (or not).
+# Empty/missing file = no outcome to correct (greetings, status queries).
+cat > /usr/local/bin/zc-set-outcome << 'SCRIPT'
+#!/bin/sh
+# Usage: zc-set-outcome "<one-line outcome>"
+TEXT="$1"
+[ -z "$TEXT" ] && exit 0
+printf '%s\n' "$TEXT" > /data/.last_outcome
+SCRIPT
+
+# zc-lesson-add — append a one-line lesson to LESSONS.md (deduped, FIFO-capped).
+# LESSONS.md is auto-prepended to every prompt, so growing this file
+# improves the next turn at zero extra cost.
+cat > /usr/local/bin/zc-lesson-add << SCRIPT
+#!/bin/sh
+# Usage: zc-lesson-add "<lesson text, ≤80 chars>"
+TEXT="\$1"
+[ -z "\$TEXT" ] && { echo "Usage: zc-lesson-add <text>"; exit 1; }
+# Hard-truncate to 80 chars to keep prompt overhead bounded
+TEXT=\$(printf '%s' "\$TEXT" | cut -c1-80)
+LF="${WS}/LESSONS.md"
+mkdir -p "${WS}"
+if [ ! -f "\$LF" ]; then
+    printf '# Lessons Learned (auto-prepended to every prompt)\n# Format: one short rule per line. Pinned lessons start with [PIN].\n' > "\$LF"
+fi
+# Dedup: skip if any existing line contains the new text as a substring
+if grep -qF -- "\$TEXT" "\$LF" 2>/dev/null; then
+    echo "Duplicate (skipped): \$TEXT"
+    exit 0
+fi
+DATE=\$(date -u +%Y-%m-%d)
+printf '%s %s\n' "\$DATE" "\$TEXT" >> "\$LF"
+# FIFO cap: keep header (# lines) + last 50 lessons
+LINES=\$(wc -l < "\$LF" 2>/dev/null || echo 0)
+if [ "\$LINES" -gt 53 ]; then
+    TMP=\$(mktemp)
+    grep '^#' "\$LF" > "\$TMP" 2>/dev/null || true
+    grep -v '^#' "\$LF" | tail -n 50 >> "\$TMP"
+    mv "\$TMP" "\$LF"
+fi
+echo "Saved: \$TEXT"
+SCRIPT
+
+# ==============================================================
 # zc-schedule — agent self-scheduling via ZeroClaw cron API
 # ==============================================================
 cat > /usr/local/bin/zc-schedule << SCRIPT
@@ -970,7 +1042,7 @@ max_context_tokens = ${MAX_CONTEXT_TOKENS}
 level = "full"
 workspace_only = false
 max_actions_per_hour = ${MAX_ACTIONS_PER_HOUR}
-allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "ha-create-scene", "ha-create-automation", "ha-create-routine", "ha-run-routine", "ha-apply-creation", "zc-schedule", "zc-schedule-once", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-approve", "zc-reject", "curl", "jq", "cat", "echo", "ls", "grep", "head", "tail", "date"]
+allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "ha-create-scene", "ha-create-automation", "ha-create-routine", "ha-run-routine", "ha-apply-creation", "zc-schedule", "zc-schedule-once", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-approve", "zc-reject", "zc-set-outcome", "zc-lesson-add", "curl", "jq", "cat", "echo", "ls", "grep", "head", "tail", "date"]
 require_approval_for_medium_risk = false
 block_high_risk_commands = false
 
@@ -1087,6 +1159,25 @@ zc-cost — return current cost. If asked about spend, call this; never guess.
 ## Tool-call budget
 You have ≤ ${MAX_TOOL_ITER} tool calls per turn. Budget them. Memory-first lookup before
 ha.list_entities or any broad query. Never call http_request GET /api/states (532KB).
+
+## Model routing
+Default route is fast (${DEFAULT_MODEL}). Switch to the reasoning route when ANY of:
+- Message contains: create, automate, schedule, why, debug, plan, every, "all of"
+- This turn already used ≥ 3 tool calls
+- Message mixes Arabic and English with technical terms
+- Drafting a scene, automation, or routine
+
+To switch routes, prepend your first scratchpad/reasoning line with the literal token
+[[reasoning]]. The runtime reads it; it does not appear in your reply to the user.
+
+## Outcome tracking (lessons loop)
+After every turn that produced a real action (NOT a status query, greeting, or
+"already at" no-op), call exactly once:
+    zc-set-outcome "<the same one-line outcome you just wrote to the user>"
+This lets the runtime detect a correction in the user's NEXT message ("no", "wrong",
+"actually...", "لا", "غلط") and silently write a lesson to LESSONS.md, which is
+auto-prepended to your prompt on the next turn. Do not call zc-lesson-add yourself
+unless invoked by an explicit "User correction received." prompt.
 
 ## Allowed action domains
 light, climate, cover, scene, script, input_boolean, input_number, input_select, media_player
