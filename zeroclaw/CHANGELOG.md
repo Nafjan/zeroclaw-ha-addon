@@ -1,5 +1,39 @@
 # Changelog
 
+## 3.1.3.1 (May 2026) — Lessons-loop hotfix
+
+Live trace from a real Telegram correction showed v3.1.3 didn't fire the
+loop. Root causes (both small):
+
+1. **`zc-set-outcome` was a shell-only helper, not a registered tool.** SOUL.md
+   instructed the agent to "call `zc-set-outcome ...`", but the agent's tool
+   layer only exposes registered `[[tools]]` entries (e.g. `ha.action_guarded`,
+   `memory_recall`). The agent emitted `zc.set_outcome` as a tool call — a name
+   that didn't resolve — so `/data/.last_outcome` was never written and the
+   correction branch could never fire on the next message.
+2. **Correction regex was too narrow.** Real corrections often don't open with
+   "no" / "wrong". The user said "they're not on" after a failed light command,
+   which the case pattern missed.
+
+### Fixes
+
+- Register `zc.set_outcome` and `zc.lesson_add` as proper `[[tools]]` in the
+  `ha` skill manifest. The shell helpers are unchanged; only the wiring is new.
+- Rewrite the SOUL.md "Outcome tracking" section to call out that
+  `zc.set_outcome` is a real tool (with a concrete example) and that skipping
+  it is a SOUL violation.
+- Widen the case pattern in `tg-callback-watcher.handle_message` to cover
+  negation phrasings: "they're not", "it's not", "isn't", "didn't",
+  "still off / on / not / nothing", "nothing happened", "doesn't work",
+  "not working", "didn't work". Arabic: "ما اشتغل", "مو شغال", "لسه".
+- Pre-lowercase + trim the message before matching (case-insensitive without
+  exploding the case statement).
+- The `/data/.last_outcome` gate still prevents false-positive corrections on
+  bare "no" answers to questions.
+
+No version bump to dependencies, no schema changes, no migration. Drop-in
+restart.
+
 ## 3.1.3 (May 2026) — Lessons loop, model routing, musl-safe ha-logbook
 
 **Self-improvement primitives.** v3.1.2 had `LESSONS.md` auto-prepended to every
