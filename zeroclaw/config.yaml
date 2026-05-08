@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 3.1.3.1
+version: 3.1.3.2
 slug: zeroclaw
 description: AI home automation agent — policy-gated, can create scenes & automations
 url: https://github.com/Nafjan/zeroclaw-ha-addon
@@ -20,7 +20,7 @@ options:
   telegram_allowed_users: ""
 
   # --- Models ---
-  default_model: google/gemini-3.1-flash-lite-preview
+  default_model: deepseek/deepseek-v4-flash
   complex_model: anthropic/claude-sonnet-4.6
   log_level: info
 
