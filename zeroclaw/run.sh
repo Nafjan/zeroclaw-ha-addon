@@ -1,10 +1,11 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.3.1 — lessons loop hotfix
-# (registers zc.set_outcome / zc.lesson_add as first-class tools, widens
-#  correction regex to cover negation phrasings)
+# ZeroClaw HAOS Add-on v3.1.3.2 — default model swap
+# (swaps default_model to deepseek/deepseek-v4-flash for reliable structured
+#  tool-calling; gemini-3.1-flash-lite-preview emitted <tool_call> markup as
+#  text instead of OpenAI-format tool_calls JSON, so no tools fired in v3.1.3.1)
 
-ADDON_VERSION="3.1.3.1"
+ADDON_VERSION="3.1.3.2"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
