@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.1.3.2 (May 2026) — Default-model swap (function-calling fix)
+
+v3.1.3.1 wired the lessons loop correctly, but a 6-day audit-log gap exposed a
+deeper regression: **no tools have actually fired since May 2.** The agent was
+emitting `<tool_call>{...}</tool_call>` as text (Gemini-flavored markup) instead
+of the structured OpenAI-format `tool_calls` JSON ZeroClaw's runtime expects.
+Root cause: `google/gemini-3.1-flash-lite-preview` does not reliably produce
+structured function calls on OpenRouter — it falls back to text-tag markup that
+the gateway can't dispatch.
+
+### Fix
+
+- **`default_model` swapped from `google/gemini-3.1-flash-lite-preview` →
+  `deepseek/deepseek-v4-flash`** (1M ctx, $0.14/M in, $0.28/M out, native
+  function-calling). Restores end-to-end tool execution: HA actions, lessons
+  loop, audit logging, undo — all dependent on tools firing.
+- Documented backup model: `google/gemini-flash-latest` (latest stable Gemini
+  Flash, non-2.x, non-lite, non-preview alias). Manual swap via addon
+  Configuration tab if `deepseek-v4-flash` becomes unavailable.
+
+No code changes; pure config-default swap. Existing installs need to either:
+1. **HA UI**: addon Configuration tab → `default_model` field → set to
+   `deepseek/deepseek-v4-flash` → Save → Restart, OR
+2. **CLI**: `ha addons options 724beab2_zeroclaw --options
+   '{"default_model":"deepseek/deepseek-v4-flash"}'` → `ha addons restart
+   724beab2_zeroclaw`.
+
+Fresh installs pick up the new default automatically.
+
+### Verification
+
+After restart, send a Telegram action ("turn on study lights"). Expected:
+- `/data/audit/$(date -u +%Y-%m-%d).jsonl` grows with a real `apply` entry
+- `/data/.last_outcome` populates with the outcome line
+- The light actually toggles in HA
+- A correction reply ("they're not on") triggers the lessons-loop branch
+
+If the audit log stays empty after a real action, the model swap didn't take
+— double-check the Configuration tab actually saved.
+
 ## 3.1.3.1 (May 2026) — Lessons-loop hotfix
 
 Live trace from a real Telegram correction showed v3.1.3 didn't fire the
