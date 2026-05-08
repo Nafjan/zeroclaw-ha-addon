@@ -1,11 +1,11 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.3.2 — default model swap
-# (swaps default_model to deepseek/deepseek-v4-flash for reliable structured
-#  tool-calling; gemini-3.1-flash-lite-preview emitted <tool_call> markup as
-#  text instead of OpenAI-format tool_calls JSON, so no tools fired in v3.1.3.1)
+# ZeroClaw HAOS Add-on v3.1.3.3 — fallback chains for both routes
+# (adds reliability.model_fallbacks: default deepseek-v4-flash → google/gemini-flash-latest;
+#  complex anthropic/claude-sonnet-4.6 → deepseek/deepseek-v4-pro; v3.1.3.2 swapped the
+#  default; v3.1.3.3 makes both routes resilient to provider-side failures)
 
-ADDON_VERSION="3.1.3.2"
+ADDON_VERSION="3.1.3.3"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -1094,7 +1094,8 @@ provider_retries = 2
 provider_backoff_ms = 300
 
 [reliability.model_fallbacks]
-"${COMPLEX_MODEL}" = ["${DEFAULT_MODEL}"]
+"${DEFAULT_MODEL}" = ["google/gemini-flash-latest"]
+"${COMPLEX_MODEL}" = ["deepseek/deepseek-v4-pro", "${DEFAULT_MODEL}"]
 
 [observability]
 backend = "log"
