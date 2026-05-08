@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.1.3.3 (May 2026) — Fallback chains for both routes
+
+User asked for explicit backups on both routes after the v3.1.3.2 model swap.
+Wires `reliability.model_fallbacks` so a primary-model outage (provider 5xx,
+rate limit, model deprecation) automatically rolls down to a sibling instead
+of failing the turn.
+
+### Chain
+
+```
+default  (deepseek/deepseek-v4-flash)   → google/gemini-flash-latest
+complex  (anthropic/claude-sonnet-4.6)  → deepseek/deepseek-v4-pro → deepseek/deepseek-v4-flash
+```
+
+`google/gemini-flash-latest` is the latest stable Gemini Flash alias (non-2.x,
+non-lite, non-preview). `deepseek/deepseek-v4-pro` is DeepSeek's reasoning
+sibling to v4-flash on OpenRouter. Both confirmed via `GET /api/v1/models`.
+
+### Notes
+
+- Pure config-default change in `[reliability.model_fallbacks]`. No code paths,
+  no schema, no migration.
+- The complex chain ends with `deepseek-v4-flash` as a final degrade so a
+  reasoning turn never hard-fails — it'll quietly produce a less capable
+  answer rather than 5xx the user.
+- Existing installs pick up the new chain on `ha addons update` (rebuild
+  regenerates `/data/config.toml` from `run.sh`).
+
 ## 3.1.3.2 (May 2026) — Default-model swap (function-calling fix)
 
 v3.1.3.1 wired the lessons loop correctly, but a 6-day audit-log gap exposed a
