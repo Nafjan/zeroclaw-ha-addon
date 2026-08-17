@@ -166,9 +166,11 @@ jobs:
           # built with --remap-path-prefix=/project=.; compiling from the parent
           # checkout would preserve a different `.zeroclaw-source/` prefix.
           pushd .zeroclaw-source >/dev/null
-          # Keep the target path stable: upstream build metadata can embed it.
+          # Match the authoritative build's absolute Cross target root. Cargo
+          # metadata records `/target/...`; a relative path would resolve under
+          # `/project` and produce a materially different artifact.
           # Remove it between runs so the second build is still clean and independent.
-          repro_target_dir="target/zeroclaw-repro"
+          repro_target_dir="/target/zeroclaw-repro"
           rm -rf "$repro_target_dir"
           export CARGO_TARGET_DIR="$repro_target_dir"
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
