@@ -1,0 +1,122 @@
+#!/bin/sh
+# Root-only cleanup for durable approval state.
+#
+# Planner-created pending files and short-lived undo snapshots are handled by
+# the entrypoint's ordinary retention policy.  This helper handles the
+# canonical root-owned ticket, approval marker, receipt, and claim state.  It
+# never follows symlinks and never removes an unexpired ticket.
+set -eu
+
+DATA_DIR="${1:-/data}"
+TICKET_DIR="${DATA_DIR}/approval-receipts/tickets"
+RECEIPT_DIR="${DATA_DIR}/approval-receipts"
+MARKER_DIR="${DATA_DIR}/approved"
+CLAIM_DIR="${RECEIPT_DIR}/.claims"
+LOCK_DIR="${RECEIPT_DIR}/.locks"
+NOW=$(date -u +%s)
+CLAIM_GRACE_SECONDS=3600
+LOCK_GRACE_SECONDS=300
+
+[ "$(id -u)" -eq 0 ] || {
+    echo "state cleanup must run as root" >&2
+    exit 1
+}
+
+valid_short() {
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{8}$'
+}
+
+old_enough() {
+    path="$1"
+    grace="$2"
+    [ -e "$path" ] || [ -L "$path" ] || return 1
+    mtime=$(stat -c %Y "$path" 2>/dev/null || echo 0)
+    case "$mtime" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$mtime" -le $((NOW - grace)) ]
+}
+
+remove_expired_ticket() {
+    ticket="$1"
+    short="$2"
+    claim="${CLAIM_DIR}/${short}.claim"
+    lock="${LOCK_DIR}/approval-${short}.lock"
+
+    # A live transition owns this lock.  A claim without the lock may be an
+    # in-flight HA call, so retain it until it has exceeded the recovery grace.
+    mkdir "$lock" 2>/dev/null || return 0
+    if [ -d "$claim" ] && ! old_enough "$claim" "$CLAIM_GRACE_SECONDS"; then
+        rmdir "$lock" 2>/dev/null || true
+        return 0
+    fi
+
+    rm -f "$ticket" "${MARKER_DIR}/${short}.marker" \
+        "${RECEIPT_DIR}/${short}.sha256" \
+        "${DATA_DIR}/pending/${short}.json"
+    if [ -d "$claim" ]; then
+        rmdir "$claim" 2>/dev/null || true
+    fi
+    rmdir "$lock" 2>/dev/null || true
+}
+
+if [ -d "$TICKET_DIR" ]; then
+    for ticket in "$TICKET_DIR"/*.json; do
+        [ -f "$ticket" ] || [ -L "$ticket" ] || continue
+        [ -L "$ticket" ] && continue
+        short=$(basename "$ticket" .json)
+        valid_short "$short" || continue
+        if ! expires=$(jq -er '.expires_at | select(type == "number" and floor == . and . >= 0)' \
+            "$ticket" 2>/dev/null); then
+            # Malformed or unreadable canonical state is retained for manual
+            # recovery; cleanup must fail closed rather than treat it as old.
+            continue
+        fi
+        case "$expires" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ "$expires" -lt "$NOW" ] || continue
+        remove_expired_ticket "$ticket" "$short"
+    done
+fi
+
+# Remove old orphaned artifacts left by a crash after completion.  A fresh
+# marker/receipt without its canonical ticket is not actionable, but a grace
+# period avoids racing a just-completed broker transition.
+for artifact_dir in "$MARKER_DIR" "$RECEIPT_DIR"; do
+    [ -d "$artifact_dir" ] || continue
+    for artifact in "$artifact_dir"/*.marker "$artifact_dir"/*.sha256; do
+        [ -f "$artifact" ] || [ -L "$artifact" ] || continue
+        [ -L "$artifact" ] && continue
+        short=$(basename "$artifact")
+        short=${short%.marker}
+        short=${short%.sha256}
+        valid_short "$short" || continue
+        [ -e "${TICKET_DIR}/${short}.json" ] && continue
+        old_enough "$artifact" "$CLAIM_GRACE_SECONDS" || continue
+        rm -f "$artifact"
+    done
+done
+
+if [ -d "$CLAIM_DIR" ]; then
+    for claim in "$CLAIM_DIR"/*.claim; do
+        [ -d "$claim" ] || [ -L "$claim" ] || continue
+        [ -L "$claim" ] && continue
+        short=$(basename "$claim" .claim)
+        valid_short "$short" || continue
+        [ -e "${TICKET_DIR}/${short}.json" ] && continue
+        old_enough "$claim" "$CLAIM_GRACE_SECONDS" || continue
+        rmdir "$claim" 2>/dev/null || true
+    done
+fi
+
+# A killed transition can leave an empty lock directory behind.  Only clear
+# locks older than the bounded transition timeout; active locks are retained.
+if [ -d "$LOCK_DIR" ]; then
+    for lock in "$LOCK_DIR"/approval-*.lock; do
+        [ -d "$lock" ] || [ -L "$lock" ] || continue
+        [ -L "$lock" ] && continue
+        old_enough "$lock" "$LOCK_GRACE_SECONDS" || continue
+        rmdir "$lock" 2>/dev/null || true
+    done
+fi

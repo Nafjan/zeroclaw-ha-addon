@@ -1,22 +1,28 @@
 name: ZeroClaw Agent
-version: 3.1.3.3
+version: 3.1.3.5
 slug: zeroclaw
-description: AI home automation agent — policy-gated, can create scenes & automations
+description: AI home automation agent — read-only by default with broker-gated actions
 url: https://github.com/Nafjan/zeroclaw-ha-addon
+# The signed generic GHCR image is the production source.  Keep this aligned
+# with release.yml; Supervisor appends the version tag from this file.
+image: ghcr.io/nafjan/zeroclaw-ha-addon
 arch:
   - aarch64
 init: false
 startup: application
 boot: auto
-hassio_api: true
 homeassistant_api: true
-map:
-  - config:rw
 options:
   # --- Credentials (required) ---
   openrouter_api_key: ""
+  # broker keeps the provider key in the root-owned local model gateway.
+  # direct_temporary is retained only for migration/compatibility testing.
+  provider_key_mode: broker
+  # Deprecated compatibility option. Prefer the Supervisor-provided token.
   ha_token: ""
   telegram_bot_token: ""
+  # Comma-separated Telegram user IDs. The first ID is the sole approval owner
+  # for transactional action tickets; additional IDs may query the agent.
   telegram_allowed_users: ""
 
   # --- Models ---
@@ -28,6 +34,10 @@ options:
   daily_cost_limit_usd: 5.0
   monthly_cost_limit_usd: 20.0
   max_actions_per_hour: 200
+  # Root provider broker admission limits; these are independent of planner
+  # settings and remain enforced when a client calls the local gateway.
+  provider_max_requests_per_hour: 120
+  provider_daily_token_budget: 100000
 
   # --- Agent runtime budgets ---
   max_tool_iterations: 8
@@ -38,20 +48,23 @@ options:
   conversation_retention_days: 30
 
   # --- Home context (used in SOUL.md and world-state) ---
-  home_location: "Al Khobar, Saudi Arabia"
-  home_languages: "en,ar"
+  home_location: ""
+  home_languages: "en"
   quiet_hours: "23:00-06:00"
   confirmation_temp_delta_c: 3
 
   # --- Reports & observer ---
+  # UTC in the current release; keep location/timezone policy out of the image.
   daily_report_time: "08:00"
-  daily_report_enabled: true
-  observer_enabled: true
+  daily_report_enabled: false
+  observer_enabled: false
   observer_interval_minutes: 15
 
   # --- Phase switches ---
+  # Reserved: the broker-only release does not map the host HA /config tree.
   enable_creation_skill: false
   enable_learning_loops: false
+  enable_write_actions: false
 
   # --- Audit & undo ---
   enable_undo: true
@@ -70,6 +83,7 @@ options:
 
 schema:
   openrouter_api_key: password
+  provider_key_mode: list(direct_temporary|broker)
   ha_token: password
   telegram_bot_token: password
   telegram_allowed_users: str
@@ -80,6 +94,8 @@ schema:
   daily_cost_limit_usd: float
   monthly_cost_limit_usd: float
   max_actions_per_hour: int(50,1000)
+  provider_max_requests_per_hour: int(1,1000)
+  provider_daily_token_budget: int(1024,10000000)
 
   max_tool_iterations: int(2,20)
   max_history_messages: int(5,100)
@@ -100,6 +116,7 @@ schema:
 
   enable_creation_skill: bool
   enable_learning_loops: bool
+  enable_write_actions: bool
 
   enable_undo: bool
   audit_retention_days: int(1,365)

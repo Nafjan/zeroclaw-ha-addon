@@ -11,3 +11,14 @@ reviews/
 
 # Build artifacts
 *.tar.gz
+
+# The canonical Supervisor app lives in zeroclaw/.  These legacy root-level
+# copies are retained locally for reference but must not be published as a
+# second, weaker add-on implementation.
+/Dockerfile
+/build.yaml
+/config.yaml
+/config/
+/run.sh
+/CHANGELOG.md
+/repository.yaml

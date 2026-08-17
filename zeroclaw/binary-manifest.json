@@ -1,0 +1,19 @@
+{
+  "project": "zeroclaw",
+  "source_repository": "https://github.com/zeroclaw-labs/zeroclaw.git",
+  "source_commit": "a2988f0dfffa0c14fa56e218c7bb9f28da494da4",
+  "source_date_epoch": 1778210473,
+  "source_lockfile_sha256": "5bedf7d55f4031a83595cd668939f1455037548d0622f77c45df5c6454adb53e",
+  "llvm_rng_seed": "0",
+  "version": "0.7.5",
+  "target": "aarch64-unknown-linux-musl",
+  "profile": "release",
+  "rust_toolchain": "1.89.0",
+  "cross_version": "0.2.5",
+  "cross_image_digest": "sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4",
+  "cargo_incremental": false,
+  "rustflags": "-C link-arg=-static -C link-arg=-Wl,-z,stack-size=8388608 -C link-arg=-Wl,--build-id=none -C llvm-args=--rng-seed=0 --remap-path-prefix=/project=.",
+  "artifact_status": "verified",
+  "build_command": "cargo build --release --locked --target aarch64-unknown-linux-musl",
+  "sha256": "a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341"
+}

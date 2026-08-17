@@ -6,11 +6,18 @@ configuration:
       Your OpenRouter key (https://openrouter.ai). The agent uses OpenRouter to
       reach both the cheap default model (Gemini Flash) and the smarter complex
       model (Claude Sonnet). Required.
+  provider_key_mode:
+    name: "Provider credential mode"
+    description: >-
+      broker keeps the provider key in the root-owned local gateway and is the
+      required mode for write-enabled operation. direct_temporary is only a
+      controlled migration compatibility mode.
   ha_token:
     name: "Home Assistant long-lived token"
     description: >-
-      Settings → Profile → Security → Long-lived access tokens → Create token.
-      Used to call the HA REST API from inside the add-on. Required.
+      Deprecated migration option. The add-on uses the Supervisor-provided
+      token automatically; leave this blank unless completing a controlled
+      legacy-token migration.
   telegram_bot_token:
     name: "Telegram bot token"
     description: >-
@@ -27,7 +34,7 @@ configuration:
     name: "Default model (cheap)"
     description: >-
       Used for trivia, lookups, and simple actions. Default:
-      google/gemini-3.1-flash-lite-preview. Pick any OpenRouter model slug.
+      deepseek/deepseek-v4-flash. Pick any OpenRouter model slug.
   complex_model:
     name: "Complex model (smart)"
     description: >-
@@ -53,6 +60,16 @@ configuration:
     name: "Max actions per hour"
     description: >-
       Rate-limit on guarded HA actions. Acts as a runaway-loop circuit breaker.
+  provider_max_requests_per_hour:
+    name: "Provider requests per hour"
+    description: >-
+      Root broker admission limit for model requests. This remains enforced
+      even if the planner asks for a higher rate.
+  provider_daily_token_budget:
+    name: "Provider daily token budget"
+    description: >-
+      Root broker reservation budget for requested output tokens. Requests
+      without max_tokens reserve the configured provider maximum.
 
   # ─────── Agent runtime budgets ───────
   max_tool_iterations:
@@ -84,8 +101,8 @@ configuration:
   home_location:
     name: "Home location"
     description: >-
-      Free-form (e.g. 'Al Khobar, Saudi Arabia'). Used in the system prompt and
-      for timezone-aware report scheduling.
+      Optional free-form context supplied by the user. It is not embedded in
+      the image and is not used to authorize actions.
   home_languages:
     name: "Home languages"
     description: >-
@@ -106,10 +123,10 @@ configuration:
 
   # ─────── Reports & observer ───────
   daily_report_time:
-    name: "Daily report time (local, HH:MM)"
+    name: "Daily report time (UTC, HH:MM)"
     description: >-
-      What time the agent sends you the daily summary. Local time — converted
-      to UTC internally based on your home location's offset.
+      What time the agent sends the daily summary. The current release interprets
+      this value as UTC; configure the schedule explicitly for your home offset.
   daily_report_enabled:
     name: "Send daily report"
     description: "Disable if you don't want the daily summary."
@@ -152,7 +169,8 @@ configuration:
     description: >-
       strict = confirm everything · balanced = sensible defaults (recommended) ·
       permissive = allow most · custom = ignore presets and use only the
-      explicit lists below + /config/zeroclaw_policy.yaml.
+      explicit lists below. The legacy /config/zeroclaw_policy.yaml file is not
+      parsed by the canonical broker.
   policy_quiet_hours_require_confirm:
     name: "Require confirm during quiet hours"
     description: >-
