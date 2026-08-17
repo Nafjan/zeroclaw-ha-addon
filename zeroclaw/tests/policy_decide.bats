@@ -37,14 +37,14 @@ decide() {
     [[ "$output" == allow:default_light* ]]
 }
 
-@test "scene domain defaults to allow" {
+@test "scene domain defaults to confirm" {
     run decide scene turn_on scene.movie
-    [[ "$output" == allow:default_scene* ]]
+    [[ "$output" == confirm:default_scene* ]]
 }
 
-@test "script domain defaults to allow" {
+@test "script domain defaults to confirm" {
     run decide script turn_on script.morning
-    [[ "$output" == allow:default_script* ]]
+    [[ "$output" == confirm:default_script* ]]
 }
 
 @test "input_boolean defaults to allow" {
@@ -167,11 +167,11 @@ decide() {
     [[ "$output" == confirm:climate_delta_* ]]
 }
 
-@test "climate set_temperature without baseline allows" {
+@test "climate set_temperature without baseline confirms" {
     # No POLICY_CLIMATE_CURRENT set
     BODY='{"entity_id":"climate.bedroom","temperature":18}'
     run decide climate set_temperature climate.bedroom "$BODY"
-    [[ "$output" == allow:climate_no_baseline* ]]
+    [[ "$output" == confirm:climate_no_baseline* ]]
 }
 
 @test "climate non-temperature action allows" {
@@ -248,7 +248,7 @@ decide() {
 @test "quiet hours does not apply to scene domain" {
     POLICY_NOW_HOUR=2
     run decide scene turn_on scene.movie
-    [[ "$output" == allow:default_scene* ]]
+    [[ "$output" == confirm:default_scene* ]]
 }
 
 # ─────────────────────── Bad input ───────────────────────

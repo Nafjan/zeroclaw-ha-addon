@@ -1,5 +1,81 @@
 # Changelog
 
+## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
+
+- Port the checked-in arm64 artifact from ZeroClaw 0.6.8 to the pinned upstream
+  0.7.5 source commit, with two byte-identical Cross builds recorded in the
+  binary manifest.
+- Render the native 0.7.5 `[providers]` schema with an explicit schema version,
+  loopback broker profile, model routes, and optional Telegram channel sections;
+  remove the incompatible legacy `telegram = false` boolean.
+- Update the release rebuild gate for the 0.7.5 workspace, which no longer
+  uses the removed rust-embed deterministic-timestamps feature.
+
+## 3.1.3.4 (August 2026) — Defensive stabilization
+
+- Use the pinned multi-architecture Home Assistant base image and verify the
+  embedded ZeroClaw binary by SHA-256 during the image build.
+- Prefer the Supervisor Home Assistant API proxy and keep the legacy `ha_token`
+  option only as a migration fallback.
+- Keep write actions, scheduling, observer reports, and generic HTTP disabled
+  by default; route enabled writes through the typed capability broker.
+- Bind the gateway to loopback, require pairing, remove raw shell commands from
+  the planner allowlist, and prevent direct invocation of raw HA actions.
+- Preserve sessions and `brain.db` in a versioned migration snapshot instead of
+  deleting them during every app upgrade.
+- Add LF enforcement, full shell checks, startup rendering tests, image smoke
+  tests, and state migration regression coverage.
+- Route all HA reads and writes through a typed loopback capability broker;
+  ZeroClaw runs as an unprivileged user without the Supervisor token.
+- Keep Telegram credentials in a root-only adapter path and bind approvals to
+  the configured owner/chat with a sealed ticket, atomic transition, and
+  replay-resistant marker.
+- Copy each approval request into a root-owned canonical ticket store before
+  Telegram delivery; apply/transition paths never read the planner-writable
+  source ticket, and the displayed action/target is derived from the sealed
+  copy to close a ticket TOCTOU and message-confusion race.
+- Add a root-owned OpenAI-compatible model gateway so `provider_key_mode=broker`
+  keeps the provider key out of the planner; retain `direct_temporary` only as
+  a controlled migration exception.
+- Keep scene/automation creation fail-closed: the broker-only app no longer
+  maps the host HA `/config` tree, so persistent config writes stay disabled
+  until a dedicated broker-backed config writer exists.
+- Add checksum-manifested migration restores, root-owned migration snapshots,
+  binary source provenance, and a tagged-release workflow for OCI provenance,
+  SBOM, and keyless Cosign signing.
+- Route release publication through a protected GitHub `production`
+  environment so authenticated HA canary and backup evidence can be reviewed
+  before the signed image is pushed.
+- Pin the Rust and cross-compilation toolchains plus the source epoch, LLVM RNG
+  seed, and rust-embed deterministic-timestamps feature in the binary manifest.
+  The release workflow rebuilds the recorded source commit twice before any
+  image push; both byte-for-byte outputs must match the published SHA-256.
+- Make audit storage root-owned with a typed planner audit client; only the
+  root capability broker records HA outcome rows, and approval locks are kept
+  outside planner-writable state.
+- Make approval application one-shot with a root-only claim/finalize state;
+  failed executions remain claimed and cannot be replayed. Bound broker
+  connections and Supervisor/Telegram requests so a stalled local client or
+  upstream cannot monopolize a root broker.
+- Normalize planner workspace permissions at startup and move Telegram cursor,
+  allowlist, cost-degrade state, and broker logs out of planner-writable paths.
+- Keep `/data` root-owned with a sticky group boundary so ZeroClaw can create
+  required runtime metadata without being able to replace root-owned audit,
+  approval, migration, or configuration directories.
+- Validate persisted policy modes, booleans, and safety thresholds at startup;
+  malformed legacy options fail closed instead of weakening confirmation.
+- Remove the unnecessary `addon_config` host mapping and add a backup/restore
+  acceptance smoke for persistent `/data`, secret-file permissions,
+  migration/audit state, and exclusion of ephemeral `/run` state.
+- Pin the GitHub Actions used for testing, cross-build, provenance attestation,
+  and Cosign signing to immutable upstream commits.
+- Make signed publication depend on the reusable full acceptance workflow, so
+  a tag cannot push an image before its package, security, broker, concurrency,
+  and backup gates complete.
+- Make Telegram delivery require a successful API envelope and prevent failed
+  approved executions from being presented as applied; claimed tickets remain
+  explicitly marked for recovery.
+
 ## 3.1.3.3 (May 2026) — Fallback chains for both routes
 
 User asked for explicit backups on both routes after the v3.1.3.2 model swap.
@@ -146,7 +222,7 @@ single PR, no runtime rebuild).
   Repeating the same mistake costs more than learning from it.
 - Complex turns route to the reasoning model only when warranted. Simple
   status queries stay on the cheap model. Cost stays flat.
-- `ha-logbook climate.bedroom` and `ha-logbook` (no args) actually return data,
+- `ha-logbook climate.example` and `ha-logbook` (no args) actually return data,
   so the daily review can spot HA-side anomalies.
 
 ### Files touched

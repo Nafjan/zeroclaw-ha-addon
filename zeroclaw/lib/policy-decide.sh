@@ -122,8 +122,14 @@ esac
 # ---------------------------------------------------------------------------
 if [ -z "$VERDICT" ]; then
     case "$DOMAIN" in
-        light|scene|script|input_boolean|input_number|input_select|media_player)
+        light|input_boolean|input_number|input_select|media_player)
             VERDICT="allow:default_$DOMAIN"
+            ;;
+        scene|script)
+            # These domains can trigger arbitrary transitive behavior.  Do
+            # not auto-allow them until the capability broker can inspect the
+            # referenced scene/script graph.
+            VERDICT="confirm:default_$DOMAIN"
             ;;
         climate)
             VERDICT="climate_check"
@@ -170,7 +176,8 @@ if [ "$VERDICT" = "climate_check" ]; then
                 VERDICT="allow:climate_within_delta_${DELTA}c"
             fi
         else
-            VERDICT="allow:climate_no_baseline"
+            # Missing state is not evidence that a climate change is safe.
+            VERDICT="confirm:climate_no_baseline"
         fi
     else
         VERDICT="allow:climate_$ACTION"

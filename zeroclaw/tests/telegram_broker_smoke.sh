@@ -1,0 +1,82 @@
+#!/bin/sh
+# Exercises the Telegram capability client, broker response, and ticket seal
+# without contacting Telegram.
+set -eu
+
+mkdir -p /tmp/fake-curl
+cat > /tmp/fake-curl/curl <<'FAKE_CURL'
+#!/bin/sh
+if [ -f /data/telegram-fake-error ]; then
+    printf '%s\n' '{"ok":false,"error_code":400,"description":"Bad Request: invalid request"}'
+    exit 0
+fi
+if [ -f /data/telegram-fake-leak ]; then
+    printf '%s\n' '{"ok":true,"result":{"message_id":123,"text":"telegram-secret"}}'
+    exit 0
+fi
+printf '%s\n' '{"ok":true,"result":{"message_id":123}}'
+FAKE_CURL
+chmod +x /tmp/fake-curl/curl
+
+mkdir -p /data/pending /data/approval-receipts /data/approval-receipts/.locks
+jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
+    '{uuid:"abcdef12",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    > /data/pending/abcdef12.json
+
+(
+    export PATH="/tmp/fake-curl:$PATH"
+    export TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
+    export TELEGRAM_APPROVAL_CHAT=42
+    export ZEROCLAW_TELEGRAM_PORT=42629
+    while true; do
+        if ! /bin/busybox nc -l -p 42629 -s 127.0.0.1 -e /usr/local/bin/tg-broker-entrypoint; then
+            sleep 1
+        fi
+    done
+) &
+
+RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_approval abcdef12 42 'Approve kitchen light')
+printf '%s' "$RESPONSE" | jq -e '.message_id == 123' >/dev/null
+[ -f /data/approval-receipts/abcdef12.sha256 ]
+[ -f /data/approval-receipts/tickets/abcdef12.json ]
+test "$(stat -c '%u:%a' /data/approval-receipts/tickets/abcdef12.json)" = "0:600"
+SEALED_NOW=$(date -u +%s)
+SEALED_EXP=$(jq -r '.expires_at' /data/approval-receipts/tickets/abcdef12.json)
+[ "$SEALED_EXP" -le "$((SEALED_NOW + 1800))" ]
+
+if RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_text 43 'unexpected recipient' 2>/dev/null); then
+    echo "Telegram broker accepted a non-owner chat" >&2
+    exit 1
+fi
+
+if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 >/dev/null 2>&1; then
+    echo "Telegram broker smoke accepted the wrong actor" >&2
+    exit 1
+fi
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 42 42 >/dev/null
+
+# Telegram can return HTTP 200 with {"ok":false}; that must not seal a
+# canonical ticket as delivered.  A response containing the bot credential
+# must also be rejected before it reaches the planner.
+for short in badcafe0 badcafe1; do
+    jq -nc --argjson exp "$(( $(date -u +%s) + 300 ))" --arg uuid "$short" \
+        '{uuid:$uuid,service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+        > "/data/pending/${short}.json"
+done
+touch /data/telegram-fake-error
+if ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_approval badcafe0 42 'Approve kitchen light' >/dev/null 2>&1; then
+    echo "Telegram HTTP-200 error was accepted" >&2
+    exit 1
+fi
+rm -f /data/telegram-fake-error
+[ ! -e /data/approval-receipts/tickets/badcafe0.json ]
+[ ! -e /data/approval-receipts/badcafe0.sha256 ]
+
+touch /data/telegram-fake-leak
+if ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_approval badcafe1 42 'Approve kitchen light' >/dev/null 2>&1; then
+    echo "Telegram credential echo was accepted" >&2
+    exit 1
+fi
+rm -f /data/telegram-fake-leak
+[ ! -e /data/approval-receipts/tickets/badcafe1.json ]
+[ ! -e /data/approval-receipts/badcafe1.sha256 ]
