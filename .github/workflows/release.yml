@@ -137,7 +137,6 @@ jobs:
         shell: bash
         env:
           CROSS_CONTAINER_ENGINE: docker
-          CROSS_CONTAINER_OPTS: "--cpus=1"
           CROSS_DEBUG: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
           CARGO_INCREMENTAL: "0"
@@ -175,10 +174,9 @@ jobs:
           # Use Cross's canonical target root: it mounts the host checkout's
           # `target/` directory as `/target` inside the build container. This
           # matches the authoritative build metadata and keeps the output path
-          # outside the remapped `/project` tree. Remove it between runs so
-          # the second build is still clean and independent. The container is
-          # single-CPU constrained so LLVM codegen cannot reorder work across
-          # parallel workers between clean builds.
+          # outside the remapped `/project` tree. Remove it before each run so
+          # every comparison starts with a clean target tree. Cargo/Cross cache
+          # state remains persistent and is captured as diagnostics below.
           repro_target_dir="target"
           rm -rf "$repro_target_dir"
           cross_install_target="${RUNNER_TEMP}/zeroclaw-cross-install"
@@ -192,6 +190,19 @@ jobs:
           # CARGO_TARGET_DIR through the build environment or override the
           # target root with a Cargo CLI option.
           unset CARGO_TARGET_DIR
+          dependency_manifest() {
+            local dep_dir="$1"
+            local output="$2"
+            if [ -d "$dep_dir" ]; then
+              (
+                cd "$dep_dir" || exit 1
+                find . -maxdepth 1 -type f \( -name '*.rlib' -o -name '*.rmeta' \) \
+                  -print0 | sort -z | xargs -0 -r sha256sum
+              ) > "$output"
+            else
+              : > "$output"
+            fi
+          }
           cross build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
@@ -199,6 +210,9 @@ jobs:
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
           test -f "$rebuilt"
           rebuilt_sha="$(sha256sum "$rebuilt" | awk '{print $1}')"
+          dependency_manifest \
+            "$repro_target_dir/${{ steps.metadata.outputs.target }}/release/deps" \
+            /tmp/zeroclaw-deps-first.txt
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
           cross build --release --locked \
@@ -208,11 +222,76 @@ jobs:
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
           test -f "$repeated"
           repeat_sha="$(sha256sum "$repeated" | awk '{print $1}')"
-          printf 'reproducibility hashes: first=%s second=%s expected=%s\n' \
-            "$rebuilt_sha" "$repeat_sha" "${{ steps.metadata.outputs.binary_sha }}"
-          cmp -s /tmp/zeroclaw-rebuild-first "$repeated"
-          test "$rebuilt_sha" = "$repeat_sha"
-          test "$repeat_sha" = "${{ steps.metadata.outputs.binary_sha }}"
+          dependency_manifest \
+            "$repro_target_dir/${{ steps.metadata.outputs.target }}/release/deps" \
+            /tmp/zeroclaw-deps-second.txt
+          cp "$repeated" /tmp/zeroclaw-rebuild-second
+          rm -rf "$repro_target_dir"
+          cross build --release --locked \
+            --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
+            --target "${{ steps.metadata.outputs.target }}" \
+            --manifest-path Cargo.toml
+          third="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
+          test -f "$third"
+          third_sha="$(sha256sum "$third" | awk '{print $1}')"
+          dependency_manifest \
+            "$repro_target_dir/${{ steps.metadata.outputs.target }}/release/deps" \
+            /tmp/zeroclaw-deps-third.txt
+          cp "$third" /tmp/zeroclaw-rebuild-third
+          printf 'reproducibility hashes: first=%s second=%s third=%s expected=%s\n' \
+            "$rebuilt_sha" "$repeat_sha" "$third_sha" "${{ steps.metadata.outputs.binary_sha }}"
+          printf 'dependency manifest hashes: first=%s second=%s third=%s\n' \
+            "$(sha256sum /tmp/zeroclaw-deps-first.txt | awk '{print $1}')" \
+            "$(sha256sum /tmp/zeroclaw-deps-second.txt | awk '{print $1}')" \
+            "$(sha256sum /tmp/zeroclaw-deps-third.txt | awk '{print $1}')"
+          binary_gate=0
+          if cmp -s /tmp/zeroclaw-rebuild-first /tmp/zeroclaw-rebuild-second; then
+            echo 'binary first_vs_second: identical'
+          else
+            echo 'binary first_vs_second: DIFFERENT'
+            binary_gate=1
+          fi
+          if cmp -s /tmp/zeroclaw-rebuild-first /tmp/zeroclaw-rebuild-third; then
+            echo 'binary first_vs_third: identical'
+          else
+            echo 'binary first_vs_third: DIFFERENT'
+            binary_gate=1
+          fi
+          if cmp -s /tmp/zeroclaw-rebuild-second /tmp/zeroclaw-rebuild-third; then
+            echo 'binary second_vs_third: identical'
+          else
+            echo 'binary second_vs_third: DIFFERENT'
+            binary_gate=1
+          fi
+          if [ "$rebuilt_sha" = "$repeat_sha" ]; then
+            echo 'binary SHA first_vs_second: equal'
+          else
+            echo 'binary SHA first_vs_second: DIFFERENT'
+            binary_gate=1
+          fi
+          if [ "$rebuilt_sha" = "$third_sha" ]; then
+            echo 'binary SHA first_vs_third: equal'
+          else
+            echo 'binary SHA first_vs_third: DIFFERENT'
+            binary_gate=1
+          fi
+          if [ "$repeat_sha" = "$third_sha" ]; then
+            echo 'binary SHA second_vs_third: equal'
+          else
+            echo 'binary SHA second_vs_third: DIFFERENT'
+            binary_gate=1
+          fi
+          recorded_gate=0
+          for observed_sha in "$rebuilt_sha" "$repeat_sha" "$third_sha"; do
+            if [ "$observed_sha" = "${{ steps.metadata.outputs.binary_sha }}" ]; then
+              echo "recorded SHA match: $observed_sha"
+            else
+              echo "recorded SHA mismatch: observed=$observed_sha expected=${{ steps.metadata.outputs.binary_sha }}"
+              recorded_gate=1
+            fi
+          done
+          test "$binary_gate" -eq 0
+          test "$recorded_gate" -eq 0
           popd >/dev/null
           cp /tmp/zeroclaw-rebuild-first zeroclaw/zeroclaw-bin
           test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "${{ steps.metadata.outputs.binary_sha }}"
@@ -224,19 +303,53 @@ jobs:
           set +e
           mkdir -p repro-diagnostics
           first=/tmp/zeroclaw-rebuild-first
-          second=.zeroclaw-source/target/${{ steps.metadata.outputs.target }}/release/zeroclaw
-          for item in "$first" "$second"; do
-            if [ -f "$item" ]; then
-              sha256sum "$item"
-              file "$item"
-            fi
-          done | tee repro-diagnostics/summary.txt
+          second=/tmp/zeroclaw-rebuild-second
+          third=/tmp/zeroclaw-rebuild-third
+          {
+            for item in "$first" "$second" "$third"; do
+              if [ -f "$item" ]; then
+                printf 'size_bytes=%s ' "$(stat -c '%s' "$item" 2>/dev/null || wc -c < "$item")"
+                sha256sum "$item"
+                file "$item"
+              fi
+            done
+          } | tee repro-diagnostics/summary.txt
           [ -f "$first" ] && cp "$first" repro-diagnostics/first.elf
           [ -f "$second" ] && cp "$second" repro-diagnostics/second.elf
+          [ -f "$third" ] && cp "$third" repro-diagnostics/third.elf
+          for item in /tmp/zeroclaw-deps-first.txt /tmp/zeroclaw-deps-second.txt /tmp/zeroclaw-deps-third.txt; do
+            [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
+          done
+          : > repro-diagnostics/byte-difference-summary.txt
+          byte_diff_summary() {
+            local label="$1"
+            local left="$2"
+            local right="$3"
+            printf '%s: ' "$label"
+            cmp -l "$left" "$right" | awk '
+              NR == 1 { first_offset = $1 }
+              { last_offset = $1; count++ }
+              END {
+                if (count) {
+                  printf "different_bytes=%d first_offset=%s last_offset=%s\n", count, first_offset, last_offset
+                } else {
+                  print "identical"
+                }
+              }
+            '
+          }
           if [ -f "$first" ] && [ -f "$second" ]; then
             cmp -l "$first" "$second" | head -n 128 > repro-diagnostics/first-differences.txt
-            readelf -h -n -S "$first" > repro-diagnostics/first-readelf.txt 2>&1
-            readelf -h -n -S "$second" > repro-diagnostics/second-readelf.txt 2>&1
+            byte_diff_summary first_vs_second "$first" "$second" >> repro-diagnostics/byte-difference-summary.txt
+            readelf -W -h -n -S "$first" > repro-diagnostics/first-readelf.txt 2>&1
+            readelf -W -h -n -S "$second" > repro-diagnostics/second-readelf.txt 2>&1
+          fi
+          if [ -f "$first" ] && [ -f "$third" ]; then
+            byte_diff_summary first_vs_third "$first" "$third" >> repro-diagnostics/byte-difference-summary.txt
+            readelf -W -h -n -S "$third" > repro-diagnostics/third-readelf.txt 2>&1
+          fi
+          if [ -f "$second" ] && [ -f "$third" ]; then
+            byte_diff_summary second_vs_third "$second" "$third" >> repro-diagnostics/byte-difference-summary.txt
           fi
 
       - name: Upload reproducibility diagnostics
