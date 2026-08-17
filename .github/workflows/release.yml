@@ -171,11 +171,12 @@ jobs:
           # built with --remap-path-prefix=/project=.; compiling from the parent
           # checkout would preserve a different `.zeroclaw-source/` prefix.
           pushd .zeroclaw-source >/dev/null
-          # Keep the host target directory writable; Cross mounts it as
-          # `/target` inside the build container, matching the authoritative
-          # Cargo metadata without attempting to create `/target` on the host.
-          # Remove it between runs so the second build is still clean and independent.
-          repro_target_dir="target/zeroclaw-repro"
+          # Use Cross's canonical target root: it mounts the host checkout's
+          # `target/` directory as `/target` inside the build container. This
+          # matches the authoritative build metadata and keeps the output path
+          # outside the remapped `/project` tree. Remove it between runs so
+          # the second build is still clean and independent.
+          repro_target_dir="target"
           rm -rf "$repro_target_dir"
           cross_install_target="${RUNNER_TEMP}/zeroclaw-cross-install"
           rm -rf "$cross_install_target"
@@ -185,12 +186,11 @@ jobs:
           rustup default "$RUSTUP_TOOLCHAIN"
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
           # Cross owns the host/container target mount. Do not pass its
-          # CARGO_TARGET_DIR through the build environment; select the host
-          # target root with Cross's supported Cargo-compatible CLI option.
+          # CARGO_TARGET_DIR through the build environment or override the
+          # target root with a Cargo CLI option.
           unset CARGO_TARGET_DIR
           cross build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
-            --target-dir "$repro_target_dir" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -200,7 +200,6 @@ jobs:
           rm -rf "$repro_target_dir"
           cross build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
-            --target-dir "$repro_target_dir" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -222,7 +221,7 @@ jobs:
           set +e
           mkdir -p repro-diagnostics
           first=/tmp/zeroclaw-rebuild-first
-          second=.zeroclaw-source/target/zeroclaw-repro/${{ steps.metadata.outputs.target }}/release/zeroclaw
+          second=.zeroclaw-source/target/${{ steps.metadata.outputs.target }}/release/zeroclaw
           for item in "$first" "$second"; do
             if [ -f "$item" ]; then
               sha256sum "$item"
