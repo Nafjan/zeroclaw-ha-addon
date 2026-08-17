@@ -74,6 +74,7 @@ jobs:
           cross_version="$(jq -r '.cross_version' zeroclaw/binary-manifest.json)"
           cross_image_digest="$(jq -r '.cross_image_digest' zeroclaw/binary-manifest.json)"
           cargo_incremental="$(jq -r '.cargo_incremental' zeroclaw/binary-manifest.json)"
+          cargo_build_jobs="$(jq -r '.cargo_build_jobs' zeroclaw/binary-manifest.json)"
           rustflags="$(jq -r '.rustflags' zeroclaw/binary-manifest.json)"
           artifact_status="$(jq -r '.artifact_status' zeroclaw/binary-manifest.json)"
           build_command="$(jq -r '.build_command' zeroclaw/binary-manifest.json)"
@@ -95,9 +96,10 @@ jobs:
           test "$cross_version" = "0.2.5"
           printf '%s' "$cross_image_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
           test "$cargo_incremental" = "false"
+          test "$cargo_build_jobs" = "1"
           test "$artifact_status" = "verified"
           test -n "$rustflags"
-          test "$build_command" = "cargo build --release --locked --target aarch64-unknown-linux-musl"
+          test "$build_command" = "cargo build --release --locked --jobs 1 --target aarch64-unknown-linux-musl"
           test -n "$binary_sha"
           test -n "$image"
           {
@@ -112,6 +114,7 @@ jobs:
             printf 'cross_version=%s\n' "$cross_version"
             printf 'cross_image_digest=%s\n' "$cross_image_digest"
             printf 'cargo_incremental=%s\n' "$cargo_incremental"
+            printf 'cargo_build_jobs=%s\n' "$cargo_build_jobs"
             printf 'rustflags=%s\n' "$rustflags"
             printf 'binary_sha=%s\n' "$binary_sha"
             printf 'image=%s\n' "$image"
@@ -137,6 +140,7 @@ jobs:
           CROSS_DEBUG: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
           CARGO_INCREMENTAL: "0"
+          CARGO_BUILD_JOBS: ${{ steps.metadata.outputs.cargo_build_jobs }}
         run: |
           set -euo pipefail
           test "$(git -C .zeroclaw-source rev-parse HEAD)" = "${{ steps.metadata.outputs.source_commit }}"
@@ -154,6 +158,7 @@ jobs:
           passthrough = [
             "SOURCE_DATE_EPOCH",
             "CARGO_INCREMENTAL",
+            "CARGO_BUILD_JOBS",
             "CARGO_TARGET_DIR",
             "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",
             "RUSTUP_TOOLCHAIN",
@@ -173,11 +178,16 @@ jobs:
           # Remove it between runs so the second build is still clean and independent.
           repro_target_dir="target/zeroclaw-repro"
           rm -rf "$repro_target_dir"
-          export CARGO_TARGET_DIR="$repro_target_dir"
+          cross_install_target="${RUNNER_TEMP}/zeroclaw-cross-install"
+          rm -rf "$cross_install_target"
+          mkdir -p "$cross_install_target"
+          export CARGO_TARGET_DIR="$cross_install_target"
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
+          export CARGO_TARGET_DIR="$repro_target_dir"
           cross build --release --locked \
+            --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -187,6 +197,7 @@ jobs:
           rm -rf "$repro_target_dir"
           export CARGO_TARGET_DIR="$repro_target_dir"
           cross build --release --locked \
+            --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
