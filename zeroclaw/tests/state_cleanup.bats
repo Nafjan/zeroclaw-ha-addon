@@ -2,6 +2,9 @@
 
 setup() {
     command -v jq >/dev/null 2>&1 || skip "state cleanup tests require jq"
+    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+        skip "state cleanup tests require root or sudo"
+    fi
     TEST_ROOT="$(mktemp -d)"
     DATA_DIR="$TEST_ROOT/data"
     mkdir -p "$DATA_DIR/approval-receipts/tickets" \
@@ -9,6 +12,14 @@ setup() {
         "$DATA_DIR/approval-receipts/.locks" \
         "$DATA_DIR/approved" "$DATA_DIR/pending"
     NOW="$(date -u +%s)"
+}
+
+run_cleanup() {
+    if [ "$(id -u)" -eq 0 ]; then
+        run "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh" "$DATA_DIR"
+    else
+        run sudo "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh" "$DATA_DIR"
+    fi
 }
 
 teardown() {
@@ -26,7 +37,7 @@ teardown() {
     printf '{}\n' > "$DATA_DIR/approved/deadbeef.marker"
     printf '{}\n' > "$DATA_DIR/pending/deadbeef.json"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh" "$DATA_DIR"
+    run_cleanup
     [ "$status" -eq 0 ]
     [ ! -e "$DATA_DIR/approval-receipts/tickets/deadbeef.json" ]
     [ ! -e "$DATA_DIR/approval-receipts/.claims/deadbeef.claim" ]
@@ -41,7 +52,7 @@ teardown() {
     printf 'receipt\n' > "$DATA_DIR/approval-receipts/c0ffee12.sha256"
     printf '{}\n' > "$DATA_DIR/approved/c0ffee12.marker"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh" "$DATA_DIR"
+    run_cleanup
     [ "$status" -eq 0 ]
     [ -f "$DATA_DIR/approval-receipts/tickets/c0ffee12.json" ]
     [ -f "$DATA_DIR/approval-receipts/c0ffee12.sha256" ]
@@ -59,7 +70,7 @@ teardown() {
         "$DATA_DIR/approval-receipts/.claims/badc0de1.claim" \
         "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh" "$DATA_DIR"
+    run_cleanup
     [ "$status" -eq 0 ]
     [ ! -e "$DATA_DIR/approval-receipts/feedcafe.sha256" ]
     [ ! -e "$DATA_DIR/approved/feedcafe.marker" ]
