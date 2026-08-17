@@ -137,6 +137,7 @@ jobs:
         shell: bash
         env:
           CROSS_CONTAINER_ENGINE: docker
+          CROSS_CONTAINER_OPTS: "--cpus=1"
           CROSS_DEBUG: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
           CARGO_INCREMENTAL: "0"
@@ -175,7 +176,9 @@ jobs:
           # `target/` directory as `/target` inside the build container. This
           # matches the authoritative build metadata and keeps the output path
           # outside the remapped `/project` tree. Remove it between runs so
-          # the second build is still clean and independent.
+          # the second build is still clean and independent. The container is
+          # single-CPU constrained so LLVM codegen cannot reorder work across
+          # parallel workers between clean builds.
           repro_target_dir="target"
           rm -rf "$repro_target_dir"
           cross_install_target="${RUNNER_TEMP}/zeroclaw-cross-install"
