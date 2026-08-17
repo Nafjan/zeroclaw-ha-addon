@@ -159,7 +159,6 @@ jobs:
             "SOURCE_DATE_EPOCH",
             "CARGO_INCREMENTAL",
             "CARGO_BUILD_JOBS",
-            "CARGO_TARGET_DIR",
             "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",
             "RUSTUP_TOOLCHAIN",
           ]
@@ -185,9 +184,13 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
-          export CARGO_TARGET_DIR="$repro_target_dir"
+          # Cross owns the host/container target mount. Do not pass its
+          # CARGO_TARGET_DIR through the build environment; select the host
+          # target root with Cross's supported Cargo-compatible CLI option.
+          unset CARGO_TARGET_DIR
           cross build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
+            --target-dir "$repro_target_dir" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -195,9 +198,9 @@ jobs:
           rebuilt_sha="$(sha256sum "$rebuilt" | awk '{print $1}')"
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
-          export CARGO_TARGET_DIR="$repro_target_dir"
           cross build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
+            --target-dir "$repro_target_dir" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
