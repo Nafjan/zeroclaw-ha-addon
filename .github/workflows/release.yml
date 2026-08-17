@@ -182,6 +182,8 @@ jobs:
           repeated="$second_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
           test -f "$repeated"
           repeat_sha="$(sha256sum "$repeated" | awk '{print $1}')"
+          printf 'reproducibility hashes: first=%s second=%s expected=%s\n' \
+            "$rebuilt_sha" "$repeat_sha" "${{ steps.metadata.outputs.binary_sha }}"
           cmp -s /tmp/zeroclaw-rebuild-first "$repeated"
           test "$rebuilt_sha" = "$repeat_sha"
           test "$repeat_sha" = "${{ steps.metadata.outputs.binary_sha }}"
