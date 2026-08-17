@@ -162,6 +162,10 @@ jobs:
           image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}"
           EOF
           export CROSS_CONFIG="$PWD/.cross-release.toml"
+          # Build from the pinned source checkout root. The recorded artifact was
+          # built with --remap-path-prefix=/project=.; compiling from the parent
+          # checkout would preserve a different `.zeroclaw-source/` prefix.
+          pushd .zeroclaw-source >/dev/null
           # Keep the target path stable: upstream build metadata can embed it.
           # Remove it between runs so the second build is still clean and independent.
           repro_target_dir="target/zeroclaw-repro"
@@ -172,7 +176,7 @@ jobs:
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
           cross build --release --locked \
             --target "${{ steps.metadata.outputs.target }}" \
-            --manifest-path .zeroclaw-source/Cargo.toml
+            --manifest-path Cargo.toml
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
           test -f "$rebuilt"
           rebuilt_sha="$(sha256sum "$rebuilt" | awk '{print $1}')"
@@ -181,7 +185,7 @@ jobs:
           export CARGO_TARGET_DIR="$repro_target_dir"
           cross build --release --locked \
             --target "${{ steps.metadata.outputs.target }}" \
-            --manifest-path .zeroclaw-source/Cargo.toml
+            --manifest-path Cargo.toml
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
           test -f "$repeated"
           repeat_sha="$(sha256sum "$repeated" | awk '{print $1}')"
@@ -190,6 +194,7 @@ jobs:
           cmp -s /tmp/zeroclaw-rebuild-first "$repeated"
           test "$rebuilt_sha" = "$repeat_sha"
           test "$repeat_sha" = "${{ steps.metadata.outputs.binary_sha }}"
+          popd >/dev/null
           cp /tmp/zeroclaw-rebuild-first zeroclaw/zeroclaw-bin
           test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "${{ steps.metadata.outputs.binary_sha }}"
 
