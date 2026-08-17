@@ -134,6 +134,7 @@ jobs:
         shell: bash
         env:
           CROSS_CONTAINER_ENGINE: docker
+          CROSS_DEBUG: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
           CARGO_INCREMENTAL: "0"
         run: |
@@ -166,11 +167,11 @@ jobs:
           # built with --remap-path-prefix=/project=.; compiling from the parent
           # checkout would preserve a different `.zeroclaw-source/` prefix.
           pushd .zeroclaw-source >/dev/null
-          # Match the authoritative build's absolute Cross target root. Cargo
-          # metadata records `/target/...`; a relative path would resolve under
-          # `/project` and produce a materially different artifact.
+          # Keep the host target directory writable; Cross mounts it as
+          # `/target` inside the build container, matching the authoritative
+          # Cargo metadata without attempting to create `/target` on the host.
           # Remove it between runs so the second build is still clean and independent.
-          repro_target_dir="/target/zeroclaw-repro"
+          repro_target_dir="target/zeroclaw-repro"
           rm -rf "$repro_target_dir"
           export CARGO_TARGET_DIR="$repro_target_dir"
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
@@ -199,6 +200,37 @@ jobs:
           popd >/dev/null
           cp /tmp/zeroclaw-rebuild-first zeroclaw/zeroclaw-bin
           test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "${{ steps.metadata.outputs.binary_sha }}"
+
+      - name: Collect reproducibility diagnostics
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set +e
+          mkdir -p repro-diagnostics
+          first=/tmp/zeroclaw-rebuild-first
+          second=.zeroclaw-source/target/zeroclaw-repro/${{ steps.metadata.outputs.target }}/release/zeroclaw
+          for item in "$first" "$second"; do
+            if [ -f "$item" ]; then
+              sha256sum "$item"
+              file "$item"
+            fi
+          done | tee repro-diagnostics/summary.txt
+          [ -f "$first" ] && cp "$first" repro-diagnostics/first.elf
+          [ -f "$second" ] && cp "$second" repro-diagnostics/second.elf
+          if [ -f "$first" ] && [ -f "$second" ]; then
+            cmp -l "$first" "$second" | head -n 128 > repro-diagnostics/first-differences.txt
+            readelf -h -n -S "$first" > repro-diagnostics/first-readelf.txt 2>&1
+            readelf -h -n -S "$second" > repro-diagnostics/second-readelf.txt 2>&1
+          fi
+
+      - name: Upload reproducibility diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-repro-diagnostics-${{ github.run_id }}
+          path: repro-diagnostics
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
