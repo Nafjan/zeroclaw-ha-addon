@@ -155,6 +155,7 @@ jobs:
             "CARGO_INCREMENTAL",
             "CARGO_TARGET_DIR",
             "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",
+            "RUSTUP_TOOLCHAIN",
           ]
 
           [target.aarch64-unknown-linux-musl]
