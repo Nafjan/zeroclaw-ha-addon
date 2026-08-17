@@ -47,6 +47,17 @@ jobs:
             exit 1
           fi
 
+      - name: Require executable mode for shipped shell scripts
+        shell: bash
+        run: |
+          for script in zeroclaw/run.sh zeroclaw/lib/*.sh zeroclaw/tests/*.sh; do
+            mode="$(git ls-files --stage -- "$script" | awk '{print $1}')"
+            test "$mode" = "100755" || {
+              echo "shipped shell script is not executable in git: $script (mode $mode)"
+              exit 1
+            }
+          done
+
       - name: Parse every shipped shell script
         run: |
           sh -n zeroclaw/run.sh
