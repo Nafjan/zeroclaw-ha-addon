@@ -20,6 +20,14 @@ on:
         description: "Link or ticket identifying the completed read-only HA canary"
         required: false
         type: string
+      builder_mode:
+        description: "Reproducible builder implementation to exercise"
+        required: false
+        default: cross
+        type: choice
+        options:
+          - cross
+          - direct
 
 permissions:
   contents: read
@@ -59,9 +67,15 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILDER_MODE: ${{ inputs.builder_mode }}
         run: |
           set -euo pipefail
           version="$(awk '$1 == "version:" {print $2; exit}' zeroclaw/config.yaml)"
+          builder_mode="${BUILDER_MODE:-cross}"
+          case "$builder_mode" in
+            cross|direct) ;;
+            *) echo "unsupported builder_mode=$builder_mode" >&2; exit 1 ;;
+          esac
           release_tag="$RELEASE_TAG"
           release_version="${release_tag#v}"
           source_repository="$(jq -r '.source_repository' zeroclaw/binary-manifest.json)"
@@ -102,6 +116,7 @@ jobs:
           test -n "$image"
           {
             printf 'version=%s\n' "$version"
+            printf 'builder_mode=%s\n' "$builder_mode"
             printf 'release_tag=%s\n' "$release_tag"
             printf 'source_commit=%s\n' "$source_commit"
             printf 'source_date_epoch=%s\n' "$source_date_epoch"
@@ -128,9 +143,124 @@ jobs:
           fetch-depth: 1
 
       - name: Set up QEMU
+        if: ${{ steps.metadata.outputs.builder_mode == 'cross' }}
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
+      - name: Rebuild and verify artifact with direct pinned builder
+        if: ${{ steps.metadata.outputs.builder_mode == 'direct' }}
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.metadata.outputs.source_commit }}
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
+          SOURCE_LOCKFILE_SHA256: ${{ steps.metadata.outputs.source_lockfile_sha256 }}
+          TARGET: ${{ steps.metadata.outputs.target }}
+          RUST_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
+          CROSS_VERSION: ${{ steps.metadata.outputs.cross_version }}
+          CROSS_IMAGE_DIGEST: ${{ steps.metadata.outputs.cross_image_digest }}
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: ${{ steps.metadata.outputs.rustflags }}
+          BINARY_SHA: ${{ steps.metadata.outputs.binary_sha }}
+        run: |
+          set -euo pipefail
+          source_dir="$PWD/.zeroclaw-source"
+          cross_image="ghcr.io/cross-rs/aarch64-unknown-linux-musl:${CROSS_VERSION}"
+          cross_image_ref="ghcr.io/cross-rs/aarch64-unknown-linux-musl@${CROSS_IMAGE_DIGEST}"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C "$source_dir" show -s --format=%ct HEAD)" = "$SOURCE_DATE_EPOCH"
+          test "$(sha256sum "$source_dir/Cargo.lock" | awk '{print $1}')" = "$SOURCE_LOCKFILE_SHA256"
+          docker pull "$cross_image"
+          docker image inspect "$cross_image" --format '{{json .RepoDigests}}' | grep -F "$cross_image_ref" >/dev/null
+
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add --toolchain "$RUST_TOOLCHAIN" "$TARGET"
+          rustc --version --verbose
+          cargo --version --verbose
+          cargo fetch --manifest-path "$source_dir/Cargo.toml" --locked
+
+          host_diag="$RUNNER_TEMP/zeroclaw-direct-host.txt"
+          container_diag="$RUNNER_TEMP/zeroclaw-direct-container.txt"
+          direct_log="$RUNNER_TEMP/zeroclaw-direct-build.log"
+          direct_summary="$RUNNER_TEMP/zeroclaw-direct-summary.txt"
+          direct_deps="$RUNNER_TEMP/zeroclaw-direct-deps"
+          mkdir -p "$direct_deps"
+          : > "$container_diag"
+          : > "$direct_summary"
+          {
+            printf 'builder_mode=direct\n'
+            printf 'runner_temp=%s\n' "$RUNNER_TEMP"
+            printf 'workspace=%s\n' "$GITHUB_WORKSPACE"
+            uname -a
+            lscpu --json 2>&1 || true
+            docker version
+            docker info --format '{{json .}}' 2>&1 || true
+            stat -f -c 'workspace_mount=%T' "$GITHUB_WORKSPACE"
+            stat -f -c 'runner_temp_mount=%T' "$RUNNER_TEMP"
+          } > "$host_diag"
+
+          project_volume="zeroclaw-direct-project-${GITHUB_RUN_ID}"
+          target_volume="zeroclaw-direct-target-${GITHUB_RUN_ID}"
+          source_archive="$RUNNER_TEMP/zeroclaw-source-${GITHUB_RUN_ID}.tar"
+          cleanup() {
+            docker volume rm "$project_volume" "$target_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$project_volume" >/dev/null
+          docker volume create "$target_volume" >/dev/null
+          git -C "$source_dir" archive --format=tar --output="$source_archive" "$SOURCE_COMMIT"
+          docker run --rm --network none \
+            --mount "type=volume,source=$project_volume,target=/project" \
+            --mount "type=bind,source=$source_archive,target=/tmp/zeroclaw-source.tar,readonly" \
+            --entrypoint /bin/sh "$cross_image_ref" -ec \
+            'set -eu; tar -xf /tmp/zeroclaw-source.tar -C /project; test -f /project/Cargo.lock; test ! -d /project/target'
+
+          docker run --rm --network none \
+            --mount "type=volume,source=$project_volume,target=/project" \
+            --mount "type=volume,source=$target_volume,target=/target" \
+            --mount "type=bind,source=$(rustup which --toolchain "$RUST_TOOLCHAIN" rustc | sed 's#/bin/rustc$##'),target=/rust,readonly" \
+            --mount "type=bind,source=$HOME/.cargo,target=/cargo" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/zeroclaw/zeroclaw-bin,target=/out/zeroclaw-bin" \
+            --mount "type=bind,source=$host_diag,target=/out/host.txt,readonly" \
+            --mount "type=bind,source=$container_diag,target=/out/container.txt" \
+            --mount "type=bind,source=$direct_summary,target=/out/summary.txt" \
+            --mount "type=bind,source=$direct_deps,target=/out/deps" \
+            --workdir /project \
+            --entrypoint /bin/sh \
+            -e SOURCE_DATE_EPOCH -e CARGO_INCREMENTAL -e RUSTFLAGS -e TARGET -e BINARY_SHA \
+            "$cross_image_ref" -ec '
+              set -eu
+              export PATH=/rust/bin:$PATH
+              export LD_LIBRARY_PATH=/rust/lib:/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib
+              export CARGO_HOME=/cargo
+              export CARGO_TARGET_DIR=/target
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="$RUSTFLAGS"
+              {
+                printf "uname="; uname -a
+                printf "nproc="; nproc
+                printf "cpu="; grep -m1 -E "model name|Hardware|vendor_id" /proc/cpuinfo || true
+                printf "mounts:\n"; mount || true
+                printf "rustc_sha="; sha256sum /rust/bin/rustc
+                printf "cargo_sha="; sha256sum /rust/bin/cargo
+                rustc -vV
+                cargo -vV
+              } | tee /out/container.txt
+              cargo build -vv --release --locked --jobs 8 --target "$TARGET" --manifest-path Cargo.toml
+              rebuilt="/target/$TARGET/release/zeroclaw"
+              test -f "$rebuilt"
+              sha="$(sha256sum "$rebuilt" | awk "{print \$1}")"
+              size="$(stat -c "%s" "$rebuilt")"
+              printf "sha=%s\nsize=%s\n" "$sha" "$size" | tee /out/summary.txt
+              for item in /target/$TARGET/release/deps/libzeroclaw_channels-*.rlib /target/$TARGET/release/deps/libzeroclaw_channels-*.rmeta; do
+                [ -f "$item" ] && cp "$item" /out/deps/
+              done
+              cp "$rebuilt" /out/zeroclaw-bin
+              test "$sha" = "$BINARY_SHA"
+            ' | tee "$direct_log"
+          test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "$BINARY_SHA"
+          test "$(stat -c '%s' zeroclaw/zeroclaw-bin)" = "17815496"
+
       - name: Rebuild and verify the recorded ZeroClaw artifact
+        if: ${{ steps.metadata.outputs.builder_mode == 'cross' }}
         shell: bash
         env:
           CROSS_CONTAINER_ENGINE: docker
@@ -417,6 +547,13 @@ jobs:
           for item in /tmp/zeroclaw-toolchain-host.txt /tmp/zeroclaw-toolchain-files.txt /tmp/zeroclaw-toolchain-container.txt; do
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
+          for item in "$RUNNER_TEMP"/zeroclaw-direct-host.txt "$RUNNER_TEMP"/zeroclaw-direct-container.txt "$RUNNER_TEMP"/zeroclaw-direct-build.log "$RUNNER_TEMP"/zeroclaw-direct-summary.txt; do
+            [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
+          done
+          if [ -d "$RUNNER_TEMP/zeroclaw-direct-deps" ]; then
+            mkdir -p repro-diagnostics/zeroclaw-direct-deps
+            cp "$RUNNER_TEMP"/zeroclaw-direct-deps/* repro-diagnostics/zeroclaw-direct-deps/ 2>/dev/null || true
+          fi
           : > repro-diagnostics/byte-difference-summary.txt
           byte_diff_summary() {
             local label="$1"
