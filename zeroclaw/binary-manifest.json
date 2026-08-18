@@ -12,9 +12,8 @@
   "cross_version": "0.2.5",
   "cross_image_digest": "sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4",
   "cargo_incremental": false,
-  "cargo_build_jobs": 1,
   "rustflags": "-C link-arg=-static -C link-arg=-Wl,-z,stack-size=8388608 -C link-arg=-Wl,--build-id=none -C llvm-args=--rng-seed=0 --remap-path-prefix=/project=.",
   "artifact_status": "verified",
-  "build_command": "cargo build --release --locked --jobs 1 --target aarch64-unknown-linux-musl",
+  "build_command": "cargo build --release --locked --target aarch64-unknown-linux-musl",
   "sha256": "a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341"
 }
