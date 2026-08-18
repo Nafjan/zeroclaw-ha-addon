@@ -186,6 +186,8 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
+          cross_bin="$(command -v cross)"
+          test -x "$cross_bin"
           # Cross owns the host/container target mount. Do not pass its
           # CARGO_TARGET_DIR through the build environment or override the
           # target root with a Cargo CLI option.
@@ -203,7 +205,7 @@ jobs:
               : > "$output"
             fi
           }
-          cross build --release --locked \
+          "$cross_bin" build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
@@ -215,7 +217,7 @@ jobs:
             /tmp/zeroclaw-deps-first.txt
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
-          cross build --release --locked \
+          "$cross_bin" build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
@@ -227,7 +229,16 @@ jobs:
             /tmp/zeroclaw-deps-second.txt
           cp "$repeated" /tmp/zeroclaw-rebuild-second
           rm -rf "$repro_target_dir"
-          cross build --release --locked \
+          # Keep the first two builds on the runner's normal Cargo home, then
+          # use an empty Cargo home for the third build. This distinguishes a
+          # persistent Cargo registry/git cache transition from a compiler or
+          # linker source of nondeterminism. The isolated home is intentionally
+          # created only after cross has been installed and resolved by path.
+          fresh_cargo_home="${RUNNER_TEMP}/zeroclaw-cargo-home-fresh"
+          rm -rf "$fresh_cargo_home"
+          mkdir -p "$fresh_cargo_home"
+          export CARGO_HOME="$fresh_cargo_home"
+          "$cross_bin" build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
