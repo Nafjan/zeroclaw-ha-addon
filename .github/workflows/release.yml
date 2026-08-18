@@ -149,19 +149,26 @@ jobs:
           docker image inspect "$cross_image" --format '{{json .RepoDigests}}' | grep -F "ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}" >/dev/null
           export SOURCE_DATE_EPOCH="$source_epoch"
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="${{ steps.metadata.outputs.rustflags }}"
-          cat > .cross-release.toml <<EOF
-          [build.env]
-          passthrough = [
-            "SOURCE_DATE_EPOCH",
-            "CARGO_INCREMENTAL",
-            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",
-            "RUSTUP_TOOLCHAIN",
-          ]
-
-          [target.aarch64-unknown-linux-musl]
-          image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}"
-          EOF
           export CROSS_CONFIG="$PWD/.cross-release.toml"
+          write_cross_config() {
+            local pass_rustup="$1"
+            {
+              printf '%s\n' \
+                '[build.env]' \
+                'passthrough = [' \
+                '  "SOURCE_DATE_EPOCH",' \
+                '  "CARGO_INCREMENTAL",' \
+                '  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",'
+              if [ "$pass_rustup" = "yes" ]; then
+                printf '%s\n' '  "RUSTUP_TOOLCHAIN",'
+              fi
+              printf '%s\n' \
+                ']' \
+                '' \
+                '[target.aarch64-unknown-linux-musl]' \
+                'image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}"'
+            } > "$CROSS_CONFIG"
+          }
           # Build from the pinned source checkout root. The recorded artifact was
           # built with --remap-path-prefix=/project=.; compiling from the parent
           # checkout would preserve a different `.zeroclaw-source/` prefix.
@@ -220,6 +227,11 @@ jobs:
           # Keep Cargo's default job scheduling. The verified artifact was
           # produced and independently replayed without --jobs; forcing a
           # fixed job count changes the linked bytes for this source/toolchain.
+          # Run omit/include/omit on the same runner. The host toolchain stays
+          # pinned for rustup and Cross installation; only Cross's explicit
+          # RUSTUP_TOOLCHAIN passthrough changes between these clean builds.
+          write_cross_config no
+          printf 'Cross passthrough variant=omit (first)\n'
           "$cross_bin" build --release --locked \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
@@ -232,6 +244,8 @@ jobs:
           sysroot_manifest "$target_sysroot" /tmp/zeroclaw-sysroot-after-first.txt
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
+          write_cross_config yes
+          printf 'Cross passthrough variant=include (second)\n'
           "$cross_bin" build --release --locked \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
@@ -243,6 +257,8 @@ jobs:
             /tmp/zeroclaw-deps-second.txt
           cp "$repeated" /tmp/zeroclaw-rebuild-second
           rm -rf "$repro_target_dir"
+          write_cross_config no
+          printf 'Cross passthrough variant=omit (third)\n'
           "$cross_bin" build --release --locked \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
@@ -260,44 +276,25 @@ jobs:
             "$(sha256sum /tmp/zeroclaw-deps-second.txt | awk '{print $1}')" \
             "$(sha256sum /tmp/zeroclaw-deps-third.txt | awk '{print $1}')"
           binary_gate=0
-          if cmp -s /tmp/zeroclaw-rebuild-first /tmp/zeroclaw-rebuild-second; then
-            echo 'binary first_vs_second: identical'
-          else
-            echo 'binary first_vs_second: DIFFERENT'
-            binary_gate=1
-          fi
           if cmp -s /tmp/zeroclaw-rebuild-first /tmp/zeroclaw-rebuild-third; then
-            echo 'binary first_vs_third: identical'
+            echo 'binary omit_first_vs_omit_third: identical'
           else
-            echo 'binary first_vs_third: DIFFERENT'
-            binary_gate=1
-          fi
-          if cmp -s /tmp/zeroclaw-rebuild-second /tmp/zeroclaw-rebuild-third; then
-            echo 'binary second_vs_third: identical'
-          else
-            echo 'binary second_vs_third: DIFFERENT'
-            binary_gate=1
-          fi
-          if [ "$rebuilt_sha" = "$repeat_sha" ]; then
-            echo 'binary SHA first_vs_second: equal'
-          else
-            echo 'binary SHA first_vs_second: DIFFERENT'
+            echo 'binary omit_first_vs_omit_third: DIFFERENT'
             binary_gate=1
           fi
           if [ "$rebuilt_sha" = "$third_sha" ]; then
-            echo 'binary SHA first_vs_third: equal'
+            echo 'binary SHA omit_first_vs_omit_third: equal'
           else
-            echo 'binary SHA first_vs_third: DIFFERENT'
+            echo 'binary SHA omit_first_vs_omit_third: DIFFERENT'
             binary_gate=1
           fi
-          if [ "$repeat_sha" = "$third_sha" ]; then
-            echo 'binary SHA second_vs_third: equal'
+          if [ "$repeat_sha" = "$rebuilt_sha" ]; then
+            echo 'binary SHA include_second_matches_omit: equal'
           else
-            echo 'binary SHA second_vs_third: DIFFERENT'
-            binary_gate=1
+            echo "binary SHA include_second_differs_from_omit: $repeat_sha"
           fi
           recorded_gate=0
-          for observed_sha in "$rebuilt_sha" "$repeat_sha" "$third_sha"; do
+          for observed_sha in "$rebuilt_sha" "$third_sha"; do
             if [ "$observed_sha" = "${{ steps.metadata.outputs.binary_sha }}" ]; then
               echo "recorded SHA match: $observed_sha"
             else
@@ -308,7 +305,7 @@ jobs:
           test "$binary_gate" -eq 0
           test "$recorded_gate" -eq 0
           popd >/dev/null
-          cp /tmp/zeroclaw-rebuild-first zeroclaw/zeroclaw-bin
+          cp /tmp/zeroclaw-rebuild-third zeroclaw/zeroclaw-bin
           test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "${{ steps.metadata.outputs.binary_sha }}"
 
       - name: Collect reproducibility diagnostics
