@@ -175,8 +175,9 @@ jobs:
           # `target/` directory as `/target` inside the build container. This
           # matches the authoritative build metadata and keeps the output path
           # outside the remapped `/project` tree. Remove it before each run so
-          # every comparison starts with a clean target tree. Cargo/Cross cache
-          # state remains persistent and is captured as diagnostics below.
+          # every comparison starts with a clean target tree. The exact target
+          # standard library is provisioned before the first measured build and
+          # its sysroot fingerprint is captured around that build below.
           repro_target_dir="target"
           rm -rf "$repro_target_dir"
           cross_install_target="${RUNNER_TEMP}/zeroclaw-cross-install"
@@ -185,6 +186,7 @@ jobs:
           export CARGO_TARGET_DIR="$cross_install_target"
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" "${{ steps.metadata.outputs.target }}"
           cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
           cross_bin="$(command -v cross)"
           test -x "$cross_bin"
@@ -205,6 +207,21 @@ jobs:
               : > "$output"
             fi
           }
+          sysroot_manifest() {
+            local sysroot_lib="$1"
+            local output="$2"
+            test -d "$sysroot_lib"
+            (
+              cd "$sysroot_lib" || exit 1
+              find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 -r sha256sum
+            ) > "$output"
+          }
+          rust_sysroot="$(rustc --print sysroot)"
+          target_sysroot="$rust_sysroot/lib/rustlib/${{ steps.metadata.outputs.target }}/lib"
+          printf 'rustc sysroot=%s\n' "$rust_sysroot"
+          printf 'target sysroot=%s\n' "$target_sysroot"
+          rustup target list --installed
+          sysroot_manifest "$target_sysroot" /tmp/zeroclaw-sysroot-before.txt
           "$cross_bin" build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
@@ -215,6 +232,7 @@ jobs:
           dependency_manifest \
             "$repro_target_dir/${{ steps.metadata.outputs.target }}/release/deps" \
             /tmp/zeroclaw-deps-first.txt
+          sysroot_manifest "$target_sysroot" /tmp/zeroclaw-sysroot-after-first.txt
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
           "$cross_bin" build --release --locked \
@@ -229,15 +247,6 @@ jobs:
             /tmp/zeroclaw-deps-second.txt
           cp "$repeated" /tmp/zeroclaw-rebuild-second
           rm -rf "$repro_target_dir"
-          # Keep the first two builds on the runner's normal Cargo home, then
-          # use an empty Cargo home for the third build. This distinguishes a
-          # persistent Cargo registry/git cache transition from a compiler or
-          # linker source of nondeterminism. The isolated home is intentionally
-          # created only after cross has been installed and resolved by path.
-          fresh_cargo_home="${RUNNER_TEMP}/zeroclaw-cargo-home-fresh"
-          rm -rf "$fresh_cargo_home"
-          mkdir -p "$fresh_cargo_home"
-          export CARGO_HOME="$fresh_cargo_home"
           "$cross_bin" build --release --locked \
             --jobs "${{ steps.metadata.outputs.cargo_build_jobs }}" \
             --target "${{ steps.metadata.outputs.target }}" \
@@ -329,6 +338,9 @@ jobs:
           [ -f "$second" ] && cp "$second" repro-diagnostics/second.elf
           [ -f "$third" ] && cp "$third" repro-diagnostics/third.elf
           for item in /tmp/zeroclaw-deps-first.txt /tmp/zeroclaw-deps-second.txt /tmp/zeroclaw-deps-third.txt; do
+            [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
+          done
+          for item in /tmp/zeroclaw-sysroot-before.txt /tmp/zeroclaw-sysroot-after-first.txt; do
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
           : > repro-diagnostics/byte-difference-summary.txt
