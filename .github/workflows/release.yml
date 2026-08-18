@@ -137,6 +137,11 @@ jobs:
           CROSS_DEBUG: "1"
           ZEROCLAW_RUST_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
           CARGO_INCREMENTAL: "0"
+          # Pin Rayon consumers in build scripts and host-side proc macros to
+          # the width used by the authoritative local replay. This is an
+          # explicit experiment; stable rustc's core scheduler is not governed
+          # by this variable.
+          RAYON_NUM_THREADS: "8"
         run: |
           set -euo pipefail
           test "$(git -C .zeroclaw-source rev-parse HEAD)" = "${{ steps.metadata.outputs.source_commit }}"
@@ -160,6 +165,7 @@ jobs:
                 'passthrough = [' \
                 '  "SOURCE_DATE_EPOCH",' \
                 '  "CARGO_INCREMENTAL",' \
+                '  "RAYON_NUM_THREADS",' \
                 '  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS",'
               printf '%s\n' \
                 ']' \
@@ -296,12 +302,12 @@ jobs:
               printf 'runner_arch=%s\n' "$(uname -m)"
             } > "$output"
           }
-          # Isolate Cargo's jobserver width on the same runner. Keep the host
-          # toolchain and Cross container environment fixed; only --jobs changes
-          # between these target-clean builds. CI exposes 4 CPUs while the
-          # authoritative local replay exposed 8, so use 8/4/8 to test whether
-          # Cargo's scheduler width is the remaining reproducibility variable.
-          unset RUSTUP_TOOLCHAIN CARGO_BUILD_JOBS RAYON_NUM_THREADS CROSS_CONTAINER_OPTS
+          # Keep Cargo's jobserver width explicit and carry the fixed Rayon
+          # setting into every measured build. CI exposes 4 CPUs while the
+          # authoritative local replay exposed 8; this isolates any Rayon-using
+          # build scripts or host-side proc macros from that quota. Vary Cargo
+          # --jobs only for the repeatability check.
+          unset RUSTUP_TOOLCHAIN CARGO_BUILD_JOBS CROSS_CONTAINER_OPTS
           write_cross_config
           capture_build_diagnostics 'cargo-jobs-8-first' /tmp/zeroclaw-jobs-first.txt 8
           printf 'Cargo --jobs variant=8 (first)\n'
