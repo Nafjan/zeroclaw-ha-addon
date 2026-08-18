@@ -145,8 +145,9 @@ jobs:
           lock_sha="$(sha256sum .zeroclaw-source/Cargo.lock | awk '{print $1}')"
           test "$lock_sha" = "${{ steps.metadata.outputs.source_lockfile_sha256 }}"
           cross_image="ghcr.io/cross-rs/aarch64-unknown-linux-musl:${{ steps.metadata.outputs.cross_version }}"
+          cross_image_ref="ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}"
           docker pull "$cross_image"
-          docker image inspect "$cross_image" --format '{{json .RepoDigests}}' | grep -F "ghcr.io/cross-rs/aarch64-unknown-linux-musl@${{ steps.metadata.outputs.cross_image_digest }}" >/dev/null
+          docker image inspect "$cross_image" --format '{{json .RepoDigests}}' | grep -F "$cross_image_ref" >/dev/null
           export SOURCE_DATE_EPOCH="$source_epoch"
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="${{ steps.metadata.outputs.rustflags }}"
           export CROSS_CONFIG="$PWD/.cross-release.toml"
@@ -191,6 +192,44 @@ jobs:
           rustup run "$toolchain_version" cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
           cross_bin="$(command -v cross)"
           test -x "$cross_bin"
+          toolchain_real="$(rustup which --toolchain "$toolchain_version" rustc)"
+          toolchain_root="$(cd "$(dirname "$toolchain_real")/.." && pwd)"
+          {
+            printf 'toolchain_version=%s\n' "$toolchain_version"
+            printf 'toolchain_real=%s\n' "$toolchain_real"
+            printf 'toolchain_root=%s\n' "$toolchain_root"
+            rustup show active-toolchain
+            "$toolchain_real" -vV
+            "$toolchain_root/bin/cargo" -vV
+            printf 'toolchain_sysroot='; "$toolchain_real" --print sysroot
+            sha256sum \
+              "$toolchain_real" \
+              "$toolchain_root/bin/cargo"
+            find "$toolchain_root/lib" -maxdepth 1 -type f \( \
+              -name 'librustc_driver-*.so' -o -name 'libLLVM-*.so' \) \
+              -print0 | sort -z | xargs -0 -r sha256sum
+          } > /tmp/zeroclaw-toolchain-host.txt
+          (
+            cd "$toolchain_root" || exit 1
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+          ) > /tmp/zeroclaw-toolchain-files.txt
+          docker run --rm \
+            --network none \
+            --mount "type=bind,src=$toolchain_root,dst=/rust,readonly" \
+            --entrypoint /bin/sh \
+            "$cross_image_ref" \
+            -ec '
+              set -eu
+              export PATH=/rust/bin:$PATH
+              export LD_LIBRARY_PATH=/rust/lib:/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib
+              sha256sum /rust/bin/rustc /rust/bin/cargo
+              /rust/bin/rustc -vV
+              /rust/bin/cargo -vV
+              printf "sysroot="; /rust/bin/rustc --print sysroot
+              ldd /rust/bin/rustc || true
+              printf "uname="; uname -a
+              printf "nproc="; nproc
+            ' > /tmp/zeroclaw-toolchain-container.txt
           # Cross owns the host/container target mount. Do not pass its
           # CARGO_TARGET_DIR through the build environment or override the
           # target root with a Cargo CLI option.
@@ -373,6 +412,9 @@ jobs:
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
           for item in /tmp/zeroclaw-jobs-first.txt /tmp/zeroclaw-jobs-second.txt /tmp/zeroclaw-jobs-third.txt; do
+            [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
+          done
+          for item in /tmp/zeroclaw-toolchain-host.txt /tmp/zeroclaw-toolchain-files.txt /tmp/zeroclaw-toolchain-container.txt; do
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
           : > repro-diagnostics/byte-difference-summary.txt
