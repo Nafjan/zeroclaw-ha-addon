@@ -223,11 +223,13 @@ jobs:
           printf 'target sysroot=%s\n' "$target_sysroot"
           rustup target list --installed
           sysroot_manifest "$target_sysroot" /tmp/zeroclaw-sysroot-before.txt
-          capture_toolchain_diagnostics() {
+          capture_build_diagnostics() {
             local variant="$1"
             local output="$2"
+            local cargo_jobs="$3"
             {
               printf 'variant=%s\n' "$variant"
+              printf 'cargo_jobs_cli=%s\n' "$cargo_jobs"
               for name in \
                 RUSTUP_TOOLCHAIN RUSTUP_HOME CARGO_HOME CARGO_TARGET_DIR \
                 CARGO_BUILD_JOBS RAYON_NUM_THREADS RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
@@ -235,6 +237,7 @@ jobs:
                 RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
                 CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
                 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS \
+                CROSS_CONTAINER_OPTS \
                 CC CXX AR CFLAGS CXXFLAGS LDFLAGS; do
                 if value="$(printenv "$name" 2>/dev/null)"; then
                   printf '%s=%s\n' "$name" "$value"
@@ -254,17 +257,16 @@ jobs:
               printf 'runner_arch=%s\n' "$(uname -m)"
             } > "$output"
           }
-          # Keep Cargo's default job scheduling. The verified artifact was
-          # produced and independently replayed without --jobs; forcing a
-          # fixed job count changes the linked bytes for this source/toolchain.
-          # Run host RUSTUP_TOOLCHAIN unset/set/unset on the same runner. Cross's
-          # container configuration stays identical; only the host environment
-          # selection changes between these target-clean builds.
-          unset RUSTUP_TOOLCHAIN
+          # Isolate Cargo's jobserver width on the same runner. Keep the host
+          # toolchain and Cross container environment fixed; only --jobs changes
+          # between these target-clean builds. CI exposes 4 CPUs while the
+          # authoritative local replay exposed 8, so use 8/4/8 to test whether
+          # Cargo's scheduler width is the remaining reproducibility variable.
+          unset RUSTUP_TOOLCHAIN CARGO_BUILD_JOBS RAYON_NUM_THREADS CROSS_CONTAINER_OPTS
           write_cross_config
-          capture_toolchain_diagnostics 'host-unset-first' /tmp/zeroclaw-host-first.txt
-          printf 'Host RUSTUP_TOOLCHAIN variant=unset (first)\n'
-          "$cross_bin" build -vv --release --locked \
+          capture_build_diagnostics 'cargo-jobs-8-first' /tmp/zeroclaw-jobs-first.txt 8
+          printf 'Cargo --jobs variant=8 (first)\n'
+          "$cross_bin" build -vv --release --locked --jobs 8 \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           rebuilt="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -276,11 +278,10 @@ jobs:
           sysroot_manifest "$target_sysroot" /tmp/zeroclaw-sysroot-after-first.txt
           cp "$rebuilt" /tmp/zeroclaw-rebuild-first
           rm -rf "$repro_target_dir"
-          export RUSTUP_TOOLCHAIN="$toolchain_version"
           write_cross_config
-          capture_toolchain_diagnostics 'host-set-second' /tmp/zeroclaw-host-second.txt
-          printf 'Host RUSTUP_TOOLCHAIN variant=set (second)\n'
-          "$cross_bin" build -vv --release --locked \
+          capture_build_diagnostics 'cargo-jobs-4-second' /tmp/zeroclaw-jobs-second.txt 4
+          printf 'Cargo --jobs variant=4 (second)\n'
+          "$cross_bin" build -vv --release --locked --jobs 4 \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           repeated="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -291,11 +292,10 @@ jobs:
             /tmp/zeroclaw-deps-second.txt
           cp "$repeated" /tmp/zeroclaw-rebuild-second
           rm -rf "$repro_target_dir"
-          unset RUSTUP_TOOLCHAIN
           write_cross_config
-          capture_toolchain_diagnostics 'host-unset-third' /tmp/zeroclaw-host-third.txt
-          printf 'Host RUSTUP_TOOLCHAIN variant=unset (third)\n'
-          "$cross_bin" build -vv --release --locked \
+          capture_build_diagnostics 'cargo-jobs-8-third' /tmp/zeroclaw-jobs-third.txt 8
+          printf 'Cargo --jobs variant=8 (third)\n'
+          "$cross_bin" build -vv --release --locked --jobs 8 \
             --target "${{ steps.metadata.outputs.target }}" \
             --manifest-path Cargo.toml
           third="$repro_target_dir/${{ steps.metadata.outputs.target }}/release/zeroclaw"
@@ -305,7 +305,7 @@ jobs:
             "$repro_target_dir/${{ steps.metadata.outputs.target }}/release/deps" \
             /tmp/zeroclaw-deps-third.txt
           cp "$third" /tmp/zeroclaw-rebuild-third
-          printf 'reproducibility hashes (host unset/set/unset): first=%s second=%s third=%s expected=%s\n' \
+          printf 'reproducibility hashes (Cargo --jobs 8/4/8): first=%s second=%s third=%s expected=%s\n' \
             "$rebuilt_sha" "$repeat_sha" "$third_sha" "${{ steps.metadata.outputs.binary_sha }}"
           printf 'dependency manifest hashes: first=%s second=%s third=%s\n' \
             "$(sha256sum /tmp/zeroclaw-deps-first.txt | awk '{print $1}')" \
@@ -313,21 +313,21 @@ jobs:
             "$(sha256sum /tmp/zeroclaw-deps-third.txt | awk '{print $1}')"
           binary_gate=0
           if cmp -s /tmp/zeroclaw-rebuild-first /tmp/zeroclaw-rebuild-third; then
-            echo 'binary unset_first_vs_unset_third: identical'
+            echo 'binary jobs8_first_vs_jobs8_third: identical'
           else
-            echo 'binary unset_first_vs_unset_third: DIFFERENT'
+            echo 'binary jobs8_first_vs_jobs8_third: DIFFERENT'
             binary_gate=1
           fi
           if [ "$rebuilt_sha" = "$third_sha" ]; then
-            echo 'binary SHA unset_first_vs_unset_third: equal'
+            echo 'binary SHA jobs8_first_vs_jobs8_third: equal'
           else
-            echo 'binary SHA unset_first_vs_unset_third: DIFFERENT'
+            echo 'binary SHA jobs8_first_vs_jobs8_third: DIFFERENT'
             binary_gate=1
           fi
           if [ "$repeat_sha" = "$rebuilt_sha" ]; then
-            echo 'binary SHA set_second_matches_unset: equal'
+            echo 'binary SHA jobs4_second_matches_jobs8: equal'
           else
-            echo "binary SHA set_second_differs_from_unset: $repeat_sha"
+            echo "binary SHA jobs4_second_differs_from_jobs8: $repeat_sha"
           fi
           recorded_gate=0
           for observed_sha in "$rebuilt_sha" "$third_sha"; do
@@ -372,7 +372,7 @@ jobs:
           for item in /tmp/zeroclaw-sysroot-before.txt /tmp/zeroclaw-sysroot-after-first.txt; do
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
-          for item in /tmp/zeroclaw-host-first.txt /tmp/zeroclaw-host-second.txt /tmp/zeroclaw-host-third.txt; do
+          for item in /tmp/zeroclaw-jobs-first.txt /tmp/zeroclaw-jobs-second.txt /tmp/zeroclaw-jobs-third.txt; do
             [ -f "$item" ] && cp "$item" repro-diagnostics/"$(basename "$item")"
           done
           : > repro-diagnostics/byte-difference-summary.txt
