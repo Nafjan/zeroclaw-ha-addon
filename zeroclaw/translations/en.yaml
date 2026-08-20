@@ -6,6 +6,17 @@ configuration:
       Your OpenRouter key (https://openrouter.ai). The agent uses OpenRouter to
       reach both the cheap default model (Gemini Flash) and the smarter complex
       model (Claude Sonnet). Required.
+  nvidia_api_key:
+    name: "NVIDIA API key"
+    description: >-
+      Optional NVIDIA NIM OpenAI-compatible credential. When present, the
+      root broker may use it after a classified OpenRouter failure; it is
+      never exposed to ZeroClaw.
+  ark_api_key:
+    name: "BytePlus ModelArk API key"
+    description: >-
+      Optional BytePlus ModelArk credential. When present, the root broker may
+      use the pinned Ark model routes after a classified provider failure.
   provider_key_mode:
     name: "Provider credential mode"
     description: >-
@@ -40,6 +51,62 @@ configuration:
     description: >-
       Used for creation drafts, daily reports, and reflection. Default:
       anthropic/claude-sonnet-4.6.
+  nvidia_model:
+    name: "NVIDIA fallback model"
+    description: >-
+      NVIDIA model ID used by the root broker when the optional NVIDIA key is
+      configured. Default: meta/llama-3.3-70b-instruct.
+  ark_fast_model:
+    name: "Ark fast fallback model"
+    description: >-
+      BytePlus ModelArk model ID for fast/default fallback. Default:
+      deepseek-v4-flash-ga-260731.
+  ark_reasoning_model:
+    name: "Ark reasoning fallback model"
+    description: >-
+      BytePlus ModelArk model ID for complex fallback. Default:
+      glm-5-2-260617.
+  ark_pro_model:
+    name: "Ark pro fallback model"
+    description: >-
+      Additional BytePlus ModelArk model tried only when the route remains
+      eligible after a model-specific failure. Default: deepseek-v4-pro-ga-260813.
+  openrouter_free_model:
+    name: "OpenRouter free-tier model"
+    description: >-
+      Optional current OpenRouter ':free' model slug. It is used only as an
+      explicitly enabled last resort for requests with no tools or tool-call
+      continuation, never for write-capable turns.
+  nvidia_free_model:
+    name: "NVIDIA free-tier model"
+    description: >-
+      Optional NVIDIA free/trial model ID. It is subject to the same explicit
+      no-tools containment as every free-tier route.
+  ark_free_model:
+    name: "Ark free-tier model"
+    description: >-
+      Optional BytePlus ModelArk free/trial model ID. Availability depends on
+      the account and endpoint; empty is safest.
+  provider_fallback_enabled:
+    name: "Enable provider fallback"
+    description: >-
+      Let the root broker move to another configured provider after timeout,
+      429, 5xx, authentication, credit, or model-availability failures.
+  provider_free_fallback_enabled:
+    name: "Enable contained free fallback"
+    description: >-
+      Explicitly allow configured free-tier routes as a final fallback. The
+      broker rejects them for any request that contains tools or tool calls.
+  provider_nvidia_fallback_enabled:
+    name: "Enable NVIDIA fallback profile"
+    description: >-
+      Explicitly activate the NVIDIA route after its model/API contract has
+      been tested. A key alone does not activate this profile.
+  provider_ark_fallback_enabled:
+    name: "Enable BytePlus Ark fallback profile"
+    description: >-
+      Explicitly activate the BytePlus ModelArk route after its model/API
+      contract has been tested. A key alone does not activate this profile.
   log_level:
     name: "Log level"
     description: >-
@@ -70,6 +137,24 @@ configuration:
     description: >-
       Root broker reservation budget for requested output tokens. Requests
       without max_tokens reserve the configured provider maximum.
+  provider_openrouter_max_requests_per_hour:
+    name: "OpenRouter requests per hour"
+    description: "Independent root admission limit for the OpenRouter profile."
+  provider_openrouter_daily_token_budget:
+    name: "OpenRouter daily token budget"
+    description: "Independent root output-token budget for the OpenRouter profile."
+  provider_nvidia_max_requests_per_hour:
+    name: "NVIDIA requests per hour"
+    description: "Independent root admission limit for the NVIDIA profile."
+  provider_nvidia_daily_token_budget:
+    name: "NVIDIA daily token budget"
+    description: "Independent root output-token budget for the NVIDIA profile."
+  provider_ark_max_requests_per_hour:
+    name: "Ark requests per hour"
+    description: "Independent root admission limit for the BytePlus ModelArk profile."
+  provider_ark_daily_token_budget:
+    name: "Ark daily token budget"
+    description: "Independent root output-token budget for the BytePlus ModelArk profile."
 
   # ─────── Agent runtime budgets ───────
   max_tool_iterations:

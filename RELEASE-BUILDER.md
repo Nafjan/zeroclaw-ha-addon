@@ -32,7 +32,7 @@ or rebooting the runner between runs:
 
 ```text
 gh workflow run release.yml --ref master \
-  -f release_tag=v3.1.3.5 \
+  -f release_tag=v3.1.4.0 \
   -f promote=false \
   -f builder_mode=trusted-aa
 ```

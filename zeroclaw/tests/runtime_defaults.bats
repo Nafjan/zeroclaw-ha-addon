@@ -92,6 +92,33 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "provider fallback is root-owned, profile-bound, and conservative by default" {
+    run grep -F 'provider_free_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_ark_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'export PROVIDER_PROFILE_SPEC=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'export PROVIDER_ROUTE_SPEC=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '~google/gemini-flash-latest' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_retries = 0' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'streaming is not supported by the provider broker' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'FAILURE_CLASS="credit_exhausted"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'migrated_reserved_max' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F '((.tools // []) | length) == 0' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "the sticky persistent root protects root-owned state" {
     run grep -F 'chown root:zeroclaw /data' "$run_file"
     [ "$status" -eq 0 ]

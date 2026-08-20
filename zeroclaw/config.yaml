@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 3.1.3.5
+version: 3.1.4.0
 slug: zeroclaw
 description: AI home automation agent — read-only by default with broker-gated actions
 url: https://github.com/Nafjan/zeroclaw-ha-addon
@@ -15,6 +15,10 @@ homeassistant_api: true
 options:
   # --- Credentials (required) ---
   openrouter_api_key: ""
+  # Optional independent fallback credentials. Empty profiles are fail-closed
+  # and never receive a request.
+  nvidia_api_key: ""
+  ark_api_key: ""
   # broker keeps the provider key in the root-owned local model gateway.
   # direct_temporary is retained only for migration/compatibility testing.
   provider_key_mode: broker
@@ -28,6 +32,22 @@ options:
   # --- Models ---
   default_model: deepseek/deepseek-v4-flash
   complex_model: anthropic/claude-sonnet-4.6
+  nvidia_model: meta/llama-3.3-70b-instruct
+  ark_fast_model: deepseek-v4-flash-ga-260731
+  ark_reasoning_model: glm-5-2-260617
+  ark_pro_model: deepseek-v4-pro-ga-260813
+  # Optional current free-tier model IDs. These are only eligible for
+  # requests with no tools or tool-call continuation, and are disabled below
+  # unless explicitly enabled.
+  openrouter_free_model: ""
+  nvidia_free_model: ""
+  ark_free_model: ""
+  provider_fallback_enabled: true
+  provider_free_fallback_enabled: false
+  # Optional cross-vendor edges remain off until the corresponding provider
+  # contract has been tested and the operator explicitly enables it.
+  provider_nvidia_fallback_enabled: false
+  provider_ark_fallback_enabled: false
   log_level: info
 
   # --- Cost / safety budgets ---
@@ -38,6 +58,12 @@ options:
   # settings and remain enforced when a client calls the local gateway.
   provider_max_requests_per_hour: 120
   provider_daily_token_budget: 100000
+  provider_openrouter_max_requests_per_hour: 120
+  provider_openrouter_daily_token_budget: 100000
+  provider_nvidia_max_requests_per_hour: 60
+  provider_nvidia_daily_token_budget: 50000
+  provider_ark_max_requests_per_hour: 60
+  provider_ark_daily_token_budget: 50000
 
   # --- Agent runtime budgets ---
   max_tool_iterations: 8
@@ -83,12 +109,25 @@ options:
 
 schema:
   openrouter_api_key: password
+  nvidia_api_key: password
+  ark_api_key: password
   provider_key_mode: list(direct_temporary|broker)
   ha_token: password
   telegram_bot_token: password
   telegram_allowed_users: str
   default_model: str
   complex_model: str
+  nvidia_model: str
+  ark_fast_model: str
+  ark_reasoning_model: str
+  ark_pro_model: str
+  openrouter_free_model: str
+  nvidia_free_model: str
+  ark_free_model: str
+  provider_fallback_enabled: bool
+  provider_free_fallback_enabled: bool
+  provider_nvidia_fallback_enabled: bool
+  provider_ark_fallback_enabled: bool
   log_level: list(debug|info|warn|error)
 
   daily_cost_limit_usd: float
@@ -96,6 +135,12 @@ schema:
   max_actions_per_hour: int(50,1000)
   provider_max_requests_per_hour: int(1,1000)
   provider_daily_token_budget: int(1024,10000000)
+  provider_openrouter_max_requests_per_hour: int(1,1000)
+  provider_openrouter_daily_token_budget: int(1024,10000000)
+  provider_nvidia_max_requests_per_hour: int(1,1000)
+  provider_nvidia_daily_token_budget: int(1024,10000000)
+  provider_ark_max_requests_per_hour: int(1,1000)
+  provider_ark_daily_token_budget: int(1024,10000000)
 
   max_tool_iterations: int(2,20)
   max_history_messages: int(5,100)

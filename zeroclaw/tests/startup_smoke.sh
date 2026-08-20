@@ -325,4 +325,5 @@ test -f /data/.state-version
 /src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     /src/tests/provider_broker_smoke.sh
+    /src/tests/provider_profile_fallback_smoke.sh
 fi
