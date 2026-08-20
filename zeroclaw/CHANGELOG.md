@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.1.4.0 (August 2026) — Root provider profile broker
+
+- Replace the single-provider allowlist with root-owned profile/model bindings
+  for OpenRouter plus opt-in NVIDIA and BytePlus ModelArk fallback profiles.
+- Classify timeout, 429, 5xx, 401, 402/credit, and model-unavailable failures;
+  block provider-wide failures so a failed credential is never retried during
+  the same request.
+- Add durable per-profile reservation/settlement ledgers with migration from
+  the previous quota counters, crash/expiry settlement at the reserved
+  maximum, and conservative invalid-usage handling.
+- Keep free-tier routes disabled by default and enforce no-tools-only
+  containment in the root broker; reject streaming until a separately
+  qualified streaming/cancellation design is implemented.
+- Use OpenRouter's current `~google/gemini-flash-latest` family alias for the
+  default-route backup instead of an unqualified model slug.
+- Add arm64 profile/fallback, migration, credential-isolation, and real
+  ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
+  disabled until their provider contract has been exercised.
+
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
 - Port the checked-in arm64 artifact from ZeroClaw 0.6.8 to the pinned upstream

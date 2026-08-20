@@ -1,16 +1,18 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.3.5 — defensive stabilization release
+# ZeroClaw HAOS Add-on v3.1.4.0 — root provider profile broker release
 # Writes, scheduling, generic HTTP, and the built-in Telegram transport are
 # disabled by default; enabled writes remain broker- and policy-gated.
 
-ADDON_VERSION="3.1.3.5"
+ADDON_VERSION="3.1.4.0"
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
 # Bashio config reads (all configured options)
 # ==============================================================
 OPENROUTER_KEY="$(bashio::config 'openrouter_api_key')"
+NVIDIA_KEY="$(bashio::config 'nvidia_api_key')"
+ARK_KEY="$(bashio::config 'ark_api_key')"
 PROVIDER_KEY_MODE="$(bashio::config 'provider_key_mode')"
 LEGACY_HA_TOKEN="$(bashio::config 'ha_token')"
 HA_TOKEN="${SUPERVISOR_TOKEN:-${LEGACY_HA_TOKEN}}"
@@ -22,6 +24,17 @@ if [ -z "${PROVIDER_KEY_MODE}" ]; then
 fi
 DEFAULT_MODEL="$(bashio::config 'default_model')"
 COMPLEX_MODEL="$(bashio::config 'complex_model')"
+NVIDIA_MODEL="$(bashio::config 'nvidia_model')"
+ARK_FAST_MODEL="$(bashio::config 'ark_fast_model')"
+ARK_REASONING_MODEL="$(bashio::config 'ark_reasoning_model')"
+ARK_PRO_MODEL="$(bashio::config 'ark_pro_model')"
+OPENROUTER_FREE_MODEL="$(bashio::config 'openrouter_free_model')"
+NVIDIA_FREE_MODEL="$(bashio::config 'nvidia_free_model')"
+ARK_FREE_MODEL="$(bashio::config 'ark_free_model')"
+PROVIDER_FALLBACK_ENABLED="$(bashio::config 'provider_fallback_enabled')"
+PROVIDER_FREE_FALLBACK_ENABLED="$(bashio::config 'provider_free_fallback_enabled')"
+NVIDIA_FALLBACK_ENABLED="$(bashio::config 'provider_nvidia_fallback_enabled')"
+ARK_FALLBACK_ENABLED="$(bashio::config 'provider_ark_fallback_enabled')"
 LOG_LEVEL="$(bashio::config 'log_level')"
 
 DAILY_COST_LIMIT="$(bashio::config 'daily_cost_limit_usd')"
@@ -29,6 +42,12 @@ MONTHLY_COST_LIMIT="$(bashio::config 'monthly_cost_limit_usd')"
 MAX_ACTIONS_PER_HOUR="$(bashio::config 'max_actions_per_hour')"
 PROVIDER_MAX_REQUESTS_HOUR="$(bashio::config 'provider_max_requests_per_hour')"
 PROVIDER_DAILY_TOKEN_BUDGET="$(bashio::config 'provider_daily_token_budget')"
+PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR="$(bashio::config 'provider_openrouter_max_requests_per_hour')"
+PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET="$(bashio::config 'provider_openrouter_daily_token_budget')"
+PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="$(bashio::config 'provider_nvidia_max_requests_per_hour')"
+PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET="$(bashio::config 'provider_nvidia_daily_token_budget')"
+PROVIDER_ARK_MAX_REQUESTS_HOUR="$(bashio::config 'provider_ark_max_requests_per_hour')"
+PROVIDER_ARK_DAILY_TOKEN_BUDGET="$(bashio::config 'provider_ark_daily_token_budget')"
 MAX_TOOL_ITER="$(bashio::config 'max_tool_iterations')"
 MAX_HISTORY_MSGS="$(bashio::config 'max_history_messages')"
 MAX_CONTEXT_TOKENS="$(bashio::config 'max_context_tokens')"
@@ -61,6 +80,23 @@ POLICY_TRUST_PROMOTE="$(bashio::config 'policy_trust_promote_after')"
 
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
+PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
+PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR="${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR:-${PROVIDER_MAX_REQUESTS_HOUR}}"
+PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET="${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET:-${PROVIDER_DAILY_TOKEN_BUDGET}}"
+PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR:-60}"
+PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET="${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET:-50000}"
+PROVIDER_ARK_MAX_REQUESTS_HOUR="${PROVIDER_ARK_MAX_REQUESTS_HOUR:-60}"
+PROVIDER_ARK_DAILY_TOKEN_BUDGET="${PROVIDER_ARK_DAILY_TOKEN_BUDGET:-50000}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-deepseek/deepseek-v4-flash}"
+COMPLEX_MODEL="${COMPLEX_MODEL:-anthropic/claude-sonnet-4.6}"
+NVIDIA_MODEL="${NVIDIA_MODEL:-meta/llama-3.3-70b-instruct}"
+ARK_FAST_MODEL="${ARK_FAST_MODEL:-deepseek-v4-flash-ga-260731}"
+ARK_REASONING_MODEL="${ARK_REASONING_MODEL:-glm-5-2-260617}"
+ARK_PRO_MODEL="${ARK_PRO_MODEL:-deepseek-v4-pro-ga-260813}"
+PROVIDER_FALLBACK_ENABLED="${PROVIDER_FALLBACK_ENABLED:-true}"
+PROVIDER_FREE_FALLBACK_ENABLED="${PROVIDER_FREE_FALLBACK_ENABLED:-false}"
+NVIDIA_FALLBACK_ENABLED="${NVIDIA_FALLBACK_ENABLED:-false}"
+ARK_FALLBACK_ENABLED="${ARK_FALLBACK_ENABLED:-false}"
 MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR:-200}"
 case "${MAX_ACTIONS_PER_HOUR}" in
     ''|*[!0-9]*) bashio::log.fatal "max_actions_per_hour is invalid; refusing to start"; exit 1 ;;
@@ -83,6 +119,100 @@ esac
     bashio::log.fatal "provider_daily_token_budget is outside the safe range; refusing to start"
     exit 1
 }
+case "${PROVIDER_MAX_TOKENS}" in
+    ''|*[!0-9]*) bashio::log.fatal "provider_max_tokens is invalid; refusing to start"; exit 1 ;;
+esac
+[ "${PROVIDER_MAX_TOKENS}" -ge 512 ] && [ "${PROVIDER_MAX_TOKENS}" -le 8192 ] || {
+    bashio::log.fatal "provider_max_tokens is outside the safe range; refusing to start"
+    exit 1
+}
+
+validate_model_id() {
+    model_label="$1"
+    model_value="$2"
+    [ -n "$model_value" ] || return 0
+    case "$model_value" in
+        *[!A-Za-z0-9._:/+%~-]*)
+            bashio::log.fatal "${model_label} contains unsupported characters; refusing to start"
+            exit 1
+            ;;
+    esac
+}
+
+for model_pair in \
+    "default_model=${DEFAULT_MODEL}" \
+    "complex_model=${COMPLEX_MODEL}" \
+    "nvidia_model=${NVIDIA_MODEL}" \
+    "ark_fast_model=${ARK_FAST_MODEL}" \
+    "ark_reasoning_model=${ARK_REASONING_MODEL}" \
+    "ark_pro_model=${ARK_PRO_MODEL}" \
+    "openrouter_free_model=${OPENROUTER_FREE_MODEL}" \
+    "nvidia_free_model=${NVIDIA_FREE_MODEL}" \
+    "ark_free_model=${ARK_FREE_MODEL}"; do
+    validate_model_id "${model_pair%%=*}" "${model_pair#*=}"
+done
+
+case "${DEFAULT_MODEL}:${COMPLEX_MODEL}" in
+    *:free*)
+        bashio::log.fatal "default and complex routes cannot be free-tier models; configure them as explicit free fallbacks"
+        exit 1
+        ;;
+esac
+if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
+    case "${OPENROUTER_FREE_MODEL}" in
+        *:free) ;;
+        *) bashio::log.fatal "openrouter_free_model must use an explicit :free model slug; refusing to start"; exit 1 ;;
+    esac
+fi
+
+for provider_flag_pair in \
+    "provider_fallback_enabled=${PROVIDER_FALLBACK_ENABLED}" \
+    "provider_free_fallback_enabled=${PROVIDER_FREE_FALLBACK_ENABLED}" \
+    "provider_nvidia_fallback_enabled=${NVIDIA_FALLBACK_ENABLED}" \
+    "provider_ark_fallback_enabled=${ARK_FALLBACK_ENABLED}"; do
+    case "${provider_flag_pair#*=}" in
+        true|false) ;;
+        *) bashio::log.fatal "${provider_flag_pair%%=*} is invalid; refusing to start"; exit 1 ;;
+    esac
+done
+
+for budget_pair in \
+    "provider_openrouter_max_requests_per_hour=${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR}" \
+    "provider_openrouter_daily_token_budget=${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" \
+    "provider_nvidia_max_requests_per_hour=${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR}" \
+    "provider_nvidia_daily_token_budget=${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" \
+    "provider_ark_max_requests_per_hour=${PROVIDER_ARK_MAX_REQUESTS_HOUR}" \
+    "provider_ark_daily_token_budget=${PROVIDER_ARK_DAILY_TOKEN_BUDGET}"; do
+    budget_value="${budget_pair#*=}"
+    case "$budget_value" in
+        ''|*[!0-9]*) bashio::log.fatal "${budget_pair%%=*} is invalid; refusing to start"; exit 1 ;;
+    esac
+    [ "$budget_value" -ge 1 ] || {
+        bashio::log.fatal "${budget_pair%%=*} must be positive; refusing to start"
+        exit 1
+    }
+done
+[ "${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR}" -le 1000 ] &&
+    [ "${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR}" -le 1000 ] &&
+    [ "${PROVIDER_ARK_MAX_REQUESTS_HOUR}" -le 1000 ] || {
+        bashio::log.fatal "provider profile request budgets are outside the safe range; refusing to start"
+        exit 1
+    }
+[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge 1024 ] &&
+    [ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -le 10000000 ] &&
+    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge 1024 ] &&
+    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -le 10000000 ] &&
+    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge 1024 ] &&
+    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -le 10000000 ] || {
+        bashio::log.fatal "provider profile token budgets are outside the safe range; refusing to start"
+        exit 1
+    }
+[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
+    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
+    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] || {
+        bashio::log.fatal "provider profile token budgets must cover one maximum request; refusing to start"
+        exit 1
+    }
 
 # Lists — bashio outputs newline-separated for list(str). Convert to comma-joined for shell use.
 POLICY_EXTRA_DENY=$(bashio::config 'policy_extra_deny' | tr '\n' ',' | sed 's/,$//')
@@ -262,19 +392,68 @@ install -m 0755 /opt/zeroclaw/lib/capability-broker-entrypoint.sh /usr/local/bin
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     install -m 0755 /opt/zeroclaw/lib/provider-broker-handler.sh /usr/local/bin/provider-broker-handler
     install -m 0755 /opt/zeroclaw/lib/provider-broker-entrypoint.sh /usr/local/bin/provider-broker-entrypoint
+    PROVIDER_KEY_DIR="/data/provider/keys"
+    mkdir -p "${PROVIDER_KEY_DIR}"
+    printf '%s' "${OPENROUTER_KEY}" > "${PROVIDER_KEY_DIR}/openrouter.key"
+    printf '%s' "${NVIDIA_KEY}" > "${PROVIDER_KEY_DIR}/nvidia.key"
+    printf '%s' "${ARK_KEY}" > "${PROVIDER_KEY_DIR}/ark.key"
+    chown root:root "${PROVIDER_KEY_DIR}"/*.key
+    chmod 0600 "${PROVIDER_KEY_DIR}"/*.key
+    chown root:root "${PROVIDER_KEY_DIR}"
+    chmod 0700 "${PROVIDER_KEY_DIR}"
     PROVIDER_PORT=42620
     (
-        export OPENROUTER_KEY
         # The endpoint remains root-controlled.  The test-only override lets
         # the real arm64 planner binary exercise this broker against a local
         # deterministic upstream without ever exposing a provider key to it.
-        export PROVIDER_UPSTREAM_URL="${ZEROCLAW_PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
-        export PROVIDER_ALLOWED_MODELS="${DEFAULT_MODEL},${COMPLEX_MODEL},google/gemini-flash-latest,deepseek/deepseek-v4-pro"
+        if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] &&
+            [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
+            OPENROUTER_UPSTREAM_URL="${ZEROCLAW_PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
+        else
+            OPENROUTER_UPSTREAM_URL="https://openrouter.ai/api/v1/chat/completions"
+        fi
+        export PROVIDER_PROFILE_SPEC="openrouter|${OPENROUTER_UPSTREAM_URL}|${PROVIDER_KEY_DIR}/openrouter.key|${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR}|${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}
+nvidia|https://integrate.api.nvidia.com/v1/chat/completions|${PROVIDER_KEY_DIR}/nvidia.key|${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR}|${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}
+ark|https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions|${PROVIDER_KEY_DIR}/ark.key|${PROVIDER_ARK_MAX_REQUESTS_HOUR}|${PROVIDER_ARK_DAILY_TOKEN_BUDGET}"
+        export PROVIDER_ALLOWED_MODELS="${DEFAULT_MODEL},${COMPLEX_MODEL},~google/gemini-flash-latest,deepseek/deepseek-v4-pro"
+        export PROVIDER_ROUTE_SPEC="${DEFAULT_MODEL}|openrouter|${DEFAULT_MODEL}|paid
+${DEFAULT_MODEL}|openrouter|~google/gemini-flash-latest|paid
+${COMPLEX_MODEL}|openrouter|${COMPLEX_MODEL}|paid
+${COMPLEX_MODEL}|openrouter|deepseek/deepseek-v4-pro|paid"
+        if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|nvidia|${NVIDIA_MODEL}|paid
+${COMPLEX_MODEL}|nvidia|${NVIDIA_MODEL}|paid"
+        fi
+        if [ "${ARK_FALLBACK_ENABLED}" = "true" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|ark|${ARK_FAST_MODEL}|paid
+${COMPLEX_MODEL}|ark|${ARK_REASONING_MODEL}|paid
+${COMPLEX_MODEL}|ark|${ARK_PRO_MODEL}|paid"
+        fi
+        if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
+        fi
+        if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ] && [ -n "${NVIDIA_FREE_MODEL}" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free
+${COMPLEX_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
+        fi
+        if [ "${ARK_FALLBACK_ENABLED}" = "true" ] && [ -n "${ARK_FREE_MODEL}" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|ark|${ARK_FREE_MODEL}|free
+${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
+        fi
+        export PROVIDER_FALLBACK_ENABLED PROVIDER_FREE_FALLBACK_ENABLED
         export PROVIDER_MAX_TOKENS
-        export PROVIDER_MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_HOUR}"
-        export PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET}"
-        export PROVIDER_QUOTA_FILE="/data/provider/quota.json"
-        export PROVIDER_QUOTA_LOCK="/data/provider/.quota.lock"
+        # Reuse the legacy quota path so the broker can atomically migrate the
+        # previous hourly/day counters into the durable reservation ledger.
+        export PROVIDER_LEDGER_FILE="/data/provider/quota.json"
+        export PROVIDER_LEDGER_LOCK="/data/provider/.ledger.lock"
+        export PROVIDER_LOG_FILE="/data/logs/provider-broker.log"
+        export PROVIDER_RESERVATION_TTL_SECONDS=180
         while true; do
             if ! /bin/busybox nc -l -p "${PROVIDER_PORT}" -s 127.0.0.1 \
                 -e /usr/local/bin/provider-broker-entrypoint >>/data/logs/provider-broker.log 2>&1; then
@@ -1436,12 +1615,11 @@ route_down_model = "${DEFAULT_MODEL}"
 reserve_percent = 10
 
 [reliability]
-provider_retries = 2
-provider_backoff_ms = 300
-
-[reliability.model_fallbacks]
-"${DEFAULT_MODEL}" = ["google/gemini-flash-latest"]
-"${COMPLEX_MODEL}" = ["deepseek/deepseek-v4-pro", "${DEFAULT_MODEL}"]
+# The root provider broker owns classified cross-profile fallback and durable
+# accounting. Keep the planner single-shot so it cannot retry a failed
+# credential outside that policy boundary.
+provider_retries = 0
+provider_backoff_ms = 0
 
 [observability]
 backend = "log"
@@ -2017,7 +2195,7 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
-unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL
+ unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from

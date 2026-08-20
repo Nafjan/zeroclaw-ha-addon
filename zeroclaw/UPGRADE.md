@@ -59,9 +59,25 @@ byte-for-byte, preserves secret-file mode, and excludes ephemeral `/run` state.
 The app deliberately does not map `addon_config`: its state and Supervisor
 options are already under `/data`, so the planner has no unnecessary host
 configuration tree to read or modify.
-The provider broker separately allowlists the two configured model IDs and
-reserves hourly request and daily token budgets in root-owned state; planner
-configuration cannot raise those limits at request time.
+The provider broker owns profile-bound model routes and per-profile budgets in
+root-owned state. OpenRouter remains the default profile. NVIDIA and BytePlus
+ModelArk are optional, disabled-by-default edges that require both a separate
+credential and an explicit `provider_*_fallback_enabled` switch. A 401/402
+credential or credit failure, timeout, 429, or 5xx blocks that profile for the
+request and moves to the next eligible profile; the same credential is not
+retried after a provider-wide failure. A 404 may try another model on the same
+profile. The old `/data/provider/quota.json` counters are migrated into the
+durable reservation ledger, reservations settle to actual reported completion
+usage when valid, and crash/expiry/invalid usage is charged at the reserved
+maximum. Planner configuration cannot raise any of these limits at request
+time.
+
+Free-tier routes are empty and disabled by default. When explicitly configured
+and enabled, the broker permits them only for a request with no tools, no
+required tool choice, and no prior tool-call continuation; tool-capable turns
+fail closed instead of silently downgrading. This broker release is buffered
+and non-streaming: `stream=true` is rejected until a separately qualified
+streaming/cancellation design lands.
 
 Verify the following from the add-on log and Home Assistant UI:
 
@@ -88,6 +104,13 @@ one low-risk light action, inspect the audit rows for both `intent` and outcome,
 then test a confirm-class switch, cover, scene, or climate action. The latter
 must remain pending until the configured Telegram owner confirms it. Confirm
 that the ticket is sealed and that a second approval cannot replay it.
+
+Do not enable NVIDIA or Ark fallback in the same canary as writes. First run
+the provider profile contract smoke with the exact configured model IDs and
+observe one forced OpenRouter 402/timeout path, then enable the relevant
+profile switch and repeat the canary. Keep free-tier fallback disabled unless
+you have intentionally configured a current model slug and accepted the
+no-tools-only behavior.
 
 Do not enable creation, scheduling, observer reports, or broad HTTP access in
 the same change. Creation is explicitly blocked in this release because the
