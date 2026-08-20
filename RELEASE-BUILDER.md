@@ -1,11 +1,13 @@
 # Release builder qualification
 
 The checked-in ZeroClaw artifact is authoritative only when the release workflow
-rebuilds it to the SHA in `zeroclaw/binary-manifest.json`. The standard hosted
-runner is retained for acceptance and diagnostics, but it is not an authoritative
-compiler: isolated hosted A/A builds have repeatedly produced the byte-identical
-`2654bb878d0cf7d7644a193f5c3be00a51c39e1af78871ded6f3b1887c755827` family while
-the manifest remains `a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341`.
+rebuilds it to the SHA in `zeroclaw/binary-manifest.json`. The previous checked-in
+`a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341` artifact was
+not reproduced by any recorded release workflow. The pinned Cross route now
+produces byte-identical `1a3911d3cc776e3f0041b3c6a5b9eb1009d976aa556e73a7afd1c713e5d37c54`
+outputs across clean Cargo-job variants, and the trusted Docker Desktop A/A
+qualification produced the same SHA in both isolated builders. That re-qualified
+SHA is the current manifest artifact; do not substitute a different binary.
 
 ## Trusted runner contract
 
@@ -35,7 +37,8 @@ gh workflow run release.yml --ref master \
   -f builder_mode=trusted-aa
 ```
 
-Every run must show both isolated builders producing the authoritative SHA. The
+Every run must show both isolated builders producing
+`1a3911d3cc776e3f0041b3c6a5b9eb1009d976aa556e73a7afd1c713e5d37c54`. The
 uploaded diagnostics must also show identical full dependency manifests and the
 captured `rlib`/`rmeta` artifacts for `channels`, `gateway`, `runtime`, and the
 root `zeroclaw` crate. A matching non-authoritative SHA, a mismatch between A and
