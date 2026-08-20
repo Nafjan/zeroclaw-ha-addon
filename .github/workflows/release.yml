@@ -909,8 +909,24 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Prepare registry credentials for attestation action
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_config_dir="${DOCKER_CONFIG:-$HOME/.docker}"
+          source_config="$source_config_dir/config.json"
+          attest_home="$RUNNER_TEMP/zeroclaw-attest-home"
+          test -s "$source_config"
+          rm -rf -- "$attest_home"
+          mkdir -p "$attest_home/.docker"
+          cp "$source_config" "$attest_home/.docker/config.json"
+          chmod 700 "$attest_home" "$attest_home/.docker"
+          chmod 600 "$attest_home/.docker/config.json"
+
       - name: Attest candidate provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          HOME: ${{ runner.temp }}/zeroclaw-attest-home
         with:
           subject-name: ${{ steps.metadata.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -919,12 +935,26 @@ jobs:
 
       - name: Attest candidate SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          HOME: ${{ runner.temp }}/zeroclaw-attest-home
         with:
           subject-name: ${{ steps.metadata.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
           create-storage-record: false
+
+      - name: Remove attestation credential copy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          attest_home="$RUNNER_TEMP/zeroclaw-attest-home"
+          case "$attest_home" in
+            "$RUNNER_TEMP/"zeroclaw-attest-home) ;;
+            *) echo "unexpected attestation credential path" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$attest_home"
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
