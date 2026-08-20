@@ -959,6 +959,25 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
 
+      - name: Install pinned GitHub CLI
+        shell: bash
+        env:
+          GH_VERSION: "2.97.0"
+          GH_SHA256: "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/gh-cli"
+          url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --retry 3 --silent --show-error --output "$archive" "$url"
+          printf '%s  %s\n' "$GH_SHA256" "$archive" | sha256sum --check -
+          rm -rf -- "$install_dir"
+          mkdir -p -- "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+          test -x "$install_dir/gh"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/gh" version
+
       - name: Sign candidate digest
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -995,6 +1014,25 @@ jobs:
       packages: read
       attestations: read
     steps:
+      - name: Install pinned GitHub CLI
+        shell: bash
+        env:
+          GH_VERSION: "2.97.0"
+          GH_SHA256: "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/gh-cli"
+          url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --retry 3 --silent --show-error --output "$archive" "$url"
+          printf '%s  %s\n' "$GH_SHA256" "$archive" | sha256sum --check -
+          rm -rf -- "$install_dir"
+          mkdir -p -- "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+          test -x "$install_dir/gh"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/gh" version
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
 
