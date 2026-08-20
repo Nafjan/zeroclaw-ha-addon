@@ -129,8 +129,14 @@ esac
 free_eligible=0
 if jq -e '
     ((.tools // []) | length) == 0 and
+    ((.functions // []) | length) == 0 and
     ((.tool_choice // "none") == "none") and
-    ([(.messages // [])[]? | select(.role == "tool" or ((.tool_calls // []) | length) > 0)] | length) == 0
+    ((.function_call // "none") == "none") and
+    ([(.messages // [])[]? | select(
+        .role == "tool" or .role == "function" or
+        ((.tool_calls // []) | length) > 0 or
+        (.function_call != null)
+    )] | length) == 0
 ' "$body_file" >/dev/null 2>&1; then
     free_eligible=1
 fi
@@ -520,7 +526,7 @@ ${candidate_key}"
     }
     attempt_number=$((attempt_number + 1))
     if [ "$tier" = "free" ]; then
-        jq -c --arg model "$upstream_model" 'del(.tools,.tool_choice,.parallel_tool_calls) | .model = $model' \
+        jq -c --arg model "$upstream_model" 'del(.tools,.tool_choice,.parallel_tool_calls,.functions,.function_call) | .model = $model' \
             "$body_file" > "$attempt_body" || {
             last_failure="free route request shaping failed"
             break
