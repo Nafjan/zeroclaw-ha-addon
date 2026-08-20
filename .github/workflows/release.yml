@@ -166,6 +166,13 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/master"
           test "$RUNNER_OS" = "Linux"
           test "$RUNNER_ARCH" = "X64"
+          docker_config="$RUNNER_TEMP/zeroclaw-docker-config"
+          mkdir -p "$docker_config"
+          printf '%s\n' '{"auths":{}}' > "$docker_config/config.json"
+          chmod 700 "$docker_config"
+          chmod 600 "$docker_config/config.json"
+          export DOCKER_CONFIG="$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
           for command in bash cargo docker git jq rustc rustup sha256sum stat; do
             command -v "$command" >/dev/null
           done
