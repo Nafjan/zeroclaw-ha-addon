@@ -3,8 +3,8 @@
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
 - Port the checked-in arm64 artifact from ZeroClaw 0.6.8 to the pinned upstream
-  0.7.5 source commit, with two byte-identical Cross builds recorded in the
-  binary manifest.
+  0.7.5 source commit and re-qualify the binary against the pinned Cross and
+  trusted-builder routes; the manifest records the resulting byte-identical SHA.
 - Render the native 0.7.5 `[providers]` schema with an explicit schema version,
   loopback broker profile, model routes, and optional Telegram channel sections;
   remove the incompatible legacy `telegram = false` boolean.

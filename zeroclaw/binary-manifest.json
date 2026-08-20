@@ -15,5 +15,5 @@
   "rustflags": "-C link-arg=-static -C link-arg=-Wl,-z,stack-size=8388608 -C link-arg=-Wl,--build-id=none -C llvm-args=--rng-seed=0 --remap-path-prefix=/project=.",
   "artifact_status": "verified",
   "build_command": "cargo build --release --locked --target aarch64-unknown-linux-musl",
-  "sha256": "a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341"
+  "sha256": "1a3911d3cc776e3f0041b3c6a5b9eb1009d976aa556e73a7afd1c713e5d37c54"
 }

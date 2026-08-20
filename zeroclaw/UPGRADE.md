@@ -4,9 +4,9 @@ This release changes the trust boundary. ZeroClaw is an unprivileged planner;
 the root-owned capability brokers hold the Supervisor and Telegram credentials.
 Write actions remain disabled by default.
 
-The checked-in binary is the locally verified authoritative artifact: its
-manifest records the pinned Cross image digest and two clean arm64 builds
-produced the same ZeroClaw 0.7.5 SHA (`a3c5edcb…`). The signed CI workflow must reproduce this
+The checked-in binary is the re-qualified authoritative artifact: its
+manifest records the pinned Cross image digest and clean Cross/trusted-builder
+replays produced the same ZeroClaw 0.7.5 SHA (`1a3911d3…`). The signed CI workflow must reproduce this
 result before publication; do not deploy an untagged working tree or bypass the
 candidate/canary gates.
 
