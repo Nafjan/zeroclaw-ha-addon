@@ -29,6 +29,7 @@ on:
           - cross
           - direct
           - direct-aa
+          - trusted-aa
 
 permissions:
   contents: read
@@ -45,7 +46,12 @@ jobs:
   candidate:
     name: Rebuild, attest, and sign candidate digest
     needs: acceptance
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.builder_mode == 'trusted-aa' && 'zeroclaw-release-linux-x64' || 'ubuntu-latest' }}
+    environment:
+      name: ${{ inputs.builder_mode == 'trusted-aa' && 'release-builder' || 'hosted-build' }}
+    concurrency:
+      group: zeroclaw-candidate-${{ inputs.release_tag }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -74,7 +80,7 @@ jobs:
           version="$(awk '$1 == "version:" {print $2; exit}' zeroclaw/config.yaml)"
           builder_mode="${BUILDER_MODE:-cross}"
           case "$builder_mode" in
-            cross|direct|direct-aa) ;;
+            cross|direct|direct-aa|trusted-aa) ;;
             *) echo "unsupported builder_mode=$builder_mode" >&2; exit 1 ;;
           esac
           release_tag="$RELEASE_TAG"
@@ -115,6 +121,9 @@ jobs:
           test "$build_command" = "cargo build --release --locked --target aarch64-unknown-linux-musl"
           test -n "$binary_sha"
           test -n "$image"
+          if [ "$builder_mode" = "trusted-aa" ]; then
+            test "$GITHUB_REF" = "refs/heads/master"
+          fi
           {
             printf 'version=%s\n' "$version"
             printf 'builder_mode=%s\n' "$builder_mode"
@@ -146,6 +155,26 @@ jobs:
       - name: Set up QEMU
         if: ${{ steps.metadata.outputs.builder_mode == 'cross' }}
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Validate trusted release builder contract
+        if: ${{ steps.metadata.outputs.builder_mode == 'trusted-aa' }}
+        shell: bash
+        env:
+          RUST_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/master"
+          test "$RUNNER_OS" = "Linux"
+          test "$RUNNER_ARCH" = "X64"
+          for command in bash cargo docker git jq rustc rustup sha256sum stat; do
+            command -v "$command" >/dev/null
+          done
+          test "$(docker info --format '{{.OSType}}')" = "linux"
+          test -d "$HOME/.cargo"
+          toolchain_rustc="$(rustup which --toolchain "$RUST_TOOLCHAIN" rustc)"
+          test -x "$toolchain_rustc"
+          printf 'trusted release builder contract: %s/%s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          printf 'toolchain rustc: %s\n' "$toolchain_rustc"
 
       - name: Rebuild and verify artifact with direct pinned builder
         if: ${{ steps.metadata.outputs.builder_mode == 'direct' }}
@@ -261,9 +290,10 @@ jobs:
           test "$(stat -c '%s' zeroclaw/zeroclaw-bin)" = "17815496"
 
       - name: Rebuild twice with isolated direct pinned builders
-        if: steps.metadata.outputs.builder_mode == 'direct-aa'
+        if: ${{ steps.metadata.outputs.builder_mode == 'direct-aa' || steps.metadata.outputs.builder_mode == 'trusted-aa' }}
         shell: bash
         env:
+          BUILDER_MODE: ${{ steps.metadata.outputs.builder_mode }}
           SOURCE_COMMIT: ${{ steps.metadata.outputs.source_commit }}
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
           SOURCE_LOCKFILE_SHA256: ${{ steps.metadata.outputs.source_lockfile_sha256 }}
@@ -313,7 +343,7 @@ jobs:
           : > "$direct_binary_a"
           : > "$direct_binary_b"
           {
-            printf 'builder_mode=direct-aa\n'
+            printf 'builder_mode=%s\n' "$BUILDER_MODE"
             printf 'runner_temp=%s\n' "$RUNNER_TEMP"
             printf 'workspace=%s\n' "$GITHUB_WORKSPACE"
             printf 'toolchain_root=%s\n' "$toolchain_root"
