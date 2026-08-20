@@ -178,4 +178,27 @@ stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 [ ! -f /data/provider/free-blocked.log ]
 
+# Legacy OpenAI function-calling fields are also tool-capable. They must not
+# be downgraded to a free route when the modern tools field is absent.
+rm -f "$LEDGER" "$LOCK" /data/provider/function-blocked.log
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="default-route|openrouter|free-model:free|free"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/function-blocked.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+FUNCTION_BODY='{"model":"default-route","messages":[{"role":"user","content":"call a function"}],"functions":[{"name":"turn_on","parameters":{"type":"object"}}],"function_call":"auto"}'
+response=$(request_proxy "$FUNCTION_BODY")
+printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
+stop_listeners
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/function-blocked.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+FUNCTION_MESSAGE_BODY='{"model":"default-route","messages":[{"role":"assistant","content":null,"function_call":{"name":"turn_on","arguments":"{}"}}]}'
+response=$(request_proxy "$FUNCTION_MESSAGE_BODY")
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
+[ ! -f /data/provider/function-blocked.log ]
+
 echo 'provider profile fallback smoke passed'
