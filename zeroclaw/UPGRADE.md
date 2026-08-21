@@ -142,9 +142,12 @@ the signed CI arm64 image build, real-binary provider round-trip, startup,
 broker write, backup/restore, and real HA canary all pass. The signed release
 workflow calls the full acceptance workflow as a prerequisite, publishes only
 a signed candidate digest, and requires a protected `canary` environment plus
-evidence for that exact digest before the protected `production` environment
-can create Supervisor version tags. Configure both environments with required
-reviewers who verify the authenticated canary and backup evidence. The
-promotion job creates the Git tag only after the arm64 OCI image has BuildKit
-provenance/SBOM attestations and a keyless Cosign signature. Verify the exact
-digest and signature before allowing Supervisor to deploy it.
+a commit-pinned, SHA256-checked redacted JSON evidence file bound to the exact
+canary tag and digest before the protected `production` environment can create
+Supervisor version tags. The evidence must prove the backup/restore, rollback,
+read-only, approval, audit, and write-canary gates; see `CANARY-EVIDENCE.md`.
+Configure both environments with required reviewers who verify the
+authenticated canary and backup evidence. The promotion job creates the Git
+tag only after the arm64 OCI image has BuildKit provenance/SBOM attestations
+and a keyless Cosign signature. Verify the exact digest and signature before
+allowing Supervisor to deploy it.

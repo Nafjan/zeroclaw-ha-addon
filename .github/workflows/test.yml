@@ -57,18 +57,27 @@ jobs:
               exit 1
             }
           done
+          for script in .github/scripts/*.sh; do
+            mode="$(git ls-files --stage -- "$script" | awk '{print $1}')"
+            test "$mode" = "100755" || {
+              echo "release shell script is not executable in git: $script (mode $mode)"
+              exit 1
+            }
+          done
 
       - name: Parse every shipped shell script
         run: |
           sh -n zeroclaw/run.sh
           for script in zeroclaw/lib/*.sh; do sh -n "$script"; done
           for script in zeroclaw/tests/*.sh; do sh -n "$script"; done
+          for script in .github/scripts/*.sh; do bash -n "$script"; done
 
       - name: ShellCheck shipped scripts
         run: |
           shellcheck -s bash --severity=error zeroclaw/run.sh
           shellcheck -s sh --severity=error zeroclaw/lib/*.sh
           shellcheck -s sh --severity=error zeroclaw/tests/*.sh
+          shellcheck -s bash --severity=error .github/scripts/*.sh
 
   container:
     name: Build and smoke-test arm64 image
