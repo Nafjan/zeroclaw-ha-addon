@@ -1,0 +1,42 @@
+name: Publish verified canary alias
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish exact candidate digest as temporary canary tag
+    runs-on: ubuntu-latest
+    environment:
+      name: release-builder
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and verify immutable canary alias
+        shell: bash
+        env:
+          IMAGE: ghcr.io/nafjan/zeroclaw-ha-addon
+          SOURCE_DIGEST: sha256:ca22516b1319efe2920765bce259a75c81a62310f87937ae77163b414f1143ca
+          TARGET_TAG: 3.1.4.0-canary.32462208086
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${TARGET_TAG}" \
+            "${IMAGE}@${SOURCE_DIGEST}"
+          resolved="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}')"
+          test "${resolved}" = "${SOURCE_DIGEST}"
+          printf 'canary_tag=%s:%s\ncanary_digest=%s\n' "${IMAGE}" "${TARGET_TAG}" "${resolved}"
