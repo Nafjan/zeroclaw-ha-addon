@@ -412,6 +412,8 @@ case "$operation" in
         [ "${ENABLE_WRITE_ACTIONS:-false}" = "true" ] || json_error "write capability is disabled"
         internal=$(printf '%s' "$request" | jq -r '.internal // false' 2>/dev/null)
         [ "$internal" = true ] || json_error "write capability requires an internal action context"
+        approval_ticket=$(printf '%s' "$request" | jq -r '.approval_ticket // empty' 2>/dev/null)
+        [ -n "$approval_ticket" ] || json_error "approved Telegram ticket is required"
         service=$(printf '%s' "$request" | jq -er '.service | select(type == "string")' 2>/dev/null) || json_error "service must be a string"
         payload=$(printf '%s' "$request" | jq -ce 'if (.payload // {}) | type == "object" then (.payload // {}) else error("payload must be an object") end' 2>/dev/null) || json_error "payload must be an object"
         case "$service" in

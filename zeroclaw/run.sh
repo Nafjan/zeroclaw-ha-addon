@@ -90,6 +90,11 @@ POLICY_CLIMATE_DELTA="$(bashio::config 'policy_climate_delta_confirm_c')"
 POLICY_TRUST_ENABLED="$(bashio::config 'policy_trust_enabled')"
 POLICY_TRUST_PROMOTE="$(bashio::config 'policy_trust_promote_after')"
 
+# The planner and the local TCP transport are intentionally untrusted.  Keep
+# this security gate hard-coded: every write must be backed by a root-sealed,
+# actor-bound Telegram approval before the capability broker will execute it.
+POLICY_REQUIRE_APPROVAL=true
+
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
@@ -541,7 +546,7 @@ CAPABILITY_PORT=42618
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
     export CAPABILITY_QUOTA_FILE="/data/capability/quota.json"
     export CAPABILITY_QUOTA_LOCK="/data/capability/.quota.lock"
-    export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA
+    export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA POLICY_REQUIRE_APPROVAL
     export QUIET_HOURS
     export EXTRA_DENY="${POLICY_EXTRA_DENY}"
     export EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"
@@ -1018,6 +1023,7 @@ export POLICY_MODE="${POLICY_MODE}"
 export POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM}"
 export POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD}"
 export POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA}"
+export POLICY_REQUIRE_APPROVAL="${POLICY_REQUIRE_APPROVAL}"
 export QUIET_HOURS="${QUIET_HOURS}"
 export EXTRA_DENY="${POLICY_EXTRA_DENY}"
 export EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"

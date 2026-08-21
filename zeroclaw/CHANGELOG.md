@@ -29,6 +29,9 @@
   disabled until their provider contract has been exercised.
 - Record Telegram rejection decisions in the durable audit log before removing
   the sealed ticket; retain the ticket if the audit write cannot be persisted.
+- Require a root-sealed, actor-bound Telegram approval for every write in the
+  production runtime, and enforce the ticket requirement again at the broker
+  boundary so a planner cannot turn `internal:true` into a write over raw TCP.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 

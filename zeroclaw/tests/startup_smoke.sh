@@ -224,31 +224,22 @@ if [ "${1:-}" = daemon ]; then
         printf 'TELEGRAM_RUNTIME_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
     elif rm -rf /data/approval-receipts 2>/dev/null; then
         printf 'ROOT_APPROVAL_STORE_REPLACED\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! /usr/local/bin/ha-action-guarded light/turn_on '{"entity_id":"light.kitchen"}' | jq -e 'type == "array"' >/dev/null 2>&1; then
-        printf 'BROKER_WRITE_GATE_FAILED\n' > /tmp/zeroclaw-broker-test
     elif ! /usr/local/bin/ha-capability get_state light.kitchen | jq -e '.entity_id == "light.kitchen"' >/dev/null 2>&1; then
         printf 'BROKER_READ_FAILED\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" != "true" ] && printf '%s\n' '{"operation":"call_service","service":"light/turn_on","payload":{"entity_id":"light.kitchen"},"internal":true}' | /bin/busybox nc -w 3 127.0.0.1 42618 | jq -e '.ok == true' >/dev/null 2>&1; then
+    elif printf '%s\n' '{"operation":"call_service","service":"light/turn_on","payload":{"entity_id":"light.kitchen"},"internal":true}' | /bin/busybox nc -w 3 127.0.0.1 42618 | jq -e '.ok == true' >/dev/null 2>&1; then
         printf 'BROKER_SOCKET_WRITE_BYPASS\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_ENABLE_WRITES:-false}" != "true" ] && ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
         printf 'BROKER_WRITE_DISABLED_BYPASS\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_ENABLE_WRITES:-false}" != "true" ]; then
         printf 'BROKER_OK\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_EXTRA_DENY:-false}" = "true" ] && ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
-        printf 'BROKER_EXTRA_DENY_BYPASS\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_EXTRA_DENY:-false}" = "true" ]; then
-        printf 'BROKER_OK\n' > /tmp/zeroclaw-broker-test
     elif /usr/local/bin/ha-capability call_service light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
         printf 'BROKER_WRITE_CONTEXT_BYPASS\n' > /tmp/zeroclaw-broker-test
+    elif ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
+        printf 'BROKER_TICKET_GATE_BYPASS\n' > /tmp/zeroclaw-broker-test
+    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! POLICY_REQUIRE_APPROVAL=true /usr/local/bin/policy-decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}' | grep -E '^confirm:approval_required:' >/dev/null 2>&1; then
+        printf 'BROKER_APPROVAL_POLICY_MISSING\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && /usr/local/bin/zc-audit-write broker_allow light/turn_on '{"entity_id":"light.kitchen"}' forged >/dev/null 2>&1; then
         printf 'AUDIT_OUTCOME_CLIENT_BYPASS\n' > /tmp/zeroclaw-broker-test
-    elif ! ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' | jq -e 'type == "array"' >/dev/null 2>&1; then
-        printf 'BROKER_WRITE_FAILED\n' > /tmp/zeroclaw-broker-test
-        ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' > /tmp/zeroclaw-raw-debug 2>&1 || true
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! grep -R -F '"kind":"intent"' /data/audit >/dev/null 2>&1; then
-        printf 'AUDIT_INTENT_MISSING\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! grep -R -F '"kind":"broker_allow"' /data/audit >/dev/null 2>&1; then
-        printf 'AUDIT_OUTCOME_MISSING\n' > /tmp/zeroclaw-broker-test
     elif ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw scene/turn_on '{"entity_id":"scene.movie"}' >/dev/null 2>&1; then
         printf 'BROKER_CONFIRM_BYPASS\n' > /tmp/zeroclaw-broker-test
     else

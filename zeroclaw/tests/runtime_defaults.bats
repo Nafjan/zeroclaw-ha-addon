@@ -230,6 +230,8 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'policy_climate_delta_confirm_c is outside the safe range; refusing to start' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'POLICY_REQUIRE_APPROVAL=true' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "approval transition requires actor binding and a broker receipt" {
@@ -281,6 +283,13 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'export ENABLE_WRITE_ACTIONS' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '[ "${ENABLE_WRITE_ACTIONS:-false}" = "true" ] || json_error "write capability is disabled"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "the broker requires a root-sealed Telegram ticket for every write" {
+    run grep -F 'approved Telegram ticket is required' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'POLICY_REQUIRE_APPROVAL' "$run_file"
     [ "$status" -eq 0 ]
 }
 
