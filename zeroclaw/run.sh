@@ -278,17 +278,34 @@ case "${PROVIDER_KEY_MODE}" in
 esac
 export RUST_LOG="${LOG_LEVEL}"
 
-for var in OPENROUTER_KEY TELEGRAM_TOKEN HA_TOKEN; do
+for var in OPENROUTER_KEY HA_TOKEN; do
     eval val=\$$var
     [ -z "$val" ] && { bashio::log.fatal "${var} not set!"; exit 1; }
 done
 
-# Telegram users → first user (the sole approval owner for this release)
-FIRST_USER=$(echo "$TELEGRAM_USERS" | cut -d',' -f1 | tr -d ' ')
-printf '%s' "$FIRST_USER" | grep -Eq '^[0-9]+$' || {
-    bashio::log.fatal "telegram_allowed_users must begin with a numeric Telegram user ID (the approval owner)."
-    exit 1
-}
+# Telegram is an optional transport. When configured, it must have both a bot
+# token and a numeric approval owner; when absent, no Telegram child process is
+# started and read-only/API operation remains available.
+TELEGRAM_ENABLED=false
+FIRST_USER=""
+if [ -n "${TELEGRAM_TOKEN}" ] || [ -n "${TELEGRAM_USERS}" ]; then
+    [ -n "${TELEGRAM_TOKEN}" ] || {
+        bashio::log.fatal "telegram_bot_token is required when telegram_allowed_users is configured."
+        exit 1
+    }
+    [ -n "${TELEGRAM_USERS}" ] || {
+        bashio::log.fatal "telegram_allowed_users is required when telegram_bot_token is configured."
+        exit 1
+    }
+    FIRST_USER=$(echo "$TELEGRAM_USERS" | cut -d',' -f1 | tr -d ' ')
+    printf '%s' "$FIRST_USER" | grep -Eq '^[0-9]+$' || {
+        bashio::log.fatal "telegram_allowed_users must begin with a numeric Telegram user ID (the approval owner)."
+        exit 1
+    }
+    TELEGRAM_ENABLED=true
+else
+    bashio::log.info "Telegram transport disabled; no bot token or users configured."
+fi
 
 # Daily report time is stored and scheduled as UTC. A future timezone-aware
 # option can convert it explicitly; do not bake a user's location into the
@@ -608,19 +625,21 @@ install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-b
 install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capability
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
 TELEGRAM_PORT=42619
-(
-    unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
-        OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-    export TELEGRAM_TOKEN_FILE
-    export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
-    while true; do
-        if ! /bin/busybox nc -l -p "${TELEGRAM_PORT}" -s 127.0.0.1 \
-            -e /usr/local/bin/tg-broker-entrypoint >>/data/logs/telegram-broker.log 2>&1; then
-            sleep 1
-        fi
-    done
-) &
+if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    (
+        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+            OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
+            ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+        export TELEGRAM_TOKEN_FILE
+        export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
+        while true; do
+            if ! /bin/busybox nc -l -p "${TELEGRAM_PORT}" -s 127.0.0.1 \
+                -e /usr/local/bin/tg-broker-entrypoint >>/data/logs/telegram-broker.log 2>&1; then
+                sleep 1
+            fi
+        done
+    ) &
+fi
 
 # ==============================================================
 # tg-send-approval — render a Telegram message with inline-keyboard
@@ -2192,16 +2211,18 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # Telegram callback-query watcher (v3.1.2) — handles inline-keyboard
 # chip taps for approval tickets. Auto-restarts on crash.
 # ==============================================================
-(
-    scrub_unrelated_child_credentials
-    while true; do
-        /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
-            bashio::log.info "[tg-cb] $line"
+if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    (
+        scrub_unrelated_child_credentials
+        while true; do
+            /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
+                bashio::log.info "[tg-cb] $line"
+            done
+            bashio::log.warning "tg-callback-watcher exited; restarting in 5s"
+            sleep 5
         done
-        bashio::log.warning "tg-callback-watcher exited; restarting in 5s"
-        sleep 5
-    done
-) &
+    ) &
+fi
 
 # ==============================================================
 # Cost watchdog: every 5 min, set degrade flag if >80% of daily limit
@@ -2215,8 +2236,10 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
         OVER=$(awk -v t="$TODAY" -v l="$LIMIT" 'BEGIN{print (t > 0.8*l) ? 1 : 0}')
         if [ "$OVER" = "1" ] && [ ! -f /run/zeroclaw/cost-degraded ]; then
             touch /run/zeroclaw/cost-degraded
-            /usr/local/bin/tg-capability send_text "${FIRST_USER}" \
-                "⚠️ Cost watchdog: today's spend \$${TODAY} > 80% of \$${LIMIT}. Routing to cheap model only." >/dev/null 2>&1 || true
+            if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+                /usr/local/bin/tg-capability send_text "${FIRST_USER}" \
+                    "⚠️ Cost watchdog: today's spend \$${TODAY} > 80% of \$${LIMIT}. Routing to cheap model only." >/dev/null 2>&1 || true
+            fi
         fi
         # Reset flag at midnight UTC (fresh day)
         H=$(date -u +%H); M=$(date -u +%M)
