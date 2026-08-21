@@ -154,7 +154,7 @@ rm -f "$LEDGER" "$LOCK" /data/provider/free-success.log
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
 nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|nvidia|nvidia-model|paid
-default-route|openrouter|free-model:free|free"
+default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"free-fallback-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
     /data/provider/free-success.log
@@ -163,8 +163,23 @@ response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","c
 stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'free-fallback-ok' >/dev/null
-grep -F '"model":"free-model:free"' /data/provider/free-success.log >/dev/null
+grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/free-success.log >/dev/null
 ! grep -F '"tools"' /data/provider/free-success.log >/dev/null
+! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
+
+rm -f "$LEDGER" "$LOCK" /data/provider/free-router-success.log
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="default-route|openrouter|openrouter/free|free"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"free-router-fallback-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/free-router-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'free-router-fallback-ok' >/dev/null
+grep -F '"model":"openrouter/free"' /data/provider/free-router-success.log >/dev/null
+! grep -F '"tools"' /data/provider/free-router-success.log >/dev/null
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-blocked.log
@@ -204,6 +219,19 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 
 # Router aliases are shaped by the root broker so the planner cannot choose
 # a more expensive Fusion preset or an unbounded Auto tier.
+rm -f "$LEDGER" "$LOCK" /data/provider/deepseek-latest-success.log
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="default-route|openrouter|~deepseek/deepseek-v4-flash-latest|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"deepseek-latest-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/deepseek-latest-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'deepseek-latest-shaped' >/dev/null
+grep -F '"model":"~deepseek/deepseek-v4-flash-latest"' /data/provider/deepseek-latest-success.log >/dev/null
+
 rm -f "$LEDGER" "$LOCK" /data/provider/fusion-success.log /data/provider/auto-success.log
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="fusion-route|openrouter|openrouter/fusion|paid"

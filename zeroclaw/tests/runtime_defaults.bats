@@ -103,18 +103,22 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "provider fallback is root-owned, profile-bound, and conservative by default" {
+@test "provider fallback is root-owned, profile-bound, and safely enabled by default" {
     run grep -F 'default_model: "~deepseek/deepseek-v4-flash-latest"' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'complex_model: openrouter/fusion' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
+    run grep -F 'openrouter_auto_model: openrouter/auto' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
     run grep -F 'openrouter_fusion_preset: general-budget' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'openrouter_auto_cost_tier: medium' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'openrouter_free_model: nvidia/nemotron-3.5-lightning:free' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'openrouter_free_router_model: openrouter/free' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
-    run grep -F 'provider_free_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
+    run grep -F 'provider_free_fallback_enabled: true' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]

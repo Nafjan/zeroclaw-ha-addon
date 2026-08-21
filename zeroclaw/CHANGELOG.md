@@ -10,9 +10,10 @@
 - Add durable per-profile reservation/settlement ledgers with migration from
   the previous quota counters, crash/expiry settlement at the reserved
   maximum, and conservative invalid-usage handling.
-- Keep free-tier routes disabled by default and enforce no-tools-only
-  containment in the root broker; reject streaming until a separately
-  qualified streaming/cancellation design is implemented.
+- Enable the configured free-tier routes by default only for simple,
+  no-tools turns, enforce that containment in the root broker, and reject
+  streaming until a separately qualified streaming/cancellation design is
+  implemented.
 - Use OpenRouter's current `~deepseek/deepseek-v4-flash-latest` family alias
   for the default route, with `openrouter/fusion` on the `general-budget`
   preset for complex work and `openrouter/auto` as its paid fallback.

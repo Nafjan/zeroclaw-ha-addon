@@ -13,8 +13,19 @@ cat > /data/options.json <<'JSON'
   "ha_token": "legacy-secret",
   "telegram_bot_token": "telegram-secret",
   "telegram_allowed_users": "1",
-  "default_model": "deepseek/deepseek-v4-flash",
-  "complex_model": "anthropic/claude-sonnet-4.6",
+  "default_model": "~deepseek/deepseek-v4-flash-latest",
+  "complex_model": "openrouter/fusion",
+  "openrouter_auto_model": "openrouter/auto",
+  "openrouter_fusion_preset": "general-budget",
+  "openrouter_auto_cost_tier": "medium",
+  "openrouter_free_model": "nvidia/nemotron-3.5-lightning:free",
+  "openrouter_free_router_model": "openrouter/free",
+  "nvidia_free_model": "",
+  "ark_free_model": "",
+  "provider_fallback_enabled": true,
+  "provider_free_fallback_enabled": true,
+  "provider_nvidia_fallback_enabled": false,
+  "provider_ark_fallback_enabled": false,
   "log_level": "info",
   "daily_cost_limit_usd": 5.0,
   "monthly_cost_limit_usd": 20.0,
@@ -309,6 +320,8 @@ grep -F 'allowed_domains = []' /data/config.toml >/dev/null
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     grep -F 'fallback = "custom:http://127.0.0.1:42620/v1"' /data/config.toml >/dev/null
     grep -F '[providers.models."custom:http://127.0.0.1:42620/v1"]' /data/config.toml >/dev/null
+    grep -F 'model = "~deepseek/deepseek-v4-flash-latest"' /data/config.toml >/dev/null
+    grep -F 'model = "openrouter/fusion"' /data/config.toml >/dev/null
     grep -F '[[providers.model_routes]]' /data/config.toml >/dev/null
     test -x /usr/local/bin/provider-broker-handler
     test -x /usr/local/bin/provider-broker-entrypoint
