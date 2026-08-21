@@ -51,6 +51,48 @@ printf 'HTTP/1.1 %s %s\r\nContent-Type: application/json\r\nContent-Length: %s\r
 UPSTREAM
 chmod +x /tmp/provider-profile-fake-upstream
 
+cat > /tmp/provider-profile-credit-then-free-upstream <<'UPSTREAM'
+#!/bin/sh
+set -eu
+STATE_FILE="${SEQUENCE_STATE:?}"
+LOG_FILE="${SEQUENCE_LOG:?}"
+count=0
+[ ! -f "$STATE_FILE" ] || count=$(cat "$STATE_FILE")
+count=$((count + 1))
+printf '%s\n' "$count" > "$STATE_FILE"
+IFS= read -r request_line || exit 0
+request_line=$(printf '%s' "$request_line" | tr -d '\r')
+printf '%s\n' "$request_line" >> "$LOG_FILE"
+content_length=0
+while IFS= read -r header; do
+    header=$(printf '%s' "$header" | tr -d '\r')
+    [ -z "$header" ] && break
+    printf '%s\n' "$header" >> "$LOG_FILE"
+    case "$header" in
+        Content-Length:*|content-length:*)
+            content_length=$(printf '%s' "$header" | cut -d: -f2- | tr -d ' ')
+            ;;
+    esac
+done
+if [ "$content_length" -gt 0 ]; then
+    dd bs=1 count="$content_length" 2>/dev/null >> "$LOG_FILE"
+fi
+printf '\n' >> "$LOG_FILE"
+if [ "$count" -eq 1 ]; then
+    status=402
+    reason='Payment Required'
+    body='{"error":{"code":"insufficient_quota","message":"credits exhausted"}}'
+else
+    status=200
+    reason='OK'
+    body='{"choices":[{"message":{"content":"same-profile-free-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}'
+fi
+length=$(printf '%s' "$body" | wc -c | tr -d ' ')
+printf 'HTTP/1.1 %s %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
+    "$status" "$reason" "$length" "$body"
+UPSTREAM
+chmod +x /tmp/provider-profile-credit-then-free-upstream
+
 start_upstream() {
     upstream_port="$1"
     upstream_status="$2"
@@ -71,6 +113,18 @@ start_upstream() {
     else
         NVIDIA_PID=$!
     fi
+    sleep 1
+}
+
+start_credit_then_free_upstream() {
+    sequence_state="$1"
+    sequence_log="$2"
+    : > "$sequence_state"
+    : > "$sequence_log"
+    SEQUENCE_STATE="$sequence_state" SEQUENCE_LOG="$sequence_log" \
+        /bin/busybox sh -c 'while true; do /bin/busybox nc -l -p "$1" -s 127.0.0.1 -e /tmp/provider-profile-credit-then-free-upstream; sleep 1; done' \
+        sh "$OPENROUTER_PORT" &
+    OPENROUTER_PID=$!
     sleep 1
 }
 
@@ -149,6 +203,22 @@ jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "
     "$LEDGER" >/dev/null
 jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 3' \
     "$LEDGER" >/dev/null
+
+# A paid OpenRouter credit failure must still reach an explicitly configured
+# free route on the same root-owned profile. This is the user-facing
+# out-of-credits fallback path, and it remains limited to a no-tools request.
+rm -f "$LEDGER" "$LOCK" /data/provider/same-profile-free.state /data/provider/same-profile-free.log
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="default-route|openrouter|primary-model|paid
+default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
+start_credit_then_free_upstream /data/provider/same-profile-free.state /data/provider/same-profile-free.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'same-profile-free-ok' >/dev/null
+[ "$(cat /data/provider/same-profile-free.state)" = 2 ]
+grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/same-profile-free.log >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-success.log
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
