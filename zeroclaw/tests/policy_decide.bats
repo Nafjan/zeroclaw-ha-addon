@@ -11,7 +11,6 @@
 setup() {
     POLICY_SCRIPT="$BATS_TEST_DIRNAME/../lib/policy-decide.sh"
     [ -f "$POLICY_SCRIPT" ] || POLICY_SCRIPT="$BATS_TEST_DIRNAME/../../zeroclaw/lib/policy-decide.sh"
-    chmod +x "$POLICY_SCRIPT" 2>/dev/null || true
 
     unset POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD
     unset POLICY_CLIMATE_DELTA QUIET_HOURS

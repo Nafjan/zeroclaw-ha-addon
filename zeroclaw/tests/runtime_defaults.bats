@@ -239,6 +239,13 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "rejection is audited before the sealed ticket is removed" {
+    run grep -F 'rejection audit could not be persisted; rejection retained' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-audit-write reject' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "confirmed execution is claimed and finalized inside the root broker" {
     run grep -F 'approval-transition.sh claim "$ticket"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]

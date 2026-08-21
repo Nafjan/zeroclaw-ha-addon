@@ -128,6 +128,17 @@ case "$ACTION" in
         echo "APPROVED ${SHORT}"
         ;;
     reject)
+        # Rejection is a terminal user decision, so it must be recorded before
+        # the sealed ticket is removed. If the audit store is unavailable,
+        # fail closed and retain the ticket for recovery.
+        [ -x /usr/local/bin/zc-audit-write ] || fail "audit store unavailable; rejection retained"
+        REJECT_SERVICE=$(jq -er '.service | select(type == "string")' "$TICKET") || \
+            fail "ticket ${SHORT} has an invalid service; rejection retained"
+        REJECT_PAYLOAD=$(jq -ce '.payload | select(type == "object")' "$TICKET") || \
+            fail "ticket ${SHORT} has an invalid payload; rejection retained"
+        /usr/local/bin/zc-audit-write reject "$REJECT_SERVICE" "$REJECT_PAYLOAD" \
+            "source=telegram;actor=${ACTOR};chat=${CHAT};ticket=${SHORT}" || \
+            fail "rejection audit could not be persisted; rejection retained"
         rm -f "$TICKET" "$MARKER" "$RECEIPT"
         echo "REJECTED ${SHORT}"
         ;;
