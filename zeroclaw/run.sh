@@ -414,7 +414,8 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     chmod 0700 "${PROVIDER_KEY_DIR}"
     PROVIDER_PORT=42620
     (
-        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_TOKEN
+        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+            LEGACY_HA_TOKEN ZEROCLAW_API_KEY
         # The endpoint remains root-controlled.  The test-only override lets
         # the real arm64 planner binary exercise this broker against a local
         # deterministic upstream without ever exposing a provider key to it.
@@ -483,7 +484,9 @@ CAPABILITY_PORT=42618
     # HA_TOKEN is the only credential this broker is allowed to retain. The
     # original Supervisor-provided variable was scrubbed in the parent and is
     # explicitly removed here as a defense against reordering regressions.
-    unset SUPERVISOR_TOKEN
+    unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+        OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
     export HA_TOKEN HA_URL
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
@@ -606,7 +609,9 @@ install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capab
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
 TELEGRAM_PORT=42619
 (
-    unset SUPERVISOR_TOKEN HA_TOKEN
+    unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+        OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
     export TELEGRAM_TOKEN_FILE
     export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
     while true; do
@@ -652,6 +657,11 @@ SCRIPT
 cat > /usr/local/bin/tg-callback-watcher << SCRIPT
 #!/bin/sh
 set -u
+# The watcher reads the Telegram bot token from its private runtime file.  It
+# must never inherit Supervisor, provider, or parent-process credential env.
+unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+    OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
+    ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
 OFFSET_F="/run/zeroclaw/telegram-offset"
 USERS_F="${TG_USERS_FILE}"
@@ -2106,6 +2116,15 @@ MEMEOF
 
 bashio::log.info "Config ready | mode=${POLICY_MODE} | ${DEFAULT_MODEL} + ${COMPLEX_MODEL}"
 
+# Root helper loops do not need credentials.  Scrub them before each loop is
+# forked so the typed capability brokers are the only long-lived processes
+# retaining Supervisor, Telegram, or provider credentials.
+scrub_unrelated_child_credentials() {
+    unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+        OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+}
+
 # ==============================================================
 # Audit/undo retention cleanup (one-shot at startup).  Approval state has a
 # separate root-only cleaner because canonical tickets are not planner state.
@@ -2119,6 +2138,7 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # Continue expiring sealed tickets and stale claims while the app is running.
 # This loop is root-owned and has no planner credentials.
 (
+    scrub_unrelated_child_credentials
     while true; do
         sleep 300
         /opt/zeroclaw/lib/state-cleanup.sh /data || \
@@ -2130,6 +2150,7 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # Post-startup seeder: waits for gateway, registers crons via REST.
 # ==============================================================
 (
+    scrub_unrelated_child_credentials
     bashio::log.info "Cron seeder waiting for gateway..."
     for i in $(seq 1 60); do
         if curl -sf "${GW}/health" >/dev/null 2>&1; then
@@ -2172,6 +2193,7 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # chip taps for approval tickets. Auto-restarts on crash.
 # ==============================================================
 (
+    scrub_unrelated_child_credentials
     while true; do
         /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
             bashio::log.info "[tg-cb] $line"
@@ -2185,6 +2207,7 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
 # Cost watchdog: every 5 min, set degrade flag if >80% of daily limit
 # ==============================================================
 (
+    scrub_unrelated_child_credentials
     while true; do
         sleep 300
         TODAY=$(curl -s "${GW}/api/cost" 2>/dev/null | jq -r '.today_cost_usd // 0')
