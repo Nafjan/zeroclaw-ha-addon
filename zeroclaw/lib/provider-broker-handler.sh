@@ -20,6 +20,8 @@ PROFILE_SPEC="${PROVIDER_PROFILE_SPEC:-}"
 ROUTE_SPEC="${PROVIDER_ROUTE_SPEC:-}"
 FALLBACK_ENABLED="${PROVIDER_FALLBACK_ENABLED:-true}"
 FREE_FALLBACK_ENABLED="${PROVIDER_FREE_FALLBACK_ENABLED:-false}"
+FUSION_PRESET="${PROVIDER_FUSION_PRESET:-general-budget}"
+AUTO_COST_TIER="${PROVIDER_AUTO_COST_TIER:-medium}"
 LEDGER_FILE="${PROVIDER_LEDGER_FILE:-${PROVIDER_QUOTA_FILE:-/data/provider/ledger.json}}"
 LEDGER_FILE=$(printf '%s' "$LEDGER_FILE" | sed 's/[[:space:]]*$//')
 LEDGER_LOCK="${PROVIDER_LEDGER_LOCK:-${PROVIDER_QUOTA_LOCK:-/data/provider/.ledger.lock}}"
@@ -55,6 +57,14 @@ esac
 case "$FALLBACK_ENABLED:$FREE_FALLBACK_ENABLED" in
     true:true|true:false|false:true|false:false) ;;
     *) respond 503 "Service Unavailable" '{"error":"provider fallback settings are invalid"}' ;;
+esac
+case "$FUSION_PRESET" in
+    general-high|general-budget|general-fast) ;;
+    *) respond 503 "Service Unavailable" '{"error":"provider Fusion preset is invalid"}' ;;
+esac
+case "$AUTO_COST_TIER" in
+    low|medium|high|xhigh|max) ;;
+    *) respond 503 "Service Unavailable" '{"error":"provider Auto cost tier is invalid"}' ;;
 esac
 
 # Compatibility path for the previous single-OpenRouter broker.
@@ -533,6 +543,24 @@ ${candidate_key}"
         jq -c --arg model "$upstream_model" 'del(.tools,.tool_choice,.parallel_tool_calls,.functions,.function_call) | .model = $model' \
             "$body_file" > "$attempt_body" || {
             last_failure="free route request shaping failed"
+            break
+        }
+    elif [ "$upstream_model" = "openrouter/fusion" ]; then
+        jq -c --arg model "$upstream_model" --arg preset "$FUSION_PRESET" \
+            '.model = $model |
+             .plugins = ((.plugins // []) | map(select((.id // "") != "fusion")) +
+                         [{"id":"fusion","preset":$preset}])' \
+            "$body_file" > "$attempt_body" || {
+            last_failure="Fusion route request shaping failed"
+            break
+        }
+    elif [ "$upstream_model" = "openrouter/auto" ]; then
+        jq -c --arg model "$upstream_model" --arg cost_tier "$AUTO_COST_TIER" \
+            '.model = $model |
+             .plugins = ((.plugins // []) | map(select((.id // "") != "auto-router")) +
+                         [{"id":"auto-router","cost_tier":$cost_tier}])' \
+            "$body_file" > "$attempt_body" || {
+            last_failure="Auto route request shaping failed"
             break
         }
     else

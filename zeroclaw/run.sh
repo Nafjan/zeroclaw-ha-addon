@@ -24,13 +24,25 @@ if [ -z "${PROVIDER_KEY_MODE}" ]; then
 fi
 DEFAULT_MODEL="$(bashio::config 'default_model')"
 COMPLEX_MODEL="$(bashio::config 'complex_model')"
+OPENROUTER_AUTO_MODEL="$(bashio::config 'openrouter_auto_model')"
+OPENROUTER_FUSION_PRESET="$(bashio::config 'openrouter_fusion_preset')"
+OPENROUTER_AUTO_COST_TIER="$(bashio::config 'openrouter_auto_cost_tier')"
 NVIDIA_MODEL="$(bashio::config 'nvidia_model')"
 ARK_FAST_MODEL="$(bashio::config 'ark_fast_model')"
 ARK_REASONING_MODEL="$(bashio::config 'ark_reasoning_model')"
 ARK_PRO_MODEL="$(bashio::config 'ark_pro_model')"
 OPENROUTER_FREE_MODEL="$(bashio::config 'openrouter_free_model')"
+OPENROUTER_FREE_ROUTER_MODEL="$(bashio::config 'openrouter_free_router_model')"
 NVIDIA_FREE_MODEL="$(bashio::config 'nvidia_free_model')"
 ARK_FREE_MODEL="$(bashio::config 'ark_free_model')"
+
+# New routing options are defaulted at runtime so an existing Supervisor
+# options object that predates them still gets the safe, documented route
+# shape on its next restart.
+OPENROUTER_AUTO_MODEL="${OPENROUTER_AUTO_MODEL:-openrouter/auto}"
+OPENROUTER_FUSION_PRESET="${OPENROUTER_FUSION_PRESET:-general-budget}"
+OPENROUTER_AUTO_COST_TIER="${OPENROUTER_AUTO_COST_TIER:-medium}"
+OPENROUTER_FREE_ROUTER_MODEL="${OPENROUTER_FREE_ROUTER_MODEL:-openrouter/free}"
 PROVIDER_FALLBACK_ENABLED="$(bashio::config 'provider_fallback_enabled')"
 PROVIDER_FREE_FALLBACK_ENABLED="$(bashio::config 'provider_free_fallback_enabled')"
 NVIDIA_FALLBACK_ENABLED="$(bashio::config 'provider_nvidia_fallback_enabled')"
@@ -87,8 +99,8 @@ PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR:-60}"
 PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET="${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET:-50000}"
 PROVIDER_ARK_MAX_REQUESTS_HOUR="${PROVIDER_ARK_MAX_REQUESTS_HOUR:-60}"
 PROVIDER_ARK_DAILY_TOKEN_BUDGET="${PROVIDER_ARK_DAILY_TOKEN_BUDGET:-50000}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-deepseek/deepseek-v4-flash}"
-COMPLEX_MODEL="${COMPLEX_MODEL:-anthropic/claude-sonnet-4.6}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-~deepseek/deepseek-v4-flash-latest}"
+COMPLEX_MODEL="${COMPLEX_MODEL:-openrouter/fusion}"
 NVIDIA_MODEL="${NVIDIA_MODEL:-meta/llama-3.3-70b-instruct}"
 ARK_FAST_MODEL="${ARK_FAST_MODEL:-deepseek-v4-flash-ga-260731}"
 ARK_REASONING_MODEL="${ARK_REASONING_MODEL:-glm-5-2-260617}"
@@ -142,15 +154,26 @@ validate_model_id() {
 for model_pair in \
     "default_model=${DEFAULT_MODEL}" \
     "complex_model=${COMPLEX_MODEL}" \
+    "openrouter_auto_model=${OPENROUTER_AUTO_MODEL}" \
     "nvidia_model=${NVIDIA_MODEL}" \
     "ark_fast_model=${ARK_FAST_MODEL}" \
     "ark_reasoning_model=${ARK_REASONING_MODEL}" \
     "ark_pro_model=${ARK_PRO_MODEL}" \
     "openrouter_free_model=${OPENROUTER_FREE_MODEL}" \
+    "openrouter_free_router_model=${OPENROUTER_FREE_ROUTER_MODEL}" \
     "nvidia_free_model=${NVIDIA_FREE_MODEL}" \
     "ark_free_model=${ARK_FREE_MODEL}"; do
     validate_model_id "${model_pair%%=*}" "${model_pair#*=}"
 done
+
+case "${OPENROUTER_FUSION_PRESET}" in
+    general-high|general-budget|general-fast) ;;
+    *) bashio::log.fatal "openrouter_fusion_preset is invalid; refusing to start"; exit 1 ;;
+esac
+case "${OPENROUTER_AUTO_COST_TIER}" in
+    low|medium|high|xhigh|max) ;;
+    *) bashio::log.fatal "openrouter_auto_cost_tier is invalid; refusing to start"; exit 1 ;;
+esac
 
 case "${DEFAULT_MODEL}:${COMPLEX_MODEL}" in
     *:free*)
@@ -158,16 +181,21 @@ case "${DEFAULT_MODEL}:${COMPLEX_MODEL}" in
         exit 1
         ;;
 esac
+validate_free_model_id() {
+    free_model_label="$1"
+    free_model_value="$2"
+    [ -n "$free_model_value" ] || return 0
+    case "$free_model_value" in
+        openrouter/free|*:free) ;;
+        *) bashio::log.fatal "${free_model_label} must use an explicit :free model slug or openrouter/free; refusing to start"; exit 1 ;;
+    esac
+}
 for free_model_pair in \
     "openrouter_free_model=${OPENROUTER_FREE_MODEL}" \
+    "openrouter_free_router_model=${OPENROUTER_FREE_ROUTER_MODEL}" \
     "nvidia_free_model=${NVIDIA_FREE_MODEL}" \
     "ark_free_model=${ARK_FREE_MODEL}"; do
-    free_model="${free_model_pair#*=}"
-    [ -n "${free_model}" ] || continue
-    case "${free_model}" in
-        *:free) ;;
-        *) bashio::log.fatal "${free_model_pair%%=*} must use an explicit :free model slug; refusing to start"; exit 1 ;;
-    esac
+    validate_free_model_id "${free_model_pair%%=*}" "${free_model_pair#*=}"
 done
 
 for provider_flag_pair in \
@@ -445,10 +473,13 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
         export PROVIDER_PROFILE_SPEC="openrouter|${OPENROUTER_UPSTREAM_URL}|${PROVIDER_KEY_DIR}/openrouter.key|${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR}|${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}
 nvidia|https://integrate.api.nvidia.com/v1/chat/completions|${PROVIDER_KEY_DIR}/nvidia.key|${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR}|${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}
 ark|https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions|${PROVIDER_KEY_DIR}/ark.key|${PROVIDER_ARK_MAX_REQUESTS_HOUR}|${PROVIDER_ARK_DAILY_TOKEN_BUDGET}"
-        export PROVIDER_ALLOWED_MODELS="${DEFAULT_MODEL},${COMPLEX_MODEL},~google/gemini-flash-latest,deepseek/deepseek-v4-pro"
+        export PROVIDER_ALLOWED_MODELS="${DEFAULT_MODEL},${COMPLEX_MODEL},${OPENROUTER_AUTO_MODEL},~google/gemini-flash-latest,deepseek/deepseek-v4-pro"
+        export PROVIDER_FUSION_PRESET="${OPENROUTER_FUSION_PRESET}"
+        export PROVIDER_AUTO_COST_TIER="${OPENROUTER_AUTO_COST_TIER}"
         export PROVIDER_ROUTE_SPEC="${DEFAULT_MODEL}|openrouter|${DEFAULT_MODEL}|paid
 ${DEFAULT_MODEL}|openrouter|~google/gemini-flash-latest|paid
 ${COMPLEX_MODEL}|openrouter|${COMPLEX_MODEL}|paid
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_AUTO_MODEL}|paid
 ${COMPLEX_MODEL}|openrouter|deepseek/deepseek-v4-pro|paid"
         if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
@@ -463,18 +494,19 @@ ${COMPLEX_MODEL}|ark|${ARK_PRO_MODEL}|paid"
         fi
         if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
-${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free
-${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
+${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
+        fi
+        if [ -n "${OPENROUTER_FREE_ROUTER_MODEL}" ]; then
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free"
         fi
         if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ] && [ -n "${NVIDIA_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
-${DEFAULT_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free
-${COMPLEX_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
+${DEFAULT_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
         fi
         if [ "${ARK_FALLBACK_ENABLED}" = "true" ] && [ -n "${ARK_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
-${DEFAULT_MODEL}|ark|${ARK_FREE_MODEL}|free
-${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
+${DEFAULT_MODEL}|ark|${ARK_FREE_MODEL}|free"
         fi
         export PROVIDER_FALLBACK_ENABLED PROVIDER_FREE_FALLBACK_ENABLED
         export PROVIDER_MAX_TOKENS

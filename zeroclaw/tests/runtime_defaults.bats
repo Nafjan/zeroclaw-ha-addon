@@ -104,6 +104,16 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 }
 
 @test "provider fallback is root-owned, profile-bound, and conservative by default" {
+    run grep -F 'default_model: "~deepseek/deepseek-v4-flash-latest"' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'complex_model: openrouter/fusion' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'openrouter_fusion_preset: general-budget' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'openrouter_free_model: nvidia/nemotron-3.5-lightning:free' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'openrouter_free_router_model: openrouter/free' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
     run grep -F 'provider_free_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
@@ -115,6 +125,10 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'export PROVIDER_ROUTE_SPEC=' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '~google/gemini-flash-latest' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'export PROVIDER_FUSION_PRESET=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'openrouter/auto' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '[ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]' "$run_file"
     [ "$status" -eq 0 ]

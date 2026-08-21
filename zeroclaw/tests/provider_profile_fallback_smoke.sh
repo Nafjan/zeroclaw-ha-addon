@@ -79,6 +79,7 @@ start_proxy() {
     route_spec="$2"
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
+        PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
         PROVIDER_MAX_TOKENS=16 PROVIDER_LEDGER_FILE="$LEDGER" \
         PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
         PROVIDER_RESERVATION_TTL_SECONDS=180 \
@@ -200,5 +201,35 @@ response=$(request_proxy "$FUNCTION_MESSAGE_BODY")
 stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 [ ! -f /data/provider/function-blocked.log ]
+
+# Router aliases are shaped by the root broker so the planner cannot choose
+# a more expensive Fusion preset or an unbounded Auto tier.
+rm -f "$LEDGER" "$LOCK" /data/provider/fusion-success.log /data/provider/auto-success.log
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="fusion-route|openrouter|openrouter/fusion|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"fusion-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/fusion-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"fusion-route","messages":[{"role":"user","content":"compare"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+grep -F '"model":"openrouter/fusion"' /data/provider/fusion-success.log >/dev/null
+grep -F '"id":"fusion"' /data/provider/fusion-success.log >/dev/null
+grep -F '"preset":"general-budget"' /data/provider/fusion-success.log >/dev/null
+
+rm -f "$LEDGER" "$LOCK"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="auto-route|openrouter|openrouter/auto|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"auto-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    /data/provider/auto-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"auto-route","messages":[{"role":"user","content":"plan"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+grep -F '"model":"openrouter/auto"' /data/provider/auto-success.log >/dev/null
+grep -F '"id":"auto-router"' /data/provider/auto-success.log >/dev/null
+grep -F '"cost_tier":"medium"' /data/provider/auto-success.log >/dev/null
 
 echo 'provider profile fallback smoke passed'
