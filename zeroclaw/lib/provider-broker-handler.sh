@@ -511,9 +511,27 @@ route_candidates=$(printf '%s\n' "$ROUTE_SPEC" | awk -F '|' -v route="$requested
 [ -n "$route_candidates" ] || respond 403 "Forbidden" '{"error":"model route is not allowed by the provider broker"}'
 
 blocked_profiles=""
+credit_exhausted_profiles=""
 seen_candidates=""
 attempt_number=0
 last_failure="provider routes exhausted"
+
+profile_is_credit_exhausted() {
+    case ",${credit_exhausted_profiles}," in
+        *,"$1",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+mark_credit_exhausted() {
+    if ! profile_is_credit_exhausted "$1"; then
+        if [ -n "$credit_exhausted_profiles" ]; then
+            credit_exhausted_profiles="${credit_exhausted_profiles},$1"
+        else
+            credit_exhausted_profiles="$1"
+        fi
+    fi
+}
 
 while IFS='|' read -r route_id profile_id upstream_model tier; do
     [ -n "$route_id" ] || continue
@@ -533,7 +551,17 @@ ${candidate_key}"
     if [ "$FALLBACK_ENABLED" != "true" ] && [ "$attempt_number" -gt 0 ]; then
         break
     fi
-    profile_is_blocked "$profile_id" && continue
+    if [ "$tier" = "free" ]; then
+        # A paid route can exhaust account credits while the provider's
+        # explicitly free catalogue remains usable. Permit only that
+        # classified transition; other profile failures still block both
+        # paid and free routes.
+        if profile_is_blocked "$profile_id" && ! profile_is_credit_exhausted "$profile_id"; then
+            continue
+        fi
+    elif profile_is_blocked "$profile_id"; then
+        continue
+    fi
     load_profile "$profile_id" || {
         block_profile "$profile_id"
         continue
@@ -660,13 +688,16 @@ ${candidate_key}"
                 model_unavailable)
                     # A 404 is model-specific rather than a provider-wide
                     # quota/auth failure, so an alternate model on the same
-                    # profile remains eligible.  401/402/429/5xx and network
-                    # failures block the profile and never retry that key.
+                    # profile remains eligible.  A 402 is recorded separately
+                    # so an explicitly configured free route may still use
+                    # that profile; 401/429/5xx and network failures block the
+                    # profile for every route.
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"
                     continue
                     ;;
                 *)
+                    [ "$FAILURE_CLASS" = "credit_exhausted" ] && mark_credit_exhausted "$profile_id"
                     block_profile "$profile_id"
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"
