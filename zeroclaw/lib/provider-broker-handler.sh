@@ -48,6 +48,8 @@ case "$MAX_TOKENS:$MAX_REQUESTS_PER_HOUR:$DAILY_TOKEN_BUDGET:$RESERVATION_TTL" i
 esac
 [ "$MAX_TOKENS" -ge 1 ] && [ "$MAX_TOKENS" -le "$DAILY_TOKEN_BUDGET" ] || \
     respond 503 "Service Unavailable" '{"error":"provider token limits are invalid"}'
+[ "$MAX_REQUESTS_PER_HOUR" -ge 1 ] && [ "$MAX_REQUESTS_PER_HOUR" -le 1000 ] || \
+    respond 503 "Service Unavailable" '{"error":"provider request limits are invalid"}'
 [ "$RESERVATION_TTL" -ge 30 ] && [ "$RESERVATION_TTL" -le 900 ] || \
     respond 503 "Service Unavailable" '{"error":"provider reservation TTL is invalid"}'
 case "$FALLBACK_ENABLED:$FREE_FALLBACK_ENABLED" in
@@ -248,6 +250,8 @@ migrate_legacy_ledger() {
     legacy_day=$(printf '%s' "$legacy" | jq -r '.day_window')
     legacy_requests=$(printf '%s' "$legacy" | jq -r '.requests_hour')
     legacy_tokens=$(printf '%s' "$legacy" | jq -r '.tokens_day')
+    [ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ] || return 1
+    [ "$legacy_tokens" -le "$DAILY_TOKEN_BUDGET" ] || return 1
     migrated=$(jq -nc \
         --arg profile "$legacy_profile" \
         --argjson hour "$legacy_hour" \
