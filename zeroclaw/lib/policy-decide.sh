@@ -20,6 +20,7 @@
 #   POLICY_QUIET_CONFIRM         true|false                          (default: true)
 #   POLICY_BULK_THRESHOLD        integer                             (default: 3)
 #   POLICY_CLIMATE_DELTA         integer (°C)                        (default: 3)
+#   POLICY_REQUIRE_APPROVAL      true|false                          (default: false)
 #   QUIET_HOURS                  HH:MM-HH:MM                         (default: 23:00-06:00)
 #   EXTRA_DENY                   comma-separated globs               (default: "")
 #   EXTRA_CONFIRM                comma-separated globs               (default: "")
@@ -41,6 +42,7 @@ POLICY_MODE="${POLICY_MODE:-balanced}"
 POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM:-true}"
 POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD:-3}"
 POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA:-3}"
+POLICY_REQUIRE_APPROVAL="${POLICY_REQUIRE_APPROVAL:-false}"
 QUIET_HOURS="${QUIET_HOURS:-23:00-06:00}"
 EXTRA_DENY="${EXTRA_DENY:-}"
 EXTRA_CONFIRM="${EXTRA_CONFIRM:-}"
@@ -55,6 +57,14 @@ if [ -z "$DOMAIN" ] || [ -z "$ACTION" ]; then
     echo "deny:bad_input"
     exit 0
 fi
+
+case "$POLICY_REQUIRE_APPROVAL" in
+    true|false) ;;
+    *)
+        echo "deny:invalid_require_approval_policy"
+        exit 0
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 1. Pattern helpers
@@ -226,6 +236,17 @@ if [ "$POLICY_QUIET_CONFIRM" = "true" ]; then
                 ;;
         esac
     fi
+fi
+
+# Production installs set this hard gate because the local TCP transport does
+# not authenticate the connecting process.  Every otherwise-allowed write
+# must therefore pass through the root-owned Telegram ticket path before the
+# broker will execute it.  Keep the default false so this pure policy function
+# remains useful for callers/tests that explicitly model low-risk auto-allow.
+if [ "$POLICY_REQUIRE_APPROVAL" = "true" ]; then
+    case "$VERDICT" in
+        allow:*) VERDICT="confirm:approval_required:${VERDICT#allow:}" ;;
+    esac
 fi
 
 echo "$VERDICT"

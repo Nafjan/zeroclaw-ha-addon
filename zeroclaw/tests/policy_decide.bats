@@ -13,7 +13,7 @@ setup() {
     [ -f "$POLICY_SCRIPT" ] || POLICY_SCRIPT="$BATS_TEST_DIRNAME/../../zeroclaw/lib/policy-decide.sh"
 
     unset POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD
-    unset POLICY_CLIMATE_DELTA QUIET_HOURS
+    unset POLICY_CLIMATE_DELTA POLICY_REQUIRE_APPROVAL QUIET_HOURS
     unset EXTRA_DENY EXTRA_CONFIRM EXTRA_ALLOW
     unset POLICY_NOW_HOUR POLICY_CLIMATE_CURRENT POLICY_BULK_COUNT
 
@@ -248,6 +248,18 @@ decide() {
     POLICY_NOW_HOUR=2
     run decide scene turn_on scene.movie
     [[ "$output" == confirm:default_scene* ]]
+}
+
+@test "global production approval gate escalates every otherwise-allowed action" {
+    export POLICY_REQUIRE_APPROVAL=true
+    run decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}'
+    [[ "$output" == confirm:approval_required:default_light* ]]
+}
+
+@test "invalid global approval gate fails closed" {
+    export POLICY_REQUIRE_APPROVAL=maybe
+    run decide light turn_on light.kitchen
+    [[ "$output" == deny:invalid_require_approval_policy ]]
 }
 
 # ─────────────────────── Bad input ───────────────────────
