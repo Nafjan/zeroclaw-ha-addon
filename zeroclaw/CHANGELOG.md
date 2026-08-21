@@ -13,8 +13,12 @@
 - Keep free-tier routes disabled by default and enforce no-tools-only
   containment in the root broker; reject streaming until a separately
   qualified streaming/cancellation design is implemented.
-- Use OpenRouter's current `~google/gemini-flash-latest` family alias for the
-  default-route backup instead of an unqualified model slug.
+- Use OpenRouter's current `~deepseek/deepseek-v4-flash-latest` family alias
+  for the default route, with `openrouter/fusion` on the `general-budget`
+  preset for complex work and `openrouter/auto` as its paid fallback.
+- Add explicit OpenRouter free routes for
+  `nvidia/nemotron-3.5-lightning:free` and `openrouter/free`; the root broker
+  injects router settings and keeps both routes no-tools-only.
 - Add arm64 profile/fallback, migration, credential-isolation, and real
   ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
   disabled until their provider contract has been exercised.

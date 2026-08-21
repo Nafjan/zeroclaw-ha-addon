@@ -4,8 +4,8 @@ configuration:
     name: "OpenRouter API key"
     description: >-
       Your OpenRouter key (https://openrouter.ai). The agent uses OpenRouter to
-      reach both the cheap default model (Gemini Flash) and the smarter complex
-      model (Claude Sonnet). Required.
+      reach the DeepSeek V4 Flash default, the budget Fusion/Auto complex
+      routes, and the optional free fallback routes. Required.
   nvidia_api_key:
     name: "NVIDIA API key"
     description: >-
@@ -47,12 +47,28 @@ configuration:
     name: "Default model (cheap)"
     description: >-
       Used for trivia, lookups, and simple actions. Default:
-      deepseek/deepseek-v4-flash. Pick any OpenRouter model slug.
+      ~deepseek/deepseek-v4-flash-latest. The leading '~' follows OpenRouter's
+      latest-family alias behavior. Pick any OpenRouter model slug.
   complex_model:
     name: "Complex model (smart)"
     description: >-
       Used for creation drafts, daily reports, and reflection. Default:
-      anthropic/claude-sonnet-4.6.
+      openrouter/fusion. The root broker injects the configured Fusion preset.
+  openrouter_auto_model:
+    name: "OpenRouter Auto fallback model"
+    description: >-
+      Paid OpenRouter router used after Fusion fails on a complex turn. Default:
+      openrouter/auto.
+  openrouter_fusion_preset:
+    name: "Fusion preset"
+    description: >-
+      Root-selected OpenRouter Fusion preset for complex work. general-budget
+      keeps the panel economical while retaining a stronger analyst.
+  openrouter_auto_cost_tier:
+    name: "Auto Router cost tier"
+    description: >-
+      Cost band sent to OpenRouter Auto when it is used as the complex fallback.
+      medium is the default; this is a preference, not a hard dollar ceiling.
   nvidia_model:
     name: "NVIDIA fallback model"
     description: >-
@@ -76,9 +92,15 @@ configuration:
   openrouter_free_model:
     name: "OpenRouter free-tier model"
     description: >-
-      Optional current OpenRouter ':free' model slug. It is used only as an
-      explicitly enabled last resort for requests with no tools or tool-call
-      continuation, never for write-capable turns.
+      Specific OpenRouter free model used as the first free last resort.
+      Default: nvidia/nemotron-3.5-lightning:free. NVIDIA's catalog prefix
+      here still means the request is sent through the root OpenRouter profile.
+  openrouter_free_router_model:
+    name: "OpenRouter free router"
+    description: >-
+      OpenRouter's random free-model router used after the specific free model.
+      Default: openrouter/free. Both free routes require the explicit free
+      fallback gate and are rejected for tool-capable turns.
   nvidia_free_model:
     name: "NVIDIA free-tier model"
     description: >-
@@ -97,8 +119,9 @@ configuration:
   provider_free_fallback_enabled:
     name: "Enable contained free fallback"
     description: >-
-      Explicitly allow configured free-tier routes as a final fallback. The
-      broker rejects them for any request that contains tools or tool calls.
+      Explicitly allow configured free-tier routes as a final fallback. Off by
+      default. The broker rejects them for any request that contains tools or
+      tool calls, so free inference cannot perform or approve HA writes.
   provider_nvidia_fallback_enabled:
     name: "Enable NVIDIA fallback profile"
     description: >-
