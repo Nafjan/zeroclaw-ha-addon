@@ -119,9 +119,10 @@ configuration:
   provider_free_fallback_enabled:
     name: "Enable contained free fallback"
     description: >-
-      Explicitly allow configured free-tier routes as a final fallback. Off by
-      default. The broker rejects them for any request that contains tools or
-      tool calls, so free inference cannot perform or approve HA writes.
+      Allow configured free-tier routes as a final fallback. On by default for
+      the supplied routes; set false to disable them. The broker rejects free
+      routes for any request that contains tools or tool calls, so free
+      inference cannot perform or approve HA writes.
   provider_nvidia_fallback_enabled:
     name: "Enable NVIDIA fallback profile"
     description: >-

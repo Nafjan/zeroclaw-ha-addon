@@ -72,12 +72,13 @@ usage when valid, and crash/expiry/invalid usage is charged at the reserved
 maximum. Planner configuration cannot raise any of these limits at request
 time.
 
-Free-tier routes are empty and disabled by default. When explicitly configured
-and enabled, the broker permits them only for a request with no tools, no
-required tool choice, and no prior tool-call continuation; tool-capable turns
-fail closed instead of silently downgrading. This broker release is buffered
-and non-streaming: `stream=true` is rejected until a separately qualified
-streaming/cancellation design lands.
+The supplied free-tier routes (`nvidia/nemotron-3.5-lightning:free` followed by
+`openrouter/free`) are enabled by default. The broker permits them only for a
+request with no tools, no required tool choice, and no prior tool-call
+continuation; tool-capable turns fail closed instead of silently downgrading.
+Set `provider_free_fallback_enabled: false` to disable them. This broker
+release is buffered and non-streaming: `stream=true` is rejected until a
+separately qualified streaming/cancellation design lands.
 
 Verify the following from the add-on log and Home Assistant UI:
 
