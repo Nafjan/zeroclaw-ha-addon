@@ -158,12 +158,17 @@ case "${DEFAULT_MODEL}:${COMPLEX_MODEL}" in
         exit 1
         ;;
 esac
-if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
-    case "${OPENROUTER_FREE_MODEL}" in
+for free_model_pair in \
+    "openrouter_free_model=${OPENROUTER_FREE_MODEL}" \
+    "nvidia_free_model=${NVIDIA_FREE_MODEL}" \
+    "ark_free_model=${ARK_FREE_MODEL}"; do
+    free_model="${free_model_pair#*=}"
+    [ -n "${free_model}" ] || continue
+    case "${free_model}" in
         *:free) ;;
-        *) bashio::log.fatal "openrouter_free_model must use an explicit :free model slug; refusing to start"; exit 1 ;;
+        *) bashio::log.fatal "${free_model_pair%%=*} must use an explicit :free model slug; refusing to start"; exit 1 ;;
     esac
-fi
+done
 
 for provider_flag_pair in \
     "provider_fallback_enabled=${PROVIDER_FALLBACK_ENABLED}" \
@@ -306,6 +311,12 @@ export HA_URL
 if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -n "${LEGACY_HA_TOKEN}" ]; then
     bashio::log.warning "Using deprecated ha_token option; migrate to the Supervisor token before enabling writes."
 fi
+# Supervisor exports SUPERVISOR_TOKEN into the app entrypoint environment. The
+# typed HA broker receives a private HA_TOKEN copy below; scrub the inherited
+# name before any unrelated provider, Telegram, or scheduler child is born.
+# Keeping this in the parent as well as in the broker subshell prevents an
+# accidental future helper from retaining the Supervisor credential.
+unset SUPERVISOR_TOKEN
 if [ "${ENABLE_WRITE_ACTIONS}" != "true" ]; then
     bashio::log.warning "Write actions are disabled by default; enable only after reviewing the broker and policy settings."
 fi
@@ -403,6 +414,7 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     chmod 0700 "${PROVIDER_KEY_DIR}"
     PROVIDER_PORT=42620
     (
+        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_TOKEN
         # The endpoint remains root-controlled.  The test-only override lets
         # the real arm64 planner binary exercise this broker against a local
         # deterministic upstream without ever exposing a provider key to it.
@@ -468,6 +480,10 @@ fi
 # credential variables removed below.
 CAPABILITY_PORT=42618
 (
+    # HA_TOKEN is the only credential this broker is allowed to retain. The
+    # original Supervisor-provided variable was scrubbed in the parent and is
+    # explicitly removed here as a defense against reordering regressions.
+    unset SUPERVISOR_TOKEN
     export HA_TOKEN HA_URL
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
@@ -590,6 +606,7 @@ install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capab
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
 TELEGRAM_PORT=42619
 (
+    unset SUPERVISOR_TOKEN HA_TOKEN
     export TELEGRAM_TOKEN_FILE
     export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
     while true; do

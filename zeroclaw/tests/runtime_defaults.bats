@@ -115,6 +115,10 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'migrated_reserved_max' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'must use an explicit :free model slug' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
     run grep -F '((.tools // []) | length) == 0' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
@@ -134,6 +138,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 
 @test "the root entrypoint drops credential copies before launching the planner" {
     run grep -F 'unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "only the HA capability broker retains the Supervisor token" {
+    run grep -F 'unset SUPERVISOR_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'export HA_TOKEN HA_URL' "$run_file"
     [ "$status" -eq 0 ]
 }
 
