@@ -144,9 +144,38 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 @test "only the HA capability broker retains the Supervisor token" {
     run grep -F 'unset SUPERVISOR_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_TOKEN' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'export HA_TOKEN HA_URL' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "typed brokers scrub unrelated credential classes" {
+    run grep -F 'unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "unrelated root helper loops scrub inherited credentials" {
+    run grep -F 'scrub_unrelated_child_credentials()' "$run_file"
+    [ "$status" -eq 0 ]
+
+    for marker in \
+        'state-cleanup.sh /data' \
+        'bashio::log.info "Cron seeder waiting for gateway..."' \
+        '/usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do' \
+        'TODAY=$(curl -s "${GW}/api/cost"'; do
+        run grep -F -B 3 "$marker" "$run_file"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"scrub_unrelated_child_credentials"* ]]
+    done
+
+    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
 }
 
