@@ -20,6 +20,10 @@
 - Add explicit OpenRouter free routes for
   `nvidia/nemotron-3.5-lightning:free` and `openrouter/free`; the root broker
   injects router settings and keeps both routes no-tools-only.
+- Permit a classified paid-route 402/credit-exhaustion to fall through to
+  those explicitly configured free routes on the same profile, while keeping
+  invalid credentials, transient failures, local budget exhaustion, and
+  tool-capable turns fail-closed.
 - Add arm64 profile/fallback, migration, credential-isolation, and real
   ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
   disabled until their provider contract has been exercised.
