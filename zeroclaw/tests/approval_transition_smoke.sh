@@ -35,3 +35,4 @@ ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh reject caf
 [ ! -f /data/approval-receipts/tickets/cafebabe.json ]
 [ ! -e /data/approved/cafebabe.marker ]
 [ ! -e /data/approval-receipts/cafebabe.sha256 ]
+grep -R -F '"kind":"reject"' /data/audit >/dev/null

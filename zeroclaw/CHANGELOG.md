@@ -22,6 +22,8 @@
 - Add arm64 profile/fallback, migration, credential-isolation, and real
   ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
   disabled until their provider contract has been exercised.
+- Record Telegram rejection decisions in the durable audit log before removing
+  the sealed ticket; retain the ticket if the audit write cannot be persisted.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
