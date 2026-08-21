@@ -33,12 +33,14 @@ configuration:
     name: "Telegram bot token"
     description: >-
       Token from @BotFather. The agent uses this to receive commands and to
-      send approval tickets and reports. Required.
+      send approval tickets and reports. Optional; when set,
+      telegram_allowed_users must also be configured.
   telegram_allowed_users:
     name: "Telegram allowed user IDs"
     description: >-
       Comma-separated numeric Telegram user IDs that are allowed to message
-      the agent. Anyone else is silently ignored. Find your ID via @userinfobot.
+      the agent. Required only when telegram_bot_token is set. Anyone else is
+      silently ignored. Find your ID via @userinfobot.
 
   # ─────── Models & logging ───────
   default_model:

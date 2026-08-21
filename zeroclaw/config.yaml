@@ -13,7 +13,7 @@ startup: application
 boot: auto
 homeassistant_api: true
 options:
-  # --- Credentials (required) ---
+  # --- Provider credentials (OpenRouter required; other providers optional) ---
   openrouter_api_key: ""
   # Optional independent fallback credentials. Empty profiles are fail-closed
   # and never receive a request.
@@ -24,6 +24,7 @@ options:
   provider_key_mode: broker
   # Deprecated compatibility option. Prefer the Supervisor-provided token.
   ha_token: ""
+  # Telegram is optional; when configured it requires telegram_allowed_users.
   telegram_bot_token: ""
   # Comma-separated Telegram user IDs. The first ID is the sole approval owner
   # for transactional action tickets; additional IDs may query the agent.

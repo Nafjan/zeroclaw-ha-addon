@@ -17,6 +17,17 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -ne 0 ]
 }
 
+@test "Telegram transport is optional and starts only when configured" {
+    run grep -F 'for var in OPENROUTER_KEY HA_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TELEGRAM_ENABLED=false' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if [ "${TELEGRAM_ENABLED}" = "true" ]; then' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Telegram transport disabled; no bot token or users configured.' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "planner defaults do not expose raw shell or wildcard HTTP" {
     run grep -F 'level = "supervised"' "$run_file"
     [ "$status" -eq 0 ]
