@@ -132,11 +132,16 @@ jobs:
           test -n "$binary_sha"
           test -n "$image"
           if [ "$builder_mode" = "trusted-aa" ]; then
-            test "$GITHUB_REF" = "refs/heads/master"
+            if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+              echo "trusted-attested builds require refs/heads/master" >&2
+              exit 1
+            fi
           fi
           if [ "$promote" = "true" ]; then
-            test "$GITHUB_REF" = "refs/heads/master"
-            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            if [ "$GITHUB_REF" != "refs/heads/master" ] || [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+              echo "production promotion requires a workflow_dispatch run from refs/heads/master" >&2
+              exit 1
+            fi
           fi
           {
             printf 'version=%s\n' "$version"
