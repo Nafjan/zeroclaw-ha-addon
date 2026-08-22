@@ -32,6 +32,9 @@
 - Require a root-sealed, actor-bound Telegram approval for every write in the
   production runtime, and enforce the ticket requirement again at the broker
   boundary so a planner cannot turn `internal:true` into a write over raw TCP.
+- Add an explicit structured tool-call protocol to the gateway's generated
+  planner prompt, and block malformed internal tool syntax at the Telegram
+  boundary instead of relaying it as a user-visible reply.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
