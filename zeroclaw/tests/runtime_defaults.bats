@@ -28,6 +28,17 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "gateway tool protocol and Telegram reply guard are installed" {
+    run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'blocked internal tool syntax in Telegram reply' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '## Tool invocation protocol (gateway/channel safety)' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '<tool_call>' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "planner defaults do not expose raw shell or wildcard HTTP" {
     run grep -F 'level = "supervised"' "$run_file"
     [ "$status" -eq 0 ]

@@ -296,6 +296,7 @@ test "$(stat -c '%u:%a' /run/zeroclaw/telegram-offset)" = "0:600"
 test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
 test -x /usr/local/bin/ha-broker-entrypoint
 test -x /usr/local/bin/tg-broker-entrypoint
+test -x /usr/local/bin/telegram-render
 if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
     ansi_escape=$(printf '\033')
     sed -E "s/${ansi_escape}\\[[0-9;]*m//g" /tmp/zeroclaw-startup.log > /tmp/startup-plain.log

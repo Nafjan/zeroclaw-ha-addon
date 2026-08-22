@@ -661,6 +661,7 @@ chmod 0600 "${TELEGRAM_TOKEN_FILE}"
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-broker-handler
 install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capability
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
+install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render
 TELEGRAM_PORT=42619
 if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
@@ -885,7 +886,16 @@ handle_message() {
     RESP=\$(curl -s --max-time 60 -X POST "\${GW}/webhook" \\
         -H "Content-Type: application/json" -d "\$BODY" 2>/dev/null)
     REPLY=\$(echo "\$RESP" | jq -r '.response // .reply // .text // empty' 2>/dev/null)
-    [ -z "\$REPLY" ] && REPLY="(no response)"
+    # A malformed provider-side tool call is an internal protocol failure, not
+    # a user-facing reply. Do not leak commands such as a fenced tool_call into
+    # Telegram, and do not imply that an action ran when it was not dispatched.
+    if SANITIZED=\$(printf '%s' "\$REPLY" | /usr/local/bin/telegram-render 2>/dev/null); then
+        REPLY="\$SANITIZED"
+    else
+        printf '%s\n' 'blocked internal tool syntax in Telegram reply' >>/data/logs/telegram-broker.log
+        REPLY="I couldn't complete that request."
+    fi
+    [ -z "\$REPLY" ] && REPLY="I couldn't complete that request."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
     send_msg "\$chat_id" "\$REPLY"
@@ -1718,6 +1728,19 @@ cat > "${WS}/SOUL.md" << SOULEOF
 Role: Home automation executor for ${HOME_LOCATION}.
 Languages: ${HOME_LANGUAGES} — match the user's language exactly.
 Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
+
+## Tool invocation protocol (gateway/channel safety)
+When a tool is needed, use the runtime's structured protocol exactly. Never
+write a tool call as Markdown, a bare shell command, or prose. Text fallback:
+<tool_call>
+{"name":"tool_name","arguments":{"command":"..."}}
+</tool_call>
+For example, the Home Assistant action tool uses:
+<tool_call>
+{"name":"ha.action_guarded","arguments":{"command":"ha-action-guarded 'scene/reload' '{}'"}}
+</tool_call>
+After the tool result, continue until you can give the user a short final
+answer. Never show <tool_call>, <tool_result>, or internal shell syntax to the user.
 
 ## World state
 A WORLD STATE block may appear in your prompt. Trust it. Don't re-fetch what's already there
