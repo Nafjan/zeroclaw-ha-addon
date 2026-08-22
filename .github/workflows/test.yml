@@ -23,6 +23,17 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Require one canonical Supervisor app descriptor
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t descriptors < <(git ls-files | grep -E '(^|/)config\.yaml$' || true)
+          test "${#descriptors[@]}" -eq 1 || {
+            printf 'expected exactly one tracked app config.yaml, found: %s\n' "${descriptors[*]}" >&2
+            exit 1
+          }
+          test "${descriptors[0]}" = "zeroclaw/config.yaml"
+
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
 

@@ -83,10 +83,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           BUILDER_MODE: ${{ inputs.builder_mode }}
+          PROMOTE: ${{ inputs.promote }}
         run: |
           set -euo pipefail
           version="$(awk '$1 == "version:" {print $2; exit}' zeroclaw/config.yaml)"
           builder_mode="${BUILDER_MODE:-cross}"
+          promote="${PROMOTE:-false}"
           case "$builder_mode" in
             cross|direct|direct-aa|trusted-aa) ;;
             *) echo "unsupported builder_mode=$builder_mode" >&2; exit 1 ;;
@@ -131,6 +133,10 @@ jobs:
           test -n "$image"
           if [ "$builder_mode" = "trusted-aa" ]; then
             test "$GITHUB_REF" = "refs/heads/master"
+          fi
+          if [ "$promote" = "true" ]; then
+            test "$GITHUB_REF" = "refs/heads/master"
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           fi
           {
             printf 'version=%s\n' "$version"
@@ -1068,6 +1074,11 @@ jobs:
           CANDIDATE_DIGEST: ${{ needs.candidate.outputs.digest }}
         run: |
           set -euo pipefail
+          expected_evidence_prefix="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/"
+          case "$CANARY_EVIDENCE" in
+            "$expected_evidence_prefix"*) ;;
+            *) echo "canary evidence must be pinned to this exact release commit: $GITHUB_SHA" >&2; exit 1 ;;
+          esac
           test "$CANARY_DIGEST" = "${{ needs.candidate.outputs.digest }}"
           test -n "$CANARY_TAG"
           case "$CANARY_TAG" in
