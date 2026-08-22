@@ -3,9 +3,11 @@
 # and the no-tools free-tier containment rule.
 set -eu
 
-PROXY_PORT=42636
-OPENROUTER_PORT=42637
-NVIDIA_PORT=42638
+PORT_BASE=42636
+CASE_INDEX=0
+PROXY_PORT=0
+OPENROUTER_PORT=0
+NVIDIA_PORT=0
 PROXY_PID=0
 OPENROUTER_PID=0
 NVIDIA_PID=0
@@ -93,6 +95,18 @@ printf 'HTTP/1.1 %s %s\r\nContent-Type: application/json\r\nContent-Length: %s\r
 UPSTREAM
 chmod +x /tmp/provider-profile-credit-then-free-upstream
 
+# BusyBox nc -l -e may leave a short-lived child listener behind when its
+# parent is killed.  Reusing a fixed port can therefore route a later case to
+# stale fixture output or fail with EADDRINUSE.  Give each scenario a fresh
+# triplet instead; the container is disposable, so bounded port allocation is
+# safer than relying on implementation-specific listener teardown.
+next_case_ports() {
+    PROXY_PORT=$((PORT_BASE + CASE_INDEX * 3))
+    OPENROUTER_PORT=$((PROXY_PORT + 1))
+    NVIDIA_PORT=$((PROXY_PORT + 2))
+    CASE_INDEX=$((CASE_INDEX + 1))
+}
+
 start_upstream() {
     upstream_port="$1"
     upstream_status="$2"
@@ -176,6 +190,7 @@ NOW=$(date -u +%s)
 printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":84}\n' \
     "$((NOW / 3600))" "$((NOW / 86400))" > "$LEDGER"
 
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
 nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|primary-model|paid
@@ -208,6 +223,7 @@ jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].set
 # free route on the same root-owned profile. This is the user-facing
 # out-of-credits fallback path, and it remains limited to a no-tools request.
 rm -f "$LEDGER" "$LOCK" /data/provider/same-profile-free.state /data/provider/same-profile-free.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|primary-model|paid
 default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
@@ -221,6 +237,7 @@ printf '%s' "$response" | grep -F 'same-profile-free-ok' >/dev/null
 grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/same-profile-free.log >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-success.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
 nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|nvidia|nvidia-model|paid
@@ -238,6 +255,7 @@ grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/free-succe
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-router-success.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|openrouter/free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -253,6 +271,7 @@ grep -F '"model":"openrouter/free"' /data/provider/free-router-success.log >/dev
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-blocked.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -267,6 +286,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 # Legacy OpenAI function-calling fields are also tool-capable. They must not
 # be downgraded to a free route when the modern tools field is absent.
 rm -f "$LEDGER" "$LOCK" /data/provider/function-blocked.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -277,6 +297,8 @@ FUNCTION_BODY='{"model":"default-route","messages":[{"role":"user","content":"ca
 response=$(request_proxy "$FUNCTION_BODY")
 printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 stop_listeners
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
     /data/provider/function-blocked.log
@@ -290,6 +312,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 # Router aliases are shaped by the root broker so the planner cannot choose
 # a more expensive Fusion preset or an unbounded Auto tier.
 rm -f "$LEDGER" "$LOCK" /data/provider/deepseek-latest-success.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|~deepseek/deepseek-v4-flash-latest|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -303,6 +326,7 @@ printf '%s' "$response" | grep -F 'deepseek-latest-shaped' >/dev/null
 grep -F '"model":"~deepseek/deepseek-v4-flash-latest"' /data/provider/deepseek-latest-success.log >/dev/null
 
 rm -f "$LEDGER" "$LOCK" /data/provider/fusion-success.log /data/provider/auto-success.log
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="fusion-route|openrouter|openrouter/fusion|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -317,6 +341,7 @@ grep -F '"id":"fusion"' /data/provider/fusion-success.log >/dev/null
 grep -F '"preset":"general-budget"' /data/provider/fusion-success.log >/dev/null
 
 rm -f "$LEDGER" "$LOCK"
+next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="auto-route|openrouter|openrouter/auto|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
