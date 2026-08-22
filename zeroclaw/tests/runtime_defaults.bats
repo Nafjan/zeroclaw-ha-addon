@@ -39,6 +39,19 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "planner uses the actual shell tool for structured gateway calls" {
+    run grep -F '{"name":"shell","arguments":{"command":"ha-action-guarded' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'command-execution tool is named shell' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Do not emit `ha.action_guarded' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approved:true' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '"name":"ha.action_guarded"' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
 @test "planner defaults do not expose raw shell or wildcard HTTP" {
     run grep -F 'level = "supervised"' "$run_file"
     [ "$status" -eq 0 ]

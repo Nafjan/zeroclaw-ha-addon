@@ -14,7 +14,7 @@ render_file="$BATS_TEST_DIRNAME/../lib/telegram-render.sh"
 
 @test "Telegram renderer blocks XML tool calls" {
     set +e
-    output=$(printf '%s\n' '<tool_call>' '{"name":"ha.action_guarded","arguments":{}}' '</tool_call>' | "$render_file")
+    output=$(printf '%s\n' '<tool_call>' '{"name":"shell","arguments":{"command":"ha-action-guarded '\''scene/reload'\'' '\''{}'\''"}}' '</tool_call>' | "$render_file")
     status=$?
     set -e
 

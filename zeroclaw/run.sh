@@ -1730,15 +1730,22 @@ Languages: ${HOME_LANGUAGES} — match the user's language exactly.
 Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
 
 ## Tool invocation protocol (gateway/channel safety)
-When a tool is needed, use the runtime's structured protocol exactly. Never
-write a tool call as Markdown, a bare shell command, or prose. Text fallback:
+When a tool is needed, use the runtime's structured protocol exactly. The
+runtime's command-execution tool is named shell; names such as ha.action_guarded
+and zc.set_outcome below are command aliases/documentation, not callable tool
+names. Never write a tool call as Markdown, a bare shell command, or prose.
+When native function calling is unavailable, use this exact text fallback:
 <tool_call>
-{"name":"tool_name","arguments":{"command":"..."}}
+{"name":"shell","arguments":{"command":"..."}}
 </tool_call>
-For example, the Home Assistant action tool uses:
+For example, a Home Assistant action uses:
 <tool_call>
-{"name":"ha.action_guarded","arguments":{"command":"ha-action-guarded 'scene/reload' '{}'"}}
+{"name":"shell","arguments":{"command":"ha-action-guarded 'scene/reload' '{}'"}}
 </tool_call>
+Do not emit ha.action_guarded 'scene/reload' '{}' by itself, and do not add
+approved:true; the HA policy gate owns action approval. The command must be
+inside the shell tool's JSON arguments so the gateway can execute it and
+continue the tool loop.
 After the tool result, continue until you can give the user a short final
 answer. Never show <tool_call>, <tool_result>, or internal shell syntax to the user.
 
@@ -1819,14 +1826,20 @@ To switch routes, prepend your first scratchpad/reasoning line with the literal 
 ## Outcome tracking (lessons loop) — REQUIRED after real actions
 After every turn that produced a real action (NOT a status query, greeting, or
 "already at" no-op), invoke the registered tool exactly once:
-    zc.set_outcome "<the same one-line outcome you just wrote to the user>"
+    <tool_call>
+    {"name":"shell","arguments":{"command":"zc-set-outcome '<same one-line outcome>'"}}
+    </tool_call>
 This is a real tool — call it like ha.action_guarded or memory_recall. The shell
 helper underneath is /usr/local/bin/zc-set-outcome; it writes /data/.last_outcome.
 
 Concrete example for a turn that just turned on a light:
-  ha.action_guarded 'light/turn_on' '{"entity_id":"light.example"}'
+  <tool_call>
+  {"name":"shell","arguments":{"command":"ha-action-guarded 'light/turn_on' '{\"entity_id\":\"light.example\"}'"}}
+  </tool_call>
   → "Example light on."
-  zc.set_outcome "Example light on."
+  <tool_call>
+  {"name":"shell","arguments":{"command":"zc-set-outcome 'Example light on.'"}}
+  </tool_call>
 
 If you skip zc.set_outcome the lessons loop cannot fire on the user's next reply
 and the agent will not learn from corrections. Skipping it is a SOUL violation.
@@ -1980,7 +1993,16 @@ LESSEOF
 # TOOLS.md
 # ==============================================================
 cat > "${WS}/TOOLS.md" << 'TOOLSEOF'
-## ha.* tool reference (read-only and guarded action)
+## Home Assistant command reference
+
+The entries below are command aliases, not function-call names. Invoke every
+command through the runtime's `shell` tool using the structured protocol:
+
+<tool_call>
+{"name":"shell","arguments":{"command":"ha-all-status"}}
+</tool_call>
+
+Never emit a bare `ha.*` or `zc.*` line to the user or as the assistant turn.
 
 STATUS:
 - ha.all_status     — lights + AC + covers (use for "home overview")
@@ -1993,10 +2015,10 @@ STATUS:
 - ha.error_log      — HA system error log
 
 ACTIONS (all routed through the policy gate):
-- ha.action_guarded <service_path> '<json_body>'
-    e.g. ha.action_guarded 'light/turn_on' '{"entity_id":"light.example"}'
-    e.g. ha.action_guarded 'climate/set_temperature' '{"entity_id":"climate.example","temperature":22}'
-- ha.action_guarded --apply-ticket <id8>   — apply an approved ticket
+- command: ha-action-guarded <service_path> '<json_body>'
+    e.g. ha-action-guarded 'light/turn_on' '{"entity_id":"light.example"}'
+    e.g. ha-action-guarded 'climate/set_temperature' '{"entity_id":"climate.example","temperature":22}'
+- command: ha-action-guarded --apply-ticket <id8>   — adapter-only approved-ticket path
 
 ZC. (ZeroClaw self-tools):
 - zc.schedule '<cron>' '<msg-to-self>' [name]   — recurring task

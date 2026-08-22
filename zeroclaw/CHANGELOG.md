@@ -35,6 +35,10 @@
 - Add an explicit structured tool-call protocol to the gateway's generated
   planner prompt, and block malformed internal tool syntax at the Telegram
   boundary instead of relaying it as a user-visible reply.
+- Align that protocol with the pinned ZeroClaw runtime's actual `shell` tool;
+  the previous prompt used the human-facing `ha.action_guarded` alias as if it
+  were a callable tool, causing valid-looking actions to be returned as text
+  and then safely suppressed by Telegram.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
