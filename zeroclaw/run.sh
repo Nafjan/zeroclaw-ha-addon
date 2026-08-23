@@ -756,6 +756,7 @@ AGENT_CONFIG_DIR="${CONFIG_DIR}"
 AGENT_WORKSPACE="${WS}"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
+RECOVERY_MODEL="${COMPLEX_MODEL}"
 [ -n "\$TOKEN" ] || exit 1
 [ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
 if [ ! -d "\$REPLY_CACHE_DIR" ]; then
@@ -899,13 +900,21 @@ send_cached_reply() {
 # runs as the unprivileged planner, while the typed HA/Telegram/provider
 # brokers retain their root-owned credentials and policy boundaries.
 run_agent_turn() {
-    chat_id="\$1"; prompt="\$2"
+    chat_id="\$1"; prompt="\$2"; retry_model="\${3:-}"
     session_file="\${AGENT_WORKSPACE}/sessions/telegram_\${chat_id}.json"
     mkdir -p "\$(dirname "\$session_file")" 2>/dev/null || true
-    su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
-        --config-dir "\$AGENT_CONFIG_DIR" agent \\
-        --message "\$prompt" \\
-        --session-state-file "\$session_file"
+    if [ -n "\$retry_model" ]; then
+        su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
+            --config-dir "\$AGENT_CONFIG_DIR" agent \\
+            --model "\$retry_model" \\
+            --message "\$prompt" \\
+            --session-state-file "\$session_file"
+    else
+        su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
+            --config-dir "\$AGENT_CONFIG_DIR" agent \\
+            --message "\$prompt" \\
+            --session-state-file "\$session_file"
+    fi
 }
 
 is_allowed_user() {
@@ -1066,19 +1075,25 @@ handle_message() {
             # provider-specific models that print an alias instead of emitting
             # a structured shell call, without executing model text directly.
             RECOVERY_PROMPT="Review the previous turn for: \${text}. If a tool/action already ran, do not repeat it; summarize its result. If nothing ran and the request still needs Home Assistant, use the actual structured shell tool. Never print a bare command, Markdown tool block, or internal syntax; return only the short user-facing answer."
-            RECOVERY=\$(run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" 2>>/data/logs/telegram-broker.log)
+            # Tool-protocol recovery is a complex turn: use the configured
+            # complex route rather than asking the same failing default model
+            # to repeat an invalid plain-text command.
+            RECOVERY=\$(run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" "\$RECOVERY_MODEL" 2>>/data/logs/telegram-broker.log)
             RECOVERY_STATUS=\$?
             if [ "\$RECOVERY_STATUS" -eq 0 ] && [ -n "\$RECOVERY" ] && \\
                 RECOVERED=\$(printf '%s' "\$RECOVERY" | /usr/local/bin/telegram-render 2>/dev/null); then
                 REPLY="\$RECOVERED"
             else
-                REPLY="I couldn't complete that safely; no new action was dispatched."
+                # A recovery turn may have reached a broker before producing
+                # an invalid final message.  Do not claim that no action ran;
+                # require the operator to check HA history instead.
+                REPLY="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
             fi
         else
-            REPLY="I couldn't complete that request; please check Home Assistant history before retrying."
+            REPLY="I couldn't confirm the result. Please check Home Assistant history before retrying."
         fi
     fi
-    [ -z "\$REPLY" ] && REPLY="I couldn't complete that request."
+    [ -z "\$REPLY" ] && REPLY="I couldn't confirm the result. Please check Home Assistant history before retrying."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
     cache_reply "\$update_id" "\$REPLY" || return 1

@@ -52,6 +52,21 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "Telegram protocol recovery escalates to the complex route and stays truthful" {
+    run grep -F 'RECOVERY_MODEL="${COMPLEX_MODEL}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'retry_model="\${3:-}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--model "\$retry_model"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" "\$RECOVERY_MODEL"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "I couldn't confirm the result safely. Please check Home Assistant history before retrying." "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "no new action was dispatched" "$run_file"
+    [ "$status" -ne 0 ]
+}
+
 @test "HA skill documents shell commands instead of fake callable tables" {
     run grep -F '[[tools]]' "$run_file"
     [ "$status" -ne 0 ]
