@@ -42,6 +42,14 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+@test "canary evidence verifier rejects missing Telegram isolation proof" {
+    jq 'del(.read_only.telegram_transport_isolated)' "$EVIDENCE" > "$EVIDENCE.tmp"
+    mv "$EVIDENCE.tmp" "$EVIDENCE"
+    evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$evidence_sha"
+    [ "$status" -ne 0 ]
+}
+
 @test "canary evidence verifier rejects a digest mismatch" {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
     run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$evidence_sha"
