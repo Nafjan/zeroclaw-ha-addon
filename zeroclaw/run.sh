@@ -90,6 +90,38 @@ POLICY_CLIMATE_DELTA="$(bashio::config 'policy_climate_delta_confirm_c')"
 POLICY_TRUST_ENABLED="$(bashio::config 'policy_trust_enabled')"
 POLICY_TRUST_PROMOTE="$(bashio::config 'policy_trust_promote_after')"
 
+# Existing Supervisor options objects can predate these fields.  Keep the
+# migration defaults explicit, then reject malformed values before any
+# user-controlled string is used by a generated helper or policy function.
+DAILY_REPORT_TIME="${DAILY_REPORT_TIME:-08:00}"
+QUIET_HOURS="${QUIET_HOURS:-23:00-06:00}"
+
+validate_clock_value() {
+    clock_label="$1"
+    clock_value="$2"
+    printf '%s' "$clock_value" | grep -Eq '^[0-9]{1,2}:[0-9]{2}$' || {
+        bashio::log.fatal "${clock_label} must use H:MM or HH:MM; refusing to start"
+        exit 1
+    }
+    clock_hour="${clock_value%%:*}"
+    clock_minute="${clock_value##*:}"
+    [ "$clock_hour" -ge 0 ] && [ "$clock_hour" -le 23 ] &&
+        [ "$clock_minute" -ge 0 ] && [ "$clock_minute" -le 59 ] || {
+        bashio::log.fatal "${clock_label} is outside the valid 24-hour range; refusing to start"
+        exit 1
+    }
+}
+
+validate_clock_value daily_report_time "${DAILY_REPORT_TIME}"
+printf '%s' "${QUIET_HOURS}" | grep -Eq '^[0-9]{1,2}:[0-9]{2}-[0-9]{1,2}:[0-9]{2}$' || {
+    bashio::log.fatal "quiet_hours must use H:MM-H:MM; refusing to start"
+    exit 1
+}
+QUIET_HOURS_START="${QUIET_HOURS%%-*}"
+QUIET_HOURS_END="${QUIET_HOURS##*-}"
+validate_clock_value quiet_hours_start "${QUIET_HOURS_START}"
+validate_clock_value quiet_hours_end "${QUIET_HOURS_END}"
+
 # The planner and the local TCP transport are intentionally untrusted.  Keep
 # this security gate hard-coded: every write must be backed by a root-sealed,
 # actor-bound Telegram approval before the capability broker will execute it.
@@ -415,6 +447,41 @@ for state_tree in "${WS}" /data/pending /data/routines /data/tools /data/approve
         exit 1
     fi
 done
+
+# The generated action wrapper must not embed operator-supplied policy strings
+# into shell source.  Keep the canonical values in a root-owned, planner-
+# readable JSON file; the wrapper reloads this file for every invocation and
+# never trusts ambient planner environment overrides.
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+if [ -L "${POLICY_RUNTIME_FILE}" ] ||
+    [ -e "${POLICY_RUNTIME_FILE}" ] && [ ! -f "${POLICY_RUNTIME_FILE}" ]; then
+    bashio::log.fatal "policy runtime file is not a regular file"
+    exit 1
+fi
+POLICY_RUNTIME_TMP=$(mktemp "${CONFIG_DIR}/.policy-runtime.XXXXXX")
+if ! jq -nc \
+    --arg mode "${POLICY_MODE}" \
+    --arg quiet_confirm "${POLICY_QUIET_CONFIRM}" \
+    --arg quiet_hours "${QUIET_HOURS}" \
+    --arg home_location "${HOME_LOCATION}" \
+    --arg extra_deny "${POLICY_EXTRA_DENY}" \
+    --arg extra_confirm "${POLICY_EXTRA_CONFIRM}" \
+    --arg extra_allow "${POLICY_EXTRA_ALLOW}" \
+    --argjson bulk_threshold "${POLICY_BULK_THRESHOLD}" \
+    --argjson climate_delta "${POLICY_CLIMATE_DELTA}" \
+    '{policy_mode:$mode,policy_quiet_confirm:$quiet_confirm,
+      policy_bulk_threshold:$bulk_threshold,policy_climate_delta:$climate_delta,
+      quiet_hours:$quiet_hours,home_location:$home_location,
+      extra_deny:$extra_deny,
+      extra_confirm:$extra_confirm,extra_allow:$extra_allow,
+      require_approval:true}' > "${POLICY_RUNTIME_TMP}"; then
+    rm -f "${POLICY_RUNTIME_TMP}"
+    bashio::log.fatal "could not render the root-owned policy runtime file"
+    exit 1
+fi
+chown root:zeroclaw "${POLICY_RUNTIME_TMP}"
+chmod 0640 "${POLICY_RUNTIME_TMP}"
+mv -f "${POLICY_RUNTIME_TMP}" "${POLICY_RUNTIME_FILE}"
 
 # Snapshot persistent state before rendering this release's config.toml. The
 # version marker is root-only state; the planner must not be able to rewrite it
@@ -1298,15 +1365,22 @@ set -e
 export ZEROCLAW_INTERNAL_ACTION=1
 
 # Export policy environment so /usr/local/bin/policy-decide sees it.
-export POLICY_MODE="${POLICY_MODE}"
-export POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM}"
-export POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD}"
-export POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA}"
-export POLICY_REQUIRE_APPROVAL="${POLICY_REQUIRE_APPROVAL}"
-export QUIET_HOURS="${QUIET_HOURS}"
-export EXTRA_DENY="${POLICY_EXTRA_DENY}"
-export EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"
-export EXTRA_ALLOW="${POLICY_EXTRA_ALLOW}"
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+[ -f "\$POLICY_RUNTIME_FILE" ] && [ ! -L "\$POLICY_RUNTIME_FILE" ] || {
+    echo "ERROR: canonical policy runtime file is unavailable" >&2
+    exit 1
+}
+POLICY_MODE=\$(jq -er '.policy_mode | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_QUIET_CONFIRM=\$(jq -er '.policy_quiet_confirm | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_BULK_THRESHOLD=\$(jq -er '.policy_bulk_threshold | select(type == "number" and floor == .) | tostring' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_CLIMATE_DELTA=\$(jq -er '.policy_climate_delta | select(type == "number" and floor == .) | tostring' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_REQUIRE_APPROVAL=\$(jq -er '.require_approval | select(type == "boolean")' "\$POLICY_RUNTIME_FILE") || exit 1
+QUIET_HOURS=\$(jq -er '.quiet_hours | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_DENY=\$(jq -er '.extra_deny | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_CONFIRM=\$(jq -er '.extra_confirm | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_ALLOW=\$(jq -er '.extra_allow | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA
+export POLICY_REQUIRE_APPROVAL QUIET_HOURS EXTRA_DENY EXTRA_CONFIRM EXTRA_ALLOW
 
 # --- Apply-ticket short circuit ---
 if [ "\$1" = "--apply-ticket" ]; then
@@ -1667,8 +1741,17 @@ else
     ACS_DETAIL=""
 fi
 LAST_AUDIT=\$(/usr/local/bin/zc-audit-tail 1 2>/dev/null | jq -r '"\(.ts) \(.kind) \(.service) \(.entity)"' 2>/dev/null)
-QH_START=\$(echo "${QUIET_HOURS}" | cut -d- -f1 | cut -d: -f1 | sed 's/^0*//')
-QH_END=\$(echo "${QUIET_HOURS}" | cut -d- -f2 | cut -d: -f1 | sed 's/^0*//')
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+QUIET_HOURS=\$(jq -er '.quiet_hours | select(type == "string")' "\$POLICY_RUNTIME_FILE" 2>/dev/null) || {
+    echo "(policy unavailable)"
+    exit 1
+}
+HOME_LOCATION=\$(jq -er '.home_location | select(type == "string")' "\$POLICY_RUNTIME_FILE" 2>/dev/null) || {
+    echo "(policy unavailable)"
+    exit 1
+}
+QH_START=\$(echo "\$QUIET_HOURS" | cut -d- -f1 | cut -d: -f1 | sed 's/^0*//')
+QH_END=\$(echo "\$QUIET_HOURS" | cut -d- -f2 | cut -d: -f1 | sed 's/^0*//')
 NOW_H=\$(date +%H | sed 's/^0*//'); [ -z "\$NOW_H" ] && NOW_H=0
 [ -z "\$QH_START" ] && QH_START=0; [ -z "\$QH_END" ] && QH_END=0
 QUIET="OFF"
@@ -1680,11 +1763,11 @@ fi
 PENDING=\$(/usr/local/bin/ha-capability pending_count 2>/dev/null || echo unavailable)
 cat << WSEOF
 === WORLD STATE ===
-Time: \${NOW} (\${DOW}) · Location: ${HOME_LOCATION}
+Time: \${NOW} (\${DOW}) · Location: \${HOME_LOCATION}
 Lights on: \${LIGHTS_ON}\${LIGHTS_LIST:+ (\${LIGHTS_LIST})}
 ACs running: \${ACS_ON}\${ACS_DETAIL:+ — \${ACS_DETAIL}}
 Last action: \${LAST_AUDIT:-(none today)}
-Quiet hours (${QUIET_HOURS}): \${QUIET}
+Quiet hours (\${QUIET_HOURS}): \${QUIET}
 Pending approvals: \${PENDING}
 === END WORLD STATE ===
 WSEOF

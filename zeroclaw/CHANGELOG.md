@@ -39,6 +39,9 @@
   the previous prompt used the human-facing `ha.action_guarded` alias as if it
   were a callable tool, causing valid-looking actions to be returned as text
   and then safely suppressed by Telegram.
+- Validate report/quiet-hours clocks at startup and load policy plus world-state
+  configuration from a root-owned runtime file instead of interpolating
+  operator-controlled strings into generated shell helpers.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
