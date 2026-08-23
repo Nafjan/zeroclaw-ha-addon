@@ -41,6 +41,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "Telegram watcher fails closed on a concurrent polling conflict" {
+    run grep -F 'telegram_polling_conflict' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.error_code == 409' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Telegram polling conflict; refusing to run alongside another poller.' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram turns use the full agent tool loop" {
     run grep -F 'run_agent_turn' "$run_file"
     [ "$status" -eq 0 ]

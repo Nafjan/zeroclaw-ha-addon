@@ -845,6 +845,11 @@ telegram_response_ok() {
     printf '%s' "\$response" | jq -e '.ok == true' >/dev/null 2>&1
 }
 
+telegram_polling_conflict() {
+    response="\$1"
+    printf '%s' "\$response" | jq -e '.ok == false and .error_code == 409' >/dev/null 2>&1
+}
+
 telegram_call_ok() {
     response=\$(telegram_curl "\$@" 2>/dev/null) || return 1
     telegram_response_ok "\$response"
@@ -879,7 +884,13 @@ bootstrap_offset() {
         --data-urlencode 'timeout=0' \\
         --data-urlencode 'allowed_updates=["message","callback_query"]' \\
         2>/dev/null) || return 1
-    telegram_response_ok "\$bootstrap_response" || return 1
+    if ! telegram_response_ok "\$bootstrap_response"; then
+        if telegram_polling_conflict "\$bootstrap_response"; then
+            printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
+            exit 1
+        fi
+        return 1
+    fi
     printf '%s' "\$bootstrap_response" | jq -e '.result | type == "array"' >/dev/null 2>&1 || return 1
     latest=\$(printf '%s' "\$bootstrap_response" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
     case "\$latest" in
@@ -1192,6 +1203,10 @@ while true; do
         --data-urlencode "timeout=25" \\
         --data-urlencode 'allowed_updates=["message","callback_query"]' \\
         2>/dev/null)
+    if telegram_polling_conflict "\$RESP"; then
+        printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
+        exit 1
+    fi
     OK=\$(printf '%s' "\$RESP" | jq -r '.ok // false' 2>/dev/null)
     if [ "\$OK" != "true" ]; then
         sleep 5
