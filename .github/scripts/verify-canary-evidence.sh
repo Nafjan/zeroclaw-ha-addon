@@ -46,7 +46,9 @@ jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" '
       .read_only.invalid_entity_fail_closed,
       .read_only.broker_unavailable_fail_closed,
       .read_only.planner_no_supervisor_token,
-      .read_only.planner_no_telegram_token
+      .read_only.planner_no_telegram_token,
+      .read_only.telegram_transport_isolated,
+      .read_only.telegram_no_internal_syntax_leak
     ][]; . == true)
   and all([
       .approval.non_owner_rejected,
