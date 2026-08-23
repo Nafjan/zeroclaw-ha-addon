@@ -343,10 +343,14 @@ case "${PROVIDER_KEY_MODE}" in
 esac
 export RUST_LOG="${LOG_LEVEL}"
 
-for var in OPENROUTER_KEY HA_TOKEN; do
-    eval val=\$$var
-    [ -z "$val" ] && { bashio::log.fatal "${var} not set!"; exit 1; }
-done
+[ -n "${OPENROUTER_KEY}" ] || {
+    bashio::log.fatal "OPENROUTER_KEY not set!"
+    exit 1
+}
+[ -n "${HA_TOKEN}" ] || {
+    bashio::log.fatal "HA_TOKEN not set!"
+    exit 1
+}
 
 # Telegram is an optional transport. When configured, it must have both a bot
 # token and a numeric approval owner; when absent, no Telegram child process is
@@ -2083,9 +2087,9 @@ Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
 
 ## Tool invocation protocol (gateway/channel safety)
 When a Home Assistant or ZeroClaw command helper is needed, use the runtime's
-structured shell tool exactly. Names such as ha.action_guarded and zc.set_outcome
-below are command aliases/documentation, not a user-facing response syntax.
-Only call a name directly when it is present in the runtime's actual tool list.
+structured shell tool exactly. Command helpers are valid only inside that tool;
+they are never a user-facing response syntax. Only call a name directly when
+it is present in the runtime's actual tool list.
 Never write a tool call as Markdown, a bare shell command, or prose.
 When native function calling is unavailable, use this exact text fallback:
 <tool_call>
@@ -2095,8 +2099,7 @@ For example, a Home Assistant action uses:
 <tool_call>
 {"name":"shell","arguments":{"command":"ha-action-guarded 'scene/reload' '{}'"}}
 </tool_call>
-Do not emit ha.action_guarded 'scene/reload' '{}' by itself, and do not add
-approved:true; the HA policy gate owns action approval. The command must be
+Do not add approved:true; the HA policy gate owns action approval. The command must be
 inside the shell tool's JSON arguments so the gateway can execute it and
 continue the tool loop.
 After the tool result, continue until you can give the user a short final

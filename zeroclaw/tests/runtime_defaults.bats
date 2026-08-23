@@ -18,7 +18,9 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 }
 
 @test "Telegram transport is optional and starts only when configured" {
-    run grep -F 'for var in OPENROUTER_KEY HA_TOKEN' "$run_file"
+    run grep -F '[ -n "${OPENROUTER_KEY}" ]' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ -n "${HA_TOKEN}" ]' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'TELEGRAM_ENABLED=false' "$run_file"
     [ "$status" -eq 0 ]
@@ -79,7 +81,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'structured shell tool exactly' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Do not emit ha.action_guarded' "$run_file"
+    run grep -F 'Never write a tool call as Markdown, a bare shell command, or prose.' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'approved:true' "$run_file"
     [ "$status" -eq 0 ]
@@ -228,6 +230,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 
 @test "the root entrypoint drops credential copies before launching the planner" {
     run grep -F 'unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "credential presence checks do not use dynamic shell evaluation" {
+    run grep -F 'eval val=\$$var' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F '[ -n "${OPENROUTER_KEY}" ]' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ -n "${HA_TOKEN}" ]' "$run_file"
     [ "$status" -eq 0 ]
 }
 
