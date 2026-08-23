@@ -441,3 +441,23 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'Telegram sendMessage rejected approval' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
+
+@test "policy strings are kept out of generated shell and reloaded from root state" {
+    run grep -F 'policy runtime file is not a regular file' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'chown root:zeroclaw "${POLICY_RUNTIME_TMP}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'export POLICY_MODE="${POLICY_MODE}"' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
+@test "operator clock options are validated before helper generation" {
+    run grep -F 'quiet_hours must use H:MM-H:MM; refusing to start' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'daily_report_time "${DAILY_REPORT_TIME}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'is outside the valid 24-hour range; refusing to start' "$run_file"
+    [ "$status" -eq 0 ]
+}
