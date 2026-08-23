@@ -37,3 +37,13 @@ render_file="$BATS_TEST_DIRNAME/../lib/telegram-render.sh"
     [ "$status" -eq 2 ]
     [ -z "$output" ]
 }
+
+@test "Telegram renderer blocks an internal command after prose" {
+    set +e
+    output=$(printf '%s\n' "I will run ha.action_guarded 'scene/reload' '{}' now." | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}

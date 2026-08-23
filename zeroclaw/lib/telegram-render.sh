@@ -25,10 +25,10 @@ function is_xml_end(line) {
     return line ~ /<\/[[:space:]]*(tool[_-]?calls?|function[_-]?calls?)[[:space:]]*>/
 }
 
-function is_bare_tool_command(line) {
-    return line ~ /^[[:space:]]*(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|ha-[a-z0-9-]+)[[:space:]]+/ &&
-           line !~ /[.!?][[:space:]]/ &&
-           line !~ /^[[:space:]]*(I|You|Use|Call|The|After|Before)[[:space:]]/
+function contains_internal_command(line) {
+    # Also catch a command after a short prose prefix. The model must never
+    # be able to turn an internal helper into a Telegram-visible instruction.
+    return line ~ /(^|[[:space:]])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|ha-[a-z0-9-]+)[[:space:]]+/
 }
 
 BEGIN {
@@ -64,7 +64,7 @@ BEGIN {
         next
     }
 
-    if (is_bare_tool_command(line)) {
+    if (contains_internal_command(line)) {
         internal = 1
         next
     }

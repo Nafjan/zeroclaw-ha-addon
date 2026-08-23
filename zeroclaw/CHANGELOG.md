@@ -42,6 +42,8 @@
 - Validate report/quiet-hours clocks at startup and load policy plus world-state
   configuration from a root-owned runtime file instead of interpolating
   operator-controlled strings into generated shell helpers.
+- Remove the last dynamic shell credential lookup from startup; required
+  credentials are now checked through fixed parameter expansions only.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
