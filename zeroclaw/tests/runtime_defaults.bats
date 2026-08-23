@@ -223,6 +223,19 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'export HA_TOKEN HA_URL' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'unset HA_TOKEN LEGACY_HA_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram commits its cursor only after processing the batch" {
+    run grep -F 'Process the complete batch before committing its cursor' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" &' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F 'OFFSET_TMP="\${OFFSET_F}.tmp.\$\$"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'mv -f "\$OFFSET_TMP" "\$OFFSET_F"' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "typed brokers scrub unrelated credential classes" {

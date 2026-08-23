@@ -559,6 +559,11 @@ CAPABILITY_PORT=42618
     done
 ) &
 CAPABILITY_BROKER_PID=$!
+# The background subshell has its private copy for the typed broker.  Erase
+# the parent-shell copies immediately after the fork so the entrypoint itself
+# cannot retain or accidentally pass the Supervisor credential to later
+# helpers.
+unset HA_TOKEN LEGACY_HA_TOKEN
 
 cat > /usr/local/bin/ha-lights-on << 'SCRIPT'
 #!/bin/sh
@@ -933,16 +938,16 @@ while true; do
         continue
     fi
 
-    NEW_OFFSET=\$(echo "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
-    [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ] && echo \$((NEW_OFFSET + 1)) > "\$OFFSET_F"
-
+    # Process the complete batch before committing its cursor.  If the
+    # watcher dies while a handler is running, Telegram will redeliver the
+    # batch and root-owned approval claims make replay safe.
     echo "\$RESP" | jq -c '.result[]?' 2>/dev/null | while read -r upd; do
         # Branch on update kind. message and callback_query are mutually exclusive.
         MSG_TEXT=\$(echo "\$upd" | jq -r '.message.text // empty')
         if [ -n "\$MSG_TEXT" ]; then
             M_CHAT=\$(echo "\$upd" | jq -r '.message.chat.id // empty')
             M_FROM=\$(echo "\$upd" | jq -r '.message.from.id // empty')
-            handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" &
+            handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT"
             continue
         fi
 
@@ -1019,6 +1024,17 @@ while true; do
               ;;
         esac
     done
+    NEW_OFFSET=\$(echo "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    if [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ]; then
+        OFFSET_TMP="\${OFFSET_F}.tmp.\$\$"
+        if printf '%s\\n' "\$((NEW_OFFSET + 1))" > "\$OFFSET_TMP"; then
+            chmod 0600 "\$OFFSET_TMP"
+            mv -f "\$OFFSET_TMP" "\$OFFSET_F"
+        else
+            rm -f "\$OFFSET_TMP"
+            printf '%s\\n' "failed to commit Telegram update cursor: \$NEW_OFFSET" >>/data/logs/telegram-broker.log
+        fi
+    fi
 done
 SCRIPT
 
