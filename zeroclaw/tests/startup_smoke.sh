@@ -325,6 +325,7 @@ if [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
     ! grep -F 'provider-secret' /tmp/zeroclaw-real-provider-response >/dev/null 2>&1
 fi
 test -f /data/.state-version
+test "$(cat /data/.state-version)" = "${ZEROCLAW_ADDON_VERSION}"
 [ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
 /src/tests/approval_transition_smoke.sh
 /src/tests/approval_concurrency_smoke.sh

@@ -17,6 +17,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -ne 0 ]
 }
 
+@test "runtime migration version comes from the baked Supervisor app version" {
+    run grep -F 'ADDON_VERSION="${ZEROCLAW_ADDON_VERSION:-3.1.4.0}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "invalid baked app version; refusing to start" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram transport is optional and starts only when configured" {
     run grep -F '[ -n "${OPENROUTER_KEY}" ]' "$run_file"
     [ "$status" -eq 0 ]
