@@ -1,10 +1,14 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.4.0 — root provider profile broker release
+# ZeroClaw HAOS app — root provider profile broker release
 # Writes, scheduling, generic HTTP, and the built-in Telegram transport are
 # disabled by default; enabled writes remain broker- and policy-gated.
 
-ADDON_VERSION="3.1.4.0"
+ADDON_VERSION="${ZEROCLAW_ADDON_VERSION:-3.1.4.0}"
+printf '%s' "${ADDON_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' || {
+    bashio::log.fatal "invalid baked app version; refusing to start"
+    exit 1
+}
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
