@@ -136,7 +136,7 @@ start_credit_then_free_upstream() {
     : > "$sequence_state"
     : > "$sequence_log"
     SEQUENCE_STATE="$sequence_state" SEQUENCE_LOG="$sequence_log" \
-        /bin/busybox sh -c 'while true; do /bin/busybox nc -l -p "$1" -s 127.0.0.1 -e /tmp/provider-profile-credit-then-free-upstream; sleep 1; done' \
+        /bin/busybox sh -c 'while true; do /bin/busybox nc -l -p "$1" -s 127.0.0.1 -e /tmp/provider-profile-credit-then-free-upstream; done' \
         sh "$OPENROUTER_PORT" &
     OPENROUTER_PID=$!
     sleep 1
