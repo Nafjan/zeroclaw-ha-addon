@@ -914,6 +914,22 @@ is_allowed_user() {
     grep -Fx "\$uid" "\$USERS_F" >/dev/null 2>&1
 }
 
+valid_positive_id() {
+    case "\$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_chat_id() {
+    case "\$1" in
+        ''|*[!0-9-]*) return 1 ;;
+        -) return 1 ;;
+        -*) valid_positive_id "\${1#-}" ;;
+        *) valid_positive_id "\$1" ;;
+    esac
+}
+
 approval_id() {
     printf '%s' "\$1" | sed -nE 's/^[[:space:]]*[Yy][Ee][Ss][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p'
 }
@@ -943,6 +959,8 @@ apply_approved_ticket() {
 # Forward an inbound text message to the gateway and relay the response.
 handle_message() {
     chat_id="\$1"; from_id="\$2"; text="\$3"; update_id="\$4"
+    valid_chat_id "\$chat_id" || return 1
+    valid_positive_id "\$from_id" || return 1
     case "\$update_id" in
         ''|*[!0-9]*) return 1 ;;
     esac
@@ -1146,6 +1164,12 @@ while true; do
         FROM_NAME=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.first_name // "user"')
         CHAT_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.chat.id // empty')
         MSG_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.message_id // empty')
+
+        if ! valid_positive_id "\$FROM" || ! valid_chat_id "\$CHAT_ID" || ! valid_positive_id "\$MSG_ID"; then
+            printf '%s\n' "Telegram callback update \$UPDATE_ID had invalid actor or chat identifiers" >>/data/logs/telegram-broker.log
+            if ! answer_cb "\$CB_ID" "Invalid callback."; then BATCH_OK=false; break; fi
+            continue
+        fi
 
         if ! is_allowed_user "\$FROM"; then
             if ! answer_cb "\$CB_ID" "Not authorized."; then BATCH_OK=false; break; fi
