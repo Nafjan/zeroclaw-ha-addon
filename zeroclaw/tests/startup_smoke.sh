@@ -219,9 +219,9 @@ if [ "${1:-}" = daemon ]; then
     elif touch /data/capability/.planner-write-test 2>/dev/null; then
         rm -f /data/capability/.planner-write-test
         printf 'CAPABILITY_QUOTA_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
-    elif touch /run/zeroclaw/telegram-offset.planner-write-test 2>/dev/null; then
-        rm -f /run/zeroclaw/telegram-offset.planner-write-test
-        printf 'TELEGRAM_RUNTIME_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
+    elif touch /data/capability/telegram-offset.planner-write-test 2>/dev/null; then
+        rm -f /data/capability/telegram-offset.planner-write-test
+        printf 'TELEGRAM_CURSOR_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
     elif rm -rf /data/approval-receipts 2>/dev/null; then
         printf 'ROOT_APPROVAL_STORE_REPLACED\n' > /tmp/zeroclaw-broker-test
     elif ! /usr/local/bin/ha-capability get_state light.kitchen | jq -e '.entity_id == "light.kitchen"' >/dev/null 2>&1; then
@@ -291,8 +291,9 @@ test "$(stat -c '%u:%a' /data/audit)" = "0:750"
 test "$(stat -c '%u:%a' /data/logs)" = "0:750"
 test "$(stat -c '%u:%a' /data/provider)" = "0:700"
 test "$(stat -c '%u:%a' /data/capability)" = "0:700"
+test "$(stat -c '%u:%a' /data/capability/telegram-replies)" = "0:700"
 test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw/telegram-offset)" = "0:600"
+test "$(stat -c '%u:%a' /data/capability/telegram-offset)" = "0:600"
 test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
 test -x /usr/local/bin/ha-broker-entrypoint
 test -x /usr/local/bin/tg-broker-entrypoint
