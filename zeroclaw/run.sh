@@ -703,7 +703,7 @@ SCRIPT
 # Long-polls ALL updates (messages + callback_query) because Telegram
 # permits only one getUpdates client per bot. Replaces ZeroClaw's
 # built-in Telegram channel entirely:
-#   • .message      → validate sender, forward text to gateway /webhook,
+#   • .message      → validate sender, run the full single-message agent,
 #                     send the agent's response back via sendMessage
 #   • .callback_query → validate sender, apply the ticket directly,
 #                     edit message in place, ping agent for audit
@@ -723,6 +723,9 @@ TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
 OFFSET_F="/run/zeroclaw/telegram-offset"
 USERS_F="${TG_USERS_FILE}"
 GW="${GW}"
+AGENT_BIN="/usr/local/bin/zeroclaw"
+AGENT_CONFIG_DIR="${CONFIG_DIR}"
+AGENT_WORKSPACE="${WS}"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
 [ -f "\$OFFSET_F" ] || echo 0 > "\$OFFSET_F"
@@ -770,6 +773,21 @@ send_typing() {
     telegram_curl sendChatAction -s -X POST \\
         --data-urlencode "chat_id=\$chat_id" \\
         --data-urlencode "action=typing" >/dev/null 2>&1 || true
+}
+
+# Run one Telegram turn through ZeroClaw's full agent loop. The gateway's
+# /webhook compatibility endpoint is intentionally tool-less; using it here
+# makes the model print command aliases instead of executing them. The agent
+# process runs as the unprivileged planner, while the typed HA/Telegram/provider
+# brokers retain their root-owned credentials and policy boundaries.
+run_agent_turn() {
+    chat_id="\$1"; prompt="\$2"
+    session_file="\${AGENT_WORKSPACE}/sessions/telegram_\${chat_id}.json"
+    mkdir -p "\$(dirname "\$session_file")" 2>/dev/null || true
+    su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
+        --config-dir "\$AGENT_CONFIG_DIR" agent \\
+        --message "\$prompt" \\
+        --session-state-file "\$session_file"
 }
 
 is_allowed_user() {
@@ -872,27 +890,26 @@ handle_message() {
                 LAST=\$(cat "\$LAST_OUTCOME_FILE" 2>/dev/null)
                 rm -f "\$LAST_OUTCOME_FILE"
                 if [ -n "\$LAST" ]; then
-                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then call zc.lesson_add with it. Do not message the user — this is a silent learning hook."
-                    CBODY=\$(jq -nc --arg m "\$CP" '{message:\$m}')
-                    (curl -s --max-time 60 -X POST "\${GW}/webhook" \\
-                        -H "Content-Type: application/json" -d "\$CBODY" >/dev/null 2>&1) &
+                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then use the shell tool with zc-lesson-add. Do not message the user — this is a silent learning hook."
+                    run_agent_turn "\$chat_id" "\$CP" \\
+                        >/dev/null 2>>/data/logs/telegram-broker.log &
                 fi
                 ;;
         esac
     fi
 
     send_typing "\$chat_id"
-    BODY=\$(jq -nc --arg m "\$text" '{message:\$m}')
-    RESP=\$(curl -s --max-time 60 -X POST "\${GW}/webhook" \\
-        -H "Content-Type: application/json" -d "\$BODY" 2>/dev/null)
-    REPLY=\$(echo "\$RESP" | jq -r '.response // .reply // .text // empty' 2>/dev/null)
+    REPLY=\$(run_agent_turn "\$chat_id" "\$text" \\
+        2>>/data/logs/telegram-broker.log)
+    AGENT_STATUS=\$?
     # A malformed provider-side tool call is an internal protocol failure, not
     # a user-facing reply. Do not leak commands such as a fenced tool_call into
     # Telegram, and do not imply that an action ran when it was not dispatched.
-    if SANITIZED=\$(printf '%s' "\$REPLY" | /usr/local/bin/telegram-render 2>/dev/null); then
+    if [ "\$AGENT_STATUS" -eq 0 ] && [ -n "\$REPLY" ] && \\
+        SANITIZED=\$(printf '%s' "\$REPLY" | /usr/local/bin/telegram-render 2>/dev/null); then
         REPLY="\$SANITIZED"
     else
-        printf '%s\n' 'blocked internal tool syntax in Telegram reply' >>/data/logs/telegram-broker.log
+        printf '%s\n' "blocked internal tool syntax in Telegram reply or Telegram agent failure (status=\$AGENT_STATUS)" >>/data/logs/telegram-broker.log
         REPLY="I couldn't complete that request."
     fi
     [ -z "\$REPLY" ] && REPLY="I couldn't complete that request."
@@ -975,16 +992,14 @@ while true; do
                   answer_cb "\$CB_ID" "Applied."
                   edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
-                  curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
-                      -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" '{message:\$m}')" \\
-                      >/dev/null 2>&1 || true
+                  run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" \\
+                      >/dev/null 2>>/data/logs/telegram-broker.log &
               else
                   answer_cb "\$CB_ID" "Execution failed; claim retained."
                   edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but execution failed; claim retained for recovery.
 \${OUT}"
-                  curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
-                      -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" '{message:\$m}')" \\
-                      >/dev/null 2>&1 || true
+                  run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" \\
+                      >/dev/null 2>>/data/logs/telegram-broker.log &
               fi
               ;;
           reject)
@@ -1730,10 +1745,11 @@ Languages: ${HOME_LANGUAGES} — match the user's language exactly.
 Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
 
 ## Tool invocation protocol (gateway/channel safety)
-When a tool is needed, use the runtime's structured protocol exactly. The
-runtime's command-execution tool is named shell; names such as ha.action_guarded
-and zc.set_outcome below are command aliases/documentation, not callable tool
-names. Never write a tool call as Markdown, a bare shell command, or prose.
+When a Home Assistant or ZeroClaw command helper is needed, use the runtime's
+structured shell tool exactly. Names such as ha.action_guarded and zc.set_outcome
+below are command aliases/documentation, not a user-facing response syntax.
+Only call a name directly when it is present in the runtime's actual tool list.
+Never write a tool call as Markdown, a bare shell command, or prose.
 When native function calling is unavailable, use this exact text fallback:
 <tool_call>
 {"name":"shell","arguments":{"command":"..."}}
@@ -1761,10 +1777,11 @@ Unknown name? Call memory_recall("<name>") first. Entity mappings are pre-loaded
 Still unknown? Reply: "I don't know '<name>'. What's the entity ID?"
 
 ## Step 2 — Status queries
-ha.lights_on · ha.ac_status · ha.cover_status · ha.sensor_status · ha.all_status
-ha.get_entity <entity_id> · ha.logbook [entity_id] · ha.error_log
+Use the shell tool with the documented command:
+ha-lights-on · ha-ac-status · ha-cover-status · ha-sensors · ha-all-status
+ha-state <entity_id> · ha-logbook [entity_id] · ha-errors
 
-## Step 3 — Actions go through ha.action_guarded (the policy gate)
+## Step 3 — Actions go through ha-action-guarded (the policy gate)
 You CANNOT call ha-action-raw directly. Every action goes through ha-action-guarded.
 The gate returns one of three things:
 
@@ -1779,14 +1796,14 @@ the model to manufacture an approval or call an approval bridge. After a
 successful approval, the adapter applies the ticket and reports the outcome.
 
 ## AC actions — pre-check first
-Before set_temperature / set_hvac_mode, call ha.get_entity. If state already matches request,
+Before set_temperature / set_hvac_mode, use the shell tool with ha-state. If state already matches request,
 skip the action and write: "Study AC is already at 24°C." Save tool calls.
 
 ## Decision tree for ambiguous requests
 "turn off the lights" with no scope:
   • If exactly one light is on → act, write specific outcome.
   • If multiple → ask: "Which? all / specific room / a specific light?"
-"make it cooler / warmer" → call ha.get_entity first, propose ±2°C delta, then apply.
+"make it cooler / warmer" → use the shell tool with ha-state first, propose ±2°C delta, then apply.
 
 ## Outcome lines (positive examples)
 Lights:    "Example light on."         "Example group off."    "All lights off."
@@ -1811,7 +1828,7 @@ zc-cost — return current cost. If asked about spend, call this; never guess.
 
 ## Tool-call budget
 You have ≤ ${MAX_TOOL_ITER} tool calls per turn. Budget them. Memory-first lookup before
-ha.list_entities or any broad query. Never call http_request GET /api/states (532KB).
+ha-all-status or any broad query. Never call http_request GET /api/states (532KB).
 
 ## Model routing
 Default route is fast (${DEFAULT_MODEL}). Switch to the reasoning route when ANY of:
@@ -1825,12 +1842,12 @@ To switch routes, prepend your first scratchpad/reasoning line with the literal 
 
 ## Outcome tracking (lessons loop) — REQUIRED after real actions
 After every turn that produced a real action (NOT a status query, greeting, or
-"already at" no-op), invoke the registered tool exactly once:
+"already at" no-op), use the shell tool exactly once:
     <tool_call>
     {"name":"shell","arguments":{"command":"zc-set-outcome '<same one-line outcome>'"}}
     </tool_call>
-This is a real tool — call it like ha.action_guarded or memory_recall. The shell
-helper underneath is /usr/local/bin/zc-set-outcome; it writes /data/.last_outcome.
+The shell helper underneath is /usr/local/bin/zc-set-outcome; it writes
+/data/.last_outcome. Never emit zc.set_outcome or zc-set-outcome as plain text.
 
 Concrete example for a turn that just turned on a light:
   <tool_call>
@@ -1841,7 +1858,7 @@ Concrete example for a turn that just turned on a light:
   {"name":"shell","arguments":{"command":"zc-set-outcome 'Example light on.'"}}
   </tool_call>
 
-If you skip zc.set_outcome the lessons loop cannot fire on the user's next reply
+If you skip the zc-set-outcome shell command the lessons loop cannot fire on the user's next reply
 and the agent will not learn from corrections. Skipping it is a SOUL violation.
 
 The runtime detects a correction in the user's NEXT message (e.g. "no", "wrong",
@@ -1951,7 +1968,9 @@ For "every night at 11 IF any AC is on, ASK me before turning it off":
    condition with current state, and drafts an action ticket if needed.
 3. User approves or denies in chat.
 
-The user must add this rest_command to /config/configuration.yaml ONCE:
+The user may add this rest_command to /config/configuration.yaml ONCE for a
+simple, non-tool wake-up. Telegram turns use the full agent path below; this
+compatibility webhook does not execute Home Assistant actions:
 ```yaml
 rest_command:
   zeroclaw_message:
@@ -2005,14 +2024,14 @@ command through the runtime's `shell` tool using the structured protocol:
 Never emit a bare `ha.*` or `zc.*` line to the user or as the assistant turn.
 
 STATUS:
-- ha.all_status     — lights + AC + covers (use for "home overview")
-- ha.lights_on      — which lights are ON
-- ha.ac_status      — all ACs: mode, set, current
-- ha.cover_status   — all curtains
-- ha.sensor_status  — soil/temperature sensors
-- ha.get_entity     — one entity by ID (pass entity_id)
-- ha.logbook        — recent events (optionally entity_id)
-- ha.error_log      — HA system error log
+- ha-all-status     — lights + AC + covers (use for "home overview")
+- ha-lights-on      — which lights are ON
+- ha-ac-status      — all ACs: mode, set, current
+- ha-cover-status   — all curtains
+- ha-sensors        — soil/temperature sensors
+- ha-state          — one entity by ID (pass entity_id)
+- ha-logbook        — recent events (optionally entity_id)
+- ha-errors         — HA system error log
 
 ACTIONS (all routed through the policy gate):
 - command: ha-action-guarded <service_path> '<json_body>'
@@ -2020,13 +2039,13 @@ ACTIONS (all routed through the policy gate):
     e.g. ha-action-guarded 'climate/set_temperature' '{"entity_id":"climate.example","temperature":22}'
 - command: ha-action-guarded --apply-ticket <id8>   — adapter-only approved-ticket path
 
-ZC. (ZeroClaw self-tools):
-- zc.schedule '<cron>' '<msg-to-self>' [name]   — recurring task
-- zc.schedule_once <min> '<msg>'                — one-off delay
-- zc.audit_tail [N]                              — recent actions
-- zc.undo [N]                                    — revert last N actions (1h window)
-- zc.cost                                        — current spend
-- zc.world_state                                 — refresh world state
+ZC. (ZeroClaw self-commands; invoke through shell):
+- zc-schedule '<cron>' '<msg-to-self>' [name]   — recurring task
+- zc-schedule-once <min> '<msg>'                — one-off delay
+- zc-audit-tail [N]                              — recent actions
+- zc-undo [N]                                    — revert last N actions (1h window)
+- zc-cost                                        — current spend
+- zc-world-state                                 — refresh world state
 
 WARNING: never call http_request GET /api/states — payload too large.
 TOOLSEOF
@@ -2064,142 +2083,41 @@ broker, which enforce the configured policy options. The legacy
 /config/zeroclaw_policy.yaml is not parsed. The gate returns CONFIRM_PENDING for
 actions that need approval; relay the ticket id to the user.
 
-[[tools]]
-name = "all_status"
-description = "Full home overview: lights on, AC status, and cover/curtain states."
-kind = "shell"
-command = "ha-all-status"
+## Command catalog — use the runtime shell tool
 
-[[tools]]
-name = "lights_on"
-description = "List which lights are currently ON."
-kind = "shell"
-command = "ha-lights-on"
+The entries below are command aliases, not callable tool names and not text to
+send to the user. Invoke them only inside the structured shell tool.
 
-[[tools]]
-name = "ac_status"
-description = "All AC/climate status: mode, set temperature, current temperature."
-kind = "shell"
-command = "ha-ac-status"
-
-[[tools]]
-name = "cover_status"
-description = "All curtain/cover status."
-kind = "shell"
-command = "ha-cover-status"
-
-[[tools]]
-name = "sensor_status"
-description = "Soil moisture and temperature sensors."
-kind = "shell"
-command = "ha-sensors"
-
-[[tools]]
-name = "get_entity"
-description = "State of one entity. Pass entity_id, e.g. 'climate.room_air_conditioner'"
-kind = "shell"
-command = "ha-state"
-
-[[tools]]
-name = "action_guarded"
-description = "Policy-gated action. Args: <service_path> '<json_body>'. May return CONFIRM_PENDING ticket=<id8> — relay it to the user. To apply an approved ticket: '--apply-ticket <id8>'."
-kind = "shell"
-command = "ha-action-guarded"
-
-[[tools]]
-name = "logbook"
-description = "Recent device activity. Pass entity_id to filter."
-kind = "shell"
-command = "ha-logbook"
-
-[[tools]]
-name = "error_log"
-description = "Home Assistant system error log."
-kind = "shell"
-command = "ha-errors"
-
-[[tools]]
-name = "schedule"
-description = "Schedule a future message to yourself (cron expression). Args: '<cron>' '<message>' [name]"
-kind = "shell"
-command = "zc-schedule"
-
-[[tools]]
-name = "schedule_once"
-description = "Schedule a one-off message to yourself in N minutes. Args: <minutes> '<message>'"
-kind = "shell"
-command = "zc-schedule-once"
-
-[[tools]]
-name = "audit_tail"
-description = "Recent audit log rows. Optional N (default 20)."
-kind = "shell"
-command = "zc-audit-tail"
-
-[[tools]]
-name = "undo"
-description = "Revert the last N actions within the last hour (default 1)."
-kind = "shell"
-command = "zc-undo"
-
-[[tools]]
-name = "cost"
-description = "Current cost telemetry (today, month, limits)."
-kind = "shell"
-command = "zc-cost"
-
-[[tools]]
-name = "world_state"
-description = "Compact home-state header (time, lights, ACs, quiet hours, pending approvals)."
-kind = "shell"
-command = "zc-world-state"
-
-[[tools]]
-name = "set_outcome"
-description = "Record the one-line outcome of a real action so the lessons loop can detect a user correction in the NEXT message. Call EXACTLY ONCE per action turn with the same outcome line you wrote to the user. Do NOT call after status queries, greetings, or 'already at' no-ops."
-kind = "shell"
-command = "zc-set-outcome"
-
-[[tools]]
-name = "lesson_add"
-description = "Append a one-line lesson (≤80 chars) to LESSONS.md. Reserved for the synthetic 'User correction received.' prompt — do not call from regular turns."
-kind = "shell"
-command = "zc-lesson-add"
+- ha-all-status — full home overview.
+- ha-lights-on — list lights that are currently on.
+- ha-ac-status — current climate state.
+- ha-cover-status — current covers/curtains.
+- ha-sensors — soil and temperature sensors.
+- ha-state <entity_id> — state of one entity.
+- ha-action-guarded '<service_path>' '<json_body>' — policy-gated action.
+- ha-logbook [entity_id] — recent activity.
+- ha-errors — Home Assistant error log.
+- zc-schedule '<cron>' '<message>' [name] — recurring reminder.
+- zc-schedule-once <minutes> '<message>' — one-off reminder.
+- zc-audit-tail [N] — recent audit rows.
+- zc-undo [N] — revert recent actions.
+- zc-cost — current cost telemetry.
+- zc-world-state — compact current-home header.
+- zc-set-outcome '<outcome>' — record a real action outcome exactly once.
+- zc-lesson-add '<lesson>' — reserved for the correction hook.
 SKILLEOF
 
 # v3.1: append creation tools to the ha skill only when the feature is on
 if [ "${ENABLE_CREATION}" = "true" ]; then
 cat >> "${WS}/skills/ha/SKILL.md" << 'CRSKILLEOF'
 
-[[tools]]
-name = "create_scene"
-description = "Draft a new HA scene. Args: <scene_id> '<friendly name>' '<json entity_states>'. Returns CONFIRM_PENDING ticket=<id8>; relay it to user. The Telegram adapter owns approval and applies the ticket after the bound user confirms."
-kind = "shell"
-command = "ha-create-scene"
-
-[[tools]]
-name = "create_automation"
-description = "Draft a new HA automation. Args: <alias> '<yaml with trigger: and action: keys>'. Returns CONFIRM_PENDING ticket=<id8>. yq validates the YAML before queueing."
-kind = "shell"
-command = "ha-create-automation"
-
-[[tools]]
-name = "create_routine"
-description = "Save an agent-side macro of action steps. Args: <name> '<json array of {service,payload}>'. No approval — but each step still goes through ha-action-guarded when run."
-kind = "shell"
-command = "ha-create-routine"
-
-[[tools]]
-name = "run_routine"
-description = "Run a previously-saved routine by name. Each step goes through ha-action-guarded."
-kind = "shell"
-command = "ha-run-routine"
-
-[[tools]]
-name = "apply_creation"
-description = "Apply an APPROVED creation ticket. Args: <id8>. Persists scene → /config/scenes.yaml or automation → /config/automations.yaml then reloads HA."
-kind = "shell"
-command = "ha-apply-creation"
+- ha-create-scene <scene_id> '<friendly name>' '<json entity_states>' —
+  draft a scene and return a confirmation ticket.
+- ha-create-automation <alias> '<yaml>' — draft an automation and return a
+  confirmation ticket.
+- ha-create-routine <name> '<json steps>' — save an agent-side macro.
+- ha-run-routine <name> — run a saved routine through the policy gate.
+- ha-apply-creation <id8> — apply an approved creation ticket.
 CRSKILLEOF
 fi
 

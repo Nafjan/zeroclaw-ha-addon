@@ -39,10 +39,32 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "Telegram turns use the full agent tool loop" {
+    run grep -F 'run_agent_turn' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'su-exec zeroclaw:zeroclaw timeout 75' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--config-dir "\$AGENT_CONFIG_DIR" agent' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'REPLY=\$(run_agent_turn' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "The gateway's" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'compatibility endpoint is intentionally tool-less' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "HA skill documents shell commands instead of fake callable tables" {
+    run grep -F '[[tools]]' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F 'The entries below are command aliases, not callable tool names' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "planner uses the actual shell tool for structured gateway calls" {
     run grep -F '{"name":"shell","arguments":{"command":"ha-action-guarded' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'command-execution tool is named shell' "$run_file"
+    run grep -F 'structured shell tool exactly' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Do not emit ha.action_guarded' "$run_file"
     [ "$status" -eq 0 ]
