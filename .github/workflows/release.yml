@@ -28,6 +28,11 @@ on:
         description: "SHA256 of the immutable canary evidence JSON"
         required: false
         type: string
+      runtime_version:
+        description: "Baked runtime version; set a canary suffix only for a temporary canary build"
+        required: false
+        default: ""
+        type: string
       builder_mode:
         description: "Reproducible builder implementation to exercise"
         required: false
@@ -71,6 +76,7 @@ jobs:
       candidate_tag: ${{ steps.metadata.outputs.candidate_tag }}
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.metadata.outputs.version }}
+      runtime_version: ${{ steps.metadata.outputs.runtime_version }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
       certificate_identity: ${{ steps.metadata.outputs.certificate_identity }}
     steps:
@@ -82,6 +88,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
           BUILDER_MODE: ${{ inputs.builder_mode }}
           PROMOTE: ${{ inputs.promote }}
         run: |
@@ -95,6 +102,7 @@ jobs:
           esac
           release_tag="$RELEASE_TAG"
           release_version="${release_tag#v}"
+          runtime_version="${RUNTIME_VERSION:-$version}"
           source_repository="$(jq -r '.source_repository' zeroclaw/binary-manifest.json)"
           source_commit="$(jq -r '.source_commit' zeroclaw/binary-manifest.json)"
           source_date_epoch="$(jq -r '.source_date_epoch' zeroclaw/binary-manifest.json)"
@@ -116,6 +124,16 @@ jobs:
           test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
           test "$release_version" = "$version"
           printf '%s' "$release_tag" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          printf '%s' "$runtime_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$'
+          if [ "$runtime_version" != "$version" ]; then
+            test "$promote" != "true"
+            test "$GITHUB_REF" != "refs/heads/master"
+            version_pattern="${version//./\\.}"
+            printf '%s' "$runtime_version" | grep -Eq "^${version_pattern}-canary\\.[0-9]+$" || {
+              echo "temporary runtime_version must be ${version}-canary.<id>" >&2
+              exit 1
+            }
+          fi
           test "$source_repository" = "https://github.com/zeroclaw-labs/zeroclaw.git"
           test "$source_commit" != "null"
           test "$source_date_epoch" != "null"
@@ -145,6 +163,7 @@ jobs:
           fi
           {
             printf 'version=%s\n' "$version"
+            printf 'runtime_version=%s\n' "$runtime_version"
             printf 'builder_mode=%s\n' "$builder_mode"
             printf 'release_tag=%s\n' "$release_tag"
             printf 'source_commit=%s\n' "$source_commit"
@@ -897,7 +916,7 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.image }}:${{ steps.metadata.outputs.candidate_tag }}
           build-args: |
-            BUILD_VERSION=${{ steps.metadata.outputs.version }}
+            BUILD_VERSION=${{ steps.metadata.outputs.runtime_version }}
             ZEROCLAW_SHA256=${{ steps.metadata.outputs.binary_sha }}
             ZEROCLAW_SOURCE_COMMIT=${{ steps.metadata.outputs.source_commit }}
             ZEROCLAW_SOURCE_DATE_EPOCH=${{ steps.metadata.outputs.source_date_epoch }}
