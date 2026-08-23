@@ -975,6 +975,13 @@ send_cached_reply() {
     cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
     [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
     cached_reply=\$(cat "\$cached_file") || return 1
+    if sanitized_cached=\$(printf '%s' "\$cached_reply" | /usr/local/bin/telegram-render 2>/dev/null); then
+        cached_reply="\$sanitized_cached"
+    else
+        printf '%s\n' 'blocked internal tool syntax in cached Telegram reply; replacing it with a safe status message' >>/data/logs/telegram-broker.log
+        cached_reply="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
+        cache_reply "\$update_id" "\$cached_reply" || true
+    fi
     send_msg "\$chat_id" "\$cached_reply"
 }
 
