@@ -399,6 +399,9 @@ chown -R root:root /data/provider
 chmod 0700 /data/provider
 chown -R root:root /data/capability
 chmod 0700 /data/capability
+mkdir -p /data/capability/telegram-replies
+chown -R root:root /data/capability/telegram-replies
+chmod 0700 /data/capability/telegram-replies
 
 # Do not let a planner-controlled symlink hide or redirect a root-owned state
 # file.  Workspace/pending/routines/tools are the only intentionally
@@ -652,10 +655,29 @@ TG_USERS_FILE="/run/zeroclaw/telegram-users"
 echo "${TELEGRAM_USERS}" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$' > "${TG_USERS_FILE}" || true
 chown root:root "${TG_USERS_FILE}"
 chmod 0600 "${TG_USERS_FILE}"
-TELEGRAM_OFFSET_FILE="/run/zeroclaw/telegram-offset"
-# The old offset was planner-writable.  Reset it instead of trusting a
-# planner-controlled cursor; Telegram updates are harmlessly revalidated.
-printf '0\n' > "${TELEGRAM_OFFSET_FILE}"
+TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"
+LEGACY_TELEGRAM_OFFSET_FILE="/run/zeroclaw/telegram-offset"
+# The Telegram cursor is broker state, not ephemeral runtime state.  Preserve
+# a numeric cursor from the pre-3.1.4 runtime when it is available.  A fresh
+# configured bot gets a -1 sentinel; the watcher confirms and discards the
+# currently queued historical updates before it begins normal polling.  This
+# avoids replaying stale commands after an app replacement while refusing to
+# guess a cursor that was never durably recorded.
+if [ -L "${TELEGRAM_OFFSET_FILE}" ] || [ -e "${TELEGRAM_OFFSET_FILE}" ] && [ ! -f "${TELEGRAM_OFFSET_FILE}" ]; then
+    bashio::log.fatal "Telegram cursor is not a regular persistent file"
+    exit 1
+fi
+if [ ! -e "${TELEGRAM_OFFSET_FILE}" ]; then
+    if [ -f "${LEGACY_TELEGRAM_OFFSET_FILE}" ] &&
+        grep -Eq '^[0-9]+$' "${LEGACY_TELEGRAM_OFFSET_FILE}"; then
+        cp "${LEGACY_TELEGRAM_OFFSET_FILE}" "${TELEGRAM_OFFSET_FILE}"
+    elif [ "${TELEGRAM_ENABLED}" = "true" ]; then
+        printf '%s\n' '-1' > "${TELEGRAM_OFFSET_FILE}"
+    else
+        printf '%s\n' '0' > "${TELEGRAM_OFFSET_FILE}"
+    fi
+fi
+rm -f "${LEGACY_TELEGRAM_OFFSET_FILE}"
 rm -f /data/.tg_users /data/.tg_offset
 chown root:root "${TELEGRAM_OFFSET_FILE}"
 chmod 0600 "${TELEGRAM_OFFSET_FILE}"
@@ -725,7 +747,8 @@ unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
     OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
     ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
-OFFSET_F="/run/zeroclaw/telegram-offset"
+OFFSET_F="${TELEGRAM_OFFSET_FILE}"
+REPLY_CACHE_DIR="/data/capability/telegram-replies"
 USERS_F="${TG_USERS_FILE}"
 GW="${GW}"
 AGENT_BIN="/usr/local/bin/zeroclaw"
@@ -733,7 +756,66 @@ AGENT_CONFIG_DIR="${CONFIG_DIR}"
 AGENT_WORKSPACE="${WS}"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
-[ -f "\$OFFSET_F" ] || echo 0 > "\$OFFSET_F"
+[ -n "\$TOKEN" ] || exit 1
+[ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
+if [ ! -d "\$REPLY_CACHE_DIR" ]; then
+    mkdir -m 0700 "\$REPLY_CACHE_DIR" 2>/dev/null || exit 1
+fi
+[ ! -L "\$OFFSET_F" ] && [ -f "\$OFFSET_F" ] || exit 1
+
+telegram_response_ok() {
+    response="\$1"
+    [ -n "\$response" ] || return 1
+    # Never log or relay a Telegram response that contains the bot token.
+    if printf '%s' "\$response" | grep -F -- "\$TOKEN" >/dev/null 2>&1; then
+        return 1
+    fi
+    printf '%s' "\$response" | jq -e '.ok == true' >/dev/null 2>&1
+}
+
+telegram_call_ok() {
+    response=\$(telegram_curl "\$@" 2>/dev/null) || return 1
+    telegram_response_ok "\$response"
+}
+
+commit_offset() {
+    next_offset="\$1"
+    case "\$next_offset" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    offset_tmp="\${OFFSET_F}.tmp.\$\$"
+    if ! printf '%s\n' "\$next_offset" > "\$offset_tmp"; then
+        rm -f "\$offset_tmp"
+        return 1
+    fi
+    chmod 0600 "\$offset_tmp"
+    if ! mv -f "\$offset_tmp" "\$OFFSET_F"; then
+        rm -f "\$offset_tmp"
+        return 1
+    fi
+}
+
+bootstrap_offset() {
+    # Telegram's negative offset confirms all older queued updates.  Do this
+    # exactly once on a fresh persistent state file, then enter normal
+    # positive-offset polling.  If the API is unavailable, leave -1 intact so
+    # no update is silently acknowledged.
+    offset_state=\$(cat "\$OFFSET_F" 2>/dev/null || printf '%s' invalid)
+    [ "\$offset_state" = "-1" ] || return 0
+    bootstrap_response=\$(telegram_curl getUpdates -s --max-time 30 --get \\
+        --data-urlencode 'offset=-1' \\
+        --data-urlencode 'timeout=0' \\
+        --data-urlencode 'allowed_updates=["message","callback_query"]' \\
+        2>/dev/null) || return 1
+    telegram_response_ok "\$bootstrap_response" || return 1
+    printf '%s' "\$bootstrap_response" | jq -e '.result | type == "array"' >/dev/null 2>&1 || return 1
+    latest=\$(printf '%s' "\$bootstrap_response" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    case "\$latest" in
+        ''|null) commit_offset 0 ;;
+        *[!0-9]*) return 1 ;;
+        *) commit_offset "\$((latest + 1))" ;;
+    esac
+}
 
 # Keep the Telegram bot token in a private curl config file. The URL is never
 # passed as a child-process argument, which prevents token leakage through ps
@@ -752,25 +834,26 @@ telegram_curl() {
 
 answer_cb() {
     cb_id="\$1"; text="\$2"
-    telegram_curl answerCallbackQuery -s -X POST \\
+    telegram_call_ok answerCallbackQuery -s -X POST \\
         --data-urlencode "callback_query_id=\$cb_id" \\
-        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+        --data-urlencode "text=\$text"
 }
 
 edit_msg() {
     chat_id="\$1"; msg_id="\$2"; new_text="\$3"
+    [ -n "\$msg_id" ] || return 1
     # Strip the inline keyboard by omitting reply_markup on edit.
-    telegram_curl editMessageText -s -X POST \\
+    telegram_call_ok editMessageText -s -X POST \\
         -H "Content-Type: application/json" \\
         -d "\$(jq -nc --arg c "\$chat_id" --argjson m "\$msg_id" --arg t "\$new_text" \\
-              '{chat_id:\$c, message_id:\$m, text:\$t}')" >/dev/null 2>&1 || true
+              '{chat_id:\$c, message_id:\$m, text:\$t}')"
 }
 
 send_msg() {
     chat_id="\$1"; text="\$2"
-    telegram_curl sendMessage -s -X POST \\
+    telegram_call_ok sendMessage -s -X POST \\
         --data-urlencode "chat_id=\$chat_id" \\
-        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+        --data-urlencode "text=\$text"
 }
 
 send_typing() {
@@ -780,10 +863,40 @@ send_typing() {
         --data-urlencode "action=typing" >/dev/null 2>&1 || true
 }
 
-# Run one Telegram turn through ZeroClaw's full agent loop. The gateway's
-# /webhook compatibility endpoint is intentionally tool-less; using it here
-# makes the model print command aliases instead of executing them. The agent
-# process runs as the unprivileged planner, while the typed HA/Telegram/provider
+cache_reply() {
+    update_id="\$1"; reply="\$2"
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ ! -L "\$REPLY_CACHE_DIR" ] && [ -d "\$REPLY_CACHE_DIR" ] || return 1
+    cache_tmp="\${REPLY_CACHE_DIR}/.\${update_id}.tmp.\$\$"
+    if ! printf '%s' "\$reply" > "\$cache_tmp"; then
+        rm -f "\$cache_tmp"
+        return 1
+    fi
+    chmod 0600 "\$cache_tmp"
+    mv -f "\$cache_tmp" "\${REPLY_CACHE_DIR}/\${update_id}.txt"
+}
+
+send_and_cache() {
+    update_id="\$1"; chat_id="\$2"; reply="\$3"
+    cache_reply "\$update_id" "\$reply" || return 1
+    send_msg "\$chat_id" "\$reply"
+}
+
+send_cached_reply() {
+    update_id="\$1"; chat_id="\$2"
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
+    cached_reply=\$(cat "\$cached_file") || return 1
+    send_msg "\$chat_id" "\$cached_reply"
+}
+
+# Run one Telegram turn through ZeroClaw's full agent loop. The agent process
+# runs as the unprivileged planner, while the typed HA/Telegram/provider
 # brokers retain their root-owned credentials and policy boundaries.
 run_agent_turn() {
     chat_id="\$1"; prompt="\$2"
@@ -829,10 +942,23 @@ apply_approved_ticket() {
 
 # Forward an inbound text message to the gateway and relay the response.
 handle_message() {
-    chat_id="\$1"; from_id="\$2"; text="\$3"
-    if ! is_allowed_user "\$from_id"; then
-        send_msg "\$chat_id" "Not authorized."
+    chat_id="\$1"; from_id="\$2"; text="\$3"; update_id="\$4"
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    # Approval replies are also cached before notification.  If Telegram
+    # rejects the first delivery after a successful claim, replay sends the
+    # same truthful outcome instead of reporting an unrelated expired ticket.
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    if [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ]; then
+        send_cached_reply "\$update_id" "\$chat_id"
         return
+    fi
+
+    if ! is_allowed_user "\$from_id"; then
+        if ! send_and_cache "\$update_id" "\$chat_id" "Not authorized."; then return 1; fi
+        return 0
     fi
     [ -z "\$text" ] && return
 
@@ -841,33 +967,35 @@ handle_message() {
     if [ -n "\$APPROVE_ID" ] || [ -n "\$REJECT_ID" ]; then
         SHORT="\${APPROVE_ID:-\$REJECT_ID}"
         if [ "\$from_id" != "\$APPROVAL_USER" ] || [ "\$chat_id" != "\$APPROVAL_CHAT" ]; then
-            send_msg "\$chat_id" "This approval belongs to the configured approval owner."
-            return
+            if ! send_and_cache "\$update_id" "\$chat_id" "This approval belongs to the configured approval owner."; then return 1; fi
+            return 0
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
         if [ ! -f "\$TICKET" ]; then
-            send_msg "\$chat_id" "Ticket \${SHORT} is expired or already actioned."
-            return
+            if ! send_and_cache "\$update_id" "\$chat_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
+            return 0
         fi
         SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
         if [ -n "\$APPROVE_ID" ]; then
             if ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
                 if OUT=\$(apply_approved_ticket "\$SHORT" "\$from_id" "\$chat_id"); then
-                    send_msg "\$chat_id" "✅ Approved and applied: \${SUMMARY}
+                    if ! send_and_cache "\$update_id" "\$chat_id" "✅ Approved and applied: \${SUMMARY}
 \${OUT}"
+                    then return 1; fi
                 else
-                    send_msg "\$chat_id" "⚠️ Approved, but execution failed; the claim remains for recovery.
+                    if ! send_and_cache "\$update_id" "\$chat_id" "⚠️ Approved, but execution failed; the claim remains for recovery.
 \${OUT}"
+                    then return 1; fi
                 fi
             else
-                send_msg "\$chat_id" "Approval for \${SHORT} could not be applied."
+                if ! send_and_cache "\$update_id" "\$chat_id" "Approval for \${SHORT} could not be applied."; then return 1; fi
             fi
         elif ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
-            send_msg "\$chat_id" "❌ Rejected: \${SUMMARY}"
+            if ! send_and_cache "\$update_id" "\$chat_id" "❌ Rejected: \${SUMMARY}"; then return 1; fi
         else
-            send_msg "\$chat_id" "Rejection for \${SHORT} could not be applied."
+            if ! send_and_cache "\$update_id" "\$chat_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
         fi
-        return
+        return 0
     fi
 
     # v3.1.3: correction-detection branch.
@@ -915,16 +1043,44 @@ handle_message() {
         REPLY="\$SANITIZED"
     else
         printf '%s\n' "blocked internal tool syntax in Telegram reply or Telegram agent failure (status=\$AGENT_STATUS)" >>/data/logs/telegram-broker.log
-        REPLY="I couldn't complete that request."
+        if [ "\$AGENT_STATUS" -eq 0 ]; then
+            # Recover once through the real agent loop.  This handles older or
+            # provider-specific models that print an alias instead of emitting
+            # a structured shell call, without executing model text directly.
+            RECOVERY_PROMPT="Review the previous turn for: \${text}. If a tool/action already ran, do not repeat it; summarize its result. If nothing ran and the request still needs Home Assistant, use the actual structured shell tool. Never print a bare command, Markdown tool block, or internal syntax; return only the short user-facing answer."
+            RECOVERY=\$(run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" 2>>/data/logs/telegram-broker.log)
+            RECOVERY_STATUS=\$?
+            if [ "\$RECOVERY_STATUS" -eq 0 ] && [ -n "\$RECOVERY" ] && \\
+                RECOVERED=\$(printf '%s' "\$RECOVERY" | /usr/local/bin/telegram-render 2>/dev/null); then
+                REPLY="\$RECOVERED"
+            else
+                REPLY="I couldn't complete that safely; no new action was dispatched."
+            fi
+        else
+            REPLY="I couldn't complete that request; please check Home Assistant history before retrying."
+        fi
     fi
     [ -z "\$REPLY" ] && REPLY="I couldn't complete that request."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
+    cache_reply "\$update_id" "\$REPLY" || return 1
     send_msg "\$chat_id" "\$REPLY"
 }
 
 while true; do
-    OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || echo 0)
+    if ! bootstrap_offset; then
+        printf '%s\n' 'Telegram cursor bootstrap failed; refusing to acknowledge queued updates' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
+    OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || printf '%s' invalid)
+    case "\$OFFSET" in
+        ''|*[!0-9]*)
+            printf '%s\n' 'Telegram cursor is invalid; refusing to poll' >>/data/logs/telegram-broker.log
+            sleep 5
+            continue
+            ;;
+    esac
     # Long-poll up to 25s for both message + callback_query updates.
     # We are the SOLE poller for this bot — ZC's telegram channel is disabled.
     RESP=\$(telegram_curl getUpdates -s --max-time 30 --get \\
@@ -932,57 +1088,88 @@ while true; do
         --data-urlencode "timeout=25" \\
         --data-urlencode 'allowed_updates=["message","callback_query"]' \\
         2>/dev/null)
-    OK=\$(echo "\$RESP" | jq -r '.ok // false' 2>/dev/null)
+    OK=\$(printf '%s' "\$RESP" | jq -r '.ok // false' 2>/dev/null)
     if [ "\$OK" != "true" ]; then
+        sleep 5
+        continue
+    fi
+
+    if ! printf '%s' "\$RESP" | jq -e '.result | type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' 'Telegram response had no valid result array; refusing to acknowledge it' >>/data/logs/telegram-broker.log
         sleep 5
         continue
     fi
 
     # Process the complete batch before committing its cursor.  If the
     # watcher dies while a handler is running, Telegram will redeliver the
-    # batch and root-owned approval claims make replay safe.
-    echo "\$RESP" | jq -c '.result[]?' 2>/dev/null | while read -r upd; do
+    # batch. Root-owned response caches and approval claims make replay safe.
+    BATCH_FILE=\$(mktemp /run/zeroclaw/.telegram-updates.XXXXXX) || {
+        sleep 2
+        continue
+    }
+    if ! printf '%s' "\$RESP" | jq -c '.result[]' >"\$BATCH_FILE" 2>/dev/null; then
+        rm -f "\$BATCH_FILE"
+        printf '%s\n' 'Telegram update batch could not be decoded; refusing to acknowledge it' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
+    chmod 0600 "\$BATCH_FILE"
+    BATCH_OK=true
+    while IFS= read -r upd; do
+        [ -n "\$upd" ] || continue
+        UPDATE_ID=\$(printf '%s' "\$upd" | jq -r '.update_id // empty' 2>/dev/null)
+        case "\$UPDATE_ID" in
+            ''|*[!0-9]*)
+                printf '%s\n' 'Telegram update had an invalid update_id; refusing to acknowledge batch' >>/data/logs/telegram-broker.log
+                BATCH_OK=false
+                break
+                ;;
+        esac
         # Branch on update kind. message and callback_query are mutually exclusive.
-        MSG_TEXT=\$(echo "\$upd" | jq -r '.message.text // empty')
+        MSG_TEXT=\$(printf '%s' "\$upd" | jq -r '.message.text // empty')
         if [ -n "\$MSG_TEXT" ]; then
-            M_CHAT=\$(echo "\$upd" | jq -r '.message.chat.id // empty')
-            M_FROM=\$(echo "\$upd" | jq -r '.message.from.id // empty')
-            handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT"
+            M_CHAT=\$(printf '%s' "\$upd" | jq -r '.message.chat.id // empty')
+            M_FROM=\$(printf '%s' "\$upd" | jq -r '.message.from.id // empty')
+            if ! handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" "\$UPDATE_ID"; then
+                printf '%s\n' "Telegram message update \$UPDATE_ID was not fully handled; cursor retained" >>/data/logs/telegram-broker.log
+                BATCH_OK=false
+                break
+            fi
             continue
         fi
 
-        CB_ID=\$(echo "\$upd" | jq -r '.callback_query.id // empty')
+        CB_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.id // empty')
         [ -z "\$CB_ID" ] && continue
 
-        DATA=\$(echo "\$upd"  | jq -r '.callback_query.data // empty')
-        FROM=\$(echo "\$upd"  | jq -r '.callback_query.from.id // empty')
-        FROM_NAME=\$(echo "\$upd" | jq -r '.callback_query.from.first_name // "user"')
-        CHAT_ID=\$(echo "\$upd" | jq -r '.callback_query.message.chat.id // empty')
-        MSG_ID=\$(echo "\$upd"  | jq -r '.callback_query.message.message_id // empty')
+        DATA=\$(printf '%s' "\$upd" | jq -r '.callback_query.data // empty')
+        FROM=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.id // empty')
+        FROM_NAME=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.first_name // "user"')
+        CHAT_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.chat.id // empty')
+        MSG_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.message_id // empty')
 
         if ! is_allowed_user "\$FROM"; then
-            answer_cb "\$CB_ID" "Not authorized."
+            if ! answer_cb "\$CB_ID" "Not authorized."; then BATCH_OK=false; break; fi
             continue
         fi
         if [ "\$FROM" != "\$APPROVAL_USER" ] || [ "\$CHAT_ID" != "\$APPROVAL_CHAT" ]; then
-            answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."
+            if ! answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."; then BATCH_OK=false; break; fi
             continue
         fi
         case "\$DATA" in
             zcv1:*) ;;
-            *) answer_cb "\$CB_ID" "Unknown chip."; continue ;;
+            *) if ! answer_cb "\$CB_ID" "Unknown chip."; then BATCH_OK=false; break; fi; continue ;;
         esac
-        VERB=\$(echo "\$DATA" | cut -d: -f2)
-        SHORT=\$(echo "\$DATA" | cut -d: -f3)
+        VERB=\$(printf '%s' "\$DATA" | cut -d: -f2)
+        SHORT=\$(printf '%s' "\$DATA" | cut -d: -f3)
         if ! printf '%s' "\$SHORT" | grep -Eq '^[a-f0-9]{8}$'; then
-            answer_cb "\$CB_ID" "Invalid ticket."
+            if ! answer_cb "\$CB_ID" "Invalid ticket."; then BATCH_OK=false; break; fi
             continue
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
         if [ ! -f "\$TICKET" ]; then
-            answer_cb "\$CB_ID" "Ticket expired or already actioned."
-            [ -n "\$MSG_ID" ] && edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"
+            if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
+            if [ -n "\$MSG_ID" ] && ! edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"; then BATCH_OK=false; break; fi
             continue
         fi
 
@@ -990,51 +1177,63 @@ while true; do
         case "\$VERB" in
           approve)
               if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
-                  answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."
+                  if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
               if OUT=\$(apply_approved_ticket "\$SHORT" "\$FROM" "\$CHAT_ID"); then
-                  answer_cb "\$CB_ID" "Applied."
-                  edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
+                  if ! answer_cb "\$CB_ID" "Applied."; then BATCH_OK=false; break; fi
+                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
+                  then BATCH_OK=false; break; fi
                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" \\
                       >/dev/null 2>>/data/logs/telegram-broker.log &
               else
-                  answer_cb "\$CB_ID" "Execution failed; claim retained."
-                  edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but execution failed; claim retained for recovery.
+                  if ! answer_cb "\$CB_ID" "Execution failed; claim retained."; then BATCH_OK=false; break; fi
+                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but execution failed; claim retained for recovery.
 \${OUT}"
+                  then BATCH_OK=false; break; fi
                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" \\
                       >/dev/null 2>>/data/logs/telegram-broker.log &
               fi
               ;;
           reject)
               if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
-                  answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."
+                  if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
-              answer_cb "\$CB_ID" "Rejected."
-              edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"
+              if ! answer_cb "\$CB_ID" "Rejected."; then BATCH_OK=false; break; fi
+              if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"; then BATCH_OK=false; break; fi
               ;;
           discuss)
-              answer_cb "\$CB_ID" "Tell me more."
-              send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"
+              if ! answer_cb "\$CB_ID" "Tell me more."; then BATCH_OK=false; break; fi
+              if ! send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"; then BATCH_OK=false; break; fi
               ;;
           *)
-              answer_cb "\$CB_ID" "Unknown verb: \$VERB"
+              if ! answer_cb "\$CB_ID" "Unknown verb: \$VERB"; then BATCH_OK=false; break; fi
               ;;
         esac
-    done
-    NEW_OFFSET=\$(echo "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
-    if [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ]; then
-        OFFSET_TMP="\${OFFSET_F}.tmp.\$\$"
-        if printf '%s\\n' "\$((NEW_OFFSET + 1))" > "\$OFFSET_TMP"; then
-            chmod 0600 "\$OFFSET_TMP"
-            mv -f "\$OFFSET_TMP" "\$OFFSET_F"
-        else
-            rm -f "\$OFFSET_TMP"
-            printf '%s\\n' "failed to commit Telegram update cursor: \$NEW_OFFSET" >>/data/logs/telegram-broker.log
-        fi
+    done <"\$BATCH_FILE"
+    rm -f "\$BATCH_FILE"
+    if [ "\$BATCH_OK" != "true" ]; then
+        sleep 2
+        continue
     fi
+    NEW_OFFSET=\$(printf '%s' "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    case "\$NEW_OFFSET" in
+        ''|null) ;;
+        *[!0-9]*)
+            printf '%s\\n' 'Telegram batch cursor was invalid; retaining the previous cursor' >>/data/logs/telegram-broker.log
+            sleep 2
+            continue
+            ;;
+        *)
+            if ! commit_offset "\$((NEW_OFFSET + 1))"; then
+                printf '%s\\n' "failed to commit Telegram update cursor: \$NEW_OFFSET" >>/data/logs/telegram-broker.log
+                sleep 2
+                continue
+            fi
+            ;;
+    esac
 done
 SCRIPT
 

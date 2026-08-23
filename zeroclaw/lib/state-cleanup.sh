@@ -13,9 +13,11 @@ RECEIPT_DIR="${DATA_DIR}/approval-receipts"
 MARKER_DIR="${DATA_DIR}/approved"
 CLAIM_DIR="${RECEIPT_DIR}/.claims"
 LOCK_DIR="${RECEIPT_DIR}/.locks"
+REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
 LOCK_GRACE_SECONDS=300
+REPLY_CACHE_GRACE_SECONDS=604800
 
 [ "$(id -u)" -eq 0 ] || {
     echo "state cleanup must run as root" >&2
@@ -118,5 +120,17 @@ if [ -d "$LOCK_DIR" ]; then
         [ -L "$lock" ] && continue
         old_enough "$lock" "$LOCK_GRACE_SECONDS" || continue
         rmdir "$lock" 2>/dev/null || true
+    done
+fi
+
+# A rendered Telegram reply is retained long enough to make a failed delivery
+# retry idempotent across a watcher restart.  It is not an approval record and
+# must not grow without bound; cleanup never follows a cache symlink.
+if [ -d "$REPLY_CACHE_DIR" ] && [ ! -L "$REPLY_CACHE_DIR" ]; then
+    for reply in "$REPLY_CACHE_DIR"/*.txt; do
+        [ -f "$reply" ] || [ -L "$reply" ] || continue
+        [ -L "$reply" ] && continue
+        old_enough "$reply" "$REPLY_CACHE_GRACE_SECONDS" || continue
+        rm -f "$reply"
     done
 fi

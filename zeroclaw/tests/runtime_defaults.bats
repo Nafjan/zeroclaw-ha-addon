@@ -48,9 +48,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'REPLY=\$(run_agent_turn' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F "The gateway's" "$run_file"
-    [ "$status" -eq 0 ]
-    run grep -F 'compatibility endpoint is intentionally tool-less' "$run_file"
+    run grep -F 'runs as the unprivileged planner' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -127,7 +125,9 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'chmod 0700 /run/zeroclaw' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'OFFSET_F="/run/zeroclaw/telegram-offset"' "$run_file"
+    run grep -F 'TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'REPLY_CACHE_DIR="/data/capability/telegram-replies"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh' "$run_file"
     [ "$status" -eq 0 ]
@@ -230,11 +230,59 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 @test "Telegram commits its cursor only after processing the batch" {
     run grep -F 'Process the complete batch before committing its cursor' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" "\$UPDATE_ID"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'done <"\$BATCH_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if [ "\$BATCH_OK" != "true" ]; then' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" &' "$run_file"
     [ "$status" -ne 0 ]
-    run grep -F 'OFFSET_TMP="\${OFFSET_F}.tmp.\$\$"' "$run_file"
+    run grep -F 'commit_offset "\$((NEW_OFFSET + 1))"' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'mv -f "\$OFFSET_TMP" "\$OFFSET_F"' "$run_file"
+}
+
+@test "Telegram cursor and delivery state are durable and API-validated" {
+    run grep -F 'TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "printf '%s\\n' '-1' > \"\${TELEGRAM_OFFSET_FILE}\"" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'bootstrap_offset' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram_response_ok "\$response"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'send_msg()' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram_call_ok sendMessage' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'cache_reply "\$update_id" "\$REPLY"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'send_and_cache "\$update_id" "\$chat_id"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram_curl sendMessage' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
+@test "Telegram bootstrap and cache never trust planner-controlled symlinks" {
+    run grep -F '[ ! -L "\$OFFSET_F" ] && [ -f "\$OFFSET_F" ] || exit 1' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ ! -L "\$REPLY_CACHE_DIR" ] || exit 1' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ ! -L "\$cached_file" ] && [ -f "\$cached_file" ]' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-replies' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram reply cache has bounded root-only cleanup" {
+    cleanup_file="$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    run grep -F 'REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"' "$cleanup_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'REPLY_CACHE_GRACE_SECONDS=604800' "$cleanup_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ -L "$reply" ] && continue' "$cleanup_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'rm -f "$reply"' "$cleanup_file"
     [ "$status" -eq 0 ]
 }
 
