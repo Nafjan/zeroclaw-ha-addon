@@ -1,5 +1,5 @@
 name: ZeroClaw Agent
-version: 3.1.4.0-canary.32655293658
+version: 3.1.4.0
 slug: zeroclaw
 description: AI home automation agent — read-only by default with broker-gated actions
 url: https://github.com/Nafjan/zeroclaw-ha-addon
