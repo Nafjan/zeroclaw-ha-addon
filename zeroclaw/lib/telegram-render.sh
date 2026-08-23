@@ -26,9 +26,11 @@ function is_xml_end(line) {
 }
 
 function contains_internal_command(line) {
-    # Also catch a command after a short prose prefix. The model must never
-    # be able to turn an internal helper into a Telegram-visible instruction.
-    return line ~ /(^|[[:space:]])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|ha-[a-z0-9-]+)[[:space:]]+/
+    # Catch helpers at non-identifier boundaries so shell, function-style,
+    # punctuation-delimited, and standalone JSON forms cannot cross the
+    # Telegram boundary. The model must never turn an internal helper into a
+    # Telegram-visible instruction.
+    return line ~ /(^|[^[:alnum:]_.-])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|ha-[a-z0-9-]+)([^[:alnum:]_.-]|$)/
 }
 
 BEGIN {

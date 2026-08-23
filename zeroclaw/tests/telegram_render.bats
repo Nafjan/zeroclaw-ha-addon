@@ -47,3 +47,33 @@ render_file="$BATS_TEST_DIRNAME/../lib/telegram-render.sh"
     [ "$status" -eq 2 ]
     [ -z "$output" ]
 }
+
+@test "Telegram renderer blocks function-style internal commands" {
+    set +e
+    output=$(printf '%s\n' "ha.action_guarded('scene/reload','{}')" | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
+@test "Telegram renderer blocks internal commands embedded in JSON" {
+    set +e
+    output=$(printf '%s\n' '{"name":"shell","arguments":{"command":"ha-action-guarded scene/reload {}"}}' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
+@test "Telegram renderer blocks a helper token without arguments" {
+    set +e
+    output=$(printf '%s\n' 'ha.action_guarded' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
