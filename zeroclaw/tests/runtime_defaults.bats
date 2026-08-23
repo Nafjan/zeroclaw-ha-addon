@@ -26,6 +26,16 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "temporary canary builds bind the baked runtime version explicitly" {
+    release_workflow="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    run grep -F 'runtime_version: ${{ steps.metadata.outputs.runtime_version }}' "$release_workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'runtime_version="${RUNTIME_VERSION:-$version}"' "$release_workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'BUILD_VERSION=${{ steps.metadata.outputs.runtime_version }}' "$release_workflow"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram transport is optional and starts only when configured" {
     run grep -F '[ -n "${OPENROUTER_KEY}" ]' "$run_file"
     [ "$status" -eq 0 ]
