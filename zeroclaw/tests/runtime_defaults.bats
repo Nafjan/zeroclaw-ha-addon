@@ -41,6 +41,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "cached Telegram replies are revalidated before replay" {
+    run grep -F 'sanitized_cached=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'blocked internal tool syntax in cached Telegram reply' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'replacing it with a safe status message' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram watcher fails closed on a concurrent polling conflict" {
     run grep -F 'telegram_polling_conflict' "$run_file"
     [ "$status" -eq 0 ]
