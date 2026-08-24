@@ -1213,13 +1213,13 @@ handle_message() {
     # If the previous turn produced an outcome AND the user's reply opens with
     # a correction marker, fire a synthetic learning prompt to the gateway in
     # the background. The agent will produce a one-line lesson and persist it
-    # via zc.lesson_add. We only fire when /data/.last_outcome exists, so a
+    # via zc.lesson_add. We only fire when the root-owned outcome receipt exists, so a
     # bare "no" in response to a question (no outcome stored) won't trigger.
     # v3.1.3.1: regex widened to catch "they're not on", "didn't work",
     # "still off", "isn't", "nothing happened" — common real corrections that
     # don't open with the "no/wrong" markers.
-    LAST_OUTCOME_FILE="/data/.last_outcome"
-    if [ -f "\$LAST_OUTCOME_FILE" ]; then
+    LAST_OUTCOME_FILE="/data/capability/last-outcome.json"
+    if [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
         # Lowercase + trim leading whitespace for matching only
         tlc=\$(printf '%s' "\$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')
         case "\$tlc" in
@@ -1231,7 +1231,7 @@ handle_message() {
             "nothing happened"*|"nothing changed"*|"that didn't"*|"that didnt"*|\
             "doesn't work"*|"doesnt work"*|"not working"*|"didn't work"*|"didnt work"*|\
             لا|"لا "*|"لا،"*|"لا,"*|غلط*|"ما اشتغل"*|"ماشتغل"*|"مو شغال"*|"لسه"*|"لسة"*)
-                LAST=\$(cat "\$LAST_OUTCOME_FILE" 2>/dev/null)
+                LAST=\$(jq -r '.text // empty' "\$LAST_OUTCOME_FILE" 2>/dev/null)
                 rm -f "\$LAST_OUTCOME_FILE"
                 if [ -n "\$LAST" ]; then
                     CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then use the shell tool with zc-lesson-add. Do not message the user — this is a silent learning hook."
@@ -1432,13 +1432,13 @@ while true; do
                    CALLBACK_EDIT="✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
                else
-                  if ! answer_cb "\$CB_ID" "Execution failed; claim retained."; then BATCH_OK=false; break; fi
+                  if ! answer_cb "\$CB_ID" "Outcome unconfirmed; claim retained."; then BATCH_OK=false; break; fi
                   if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                   then BATCH_OK=false; break; fi
-                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" \\
+                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome unconfirmed; claim retained: \${OUT}" \\
                        >/dev/null 2>>/data/logs/telegram-broker.log &
-                   CALLBACK_ANSWER="Execution failed; claim retained."
+                   CALLBACK_ANSWER="Outcome unconfirmed; claim retained."
                    CALLBACK_EDIT="⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                fi
@@ -1506,7 +1506,9 @@ cat > /usr/local/bin/ha-action-guarded << SCRIPT
 # Returns:
 #   0 + result    on allow
 #   2 + ticket    on confirm
-#   1 + reason    on deny
+#   1 + reason    on deny or a confirmed pre-execution failure
+#   3 + reason    when execution may have occurred but durable outcome state
+#                is incomplete; the approval claim must remain for recovery
 
 set -e
 
@@ -1542,8 +1544,13 @@ if [ "\$1" = "--apply-ticket" ]; then
     # The root broker verifies and consumes the sealed ticket transactionally.
     # Claim state is carried by root-owned state, never by an environment
     # variable that would stop at the local TCP boundary.
-    if OUT=\$(ZEROCLAW_APPROVAL_TICKET="\$UUID" /usr/local/bin/ha-action-raw "\$SVC" "\$BODY"); then
+    STATUS=0
+    OUT=\$(ZEROCLAW_APPROVAL_TICKET="\$UUID" /usr/local/bin/ha-action-raw "\$SVC" "\$BODY") || STATUS=\$?
+    if [ "\$STATUS" -eq 0 ]; then
         :
+    elif [ "\$STATUS" -eq 3 ]; then
+        echo "ERROR: service execution occurred or may have occurred, but durable outcome state is incomplete; the claim remains for recovery. Check Home Assistant history before retrying." >&2
+        exit 3
     else
         /usr/local/bin/zc-audit-write failed "\$SVC" "\$BODY" "ticket=\${UUID};broker_failed" || echo "WARNING: broker failure could not be written to the audit store" >&2
         echo "ERROR: approved action failed or its outcome audit was unavailable; the claim remains for recovery" >&2
@@ -1594,7 +1601,7 @@ case "\$KIND" in
             echo "\$OUT"
             exit 0
         fi
-        echo "ERROR: action failed or its outcome audit was unavailable; inspect broker/audit state" >&2
+        echo "ERROR: action failed before confirmation or its durable outcome state is incomplete; inspect Home Assistant history and broker/audit state" >&2
         exit 1 ;;
     deny)
         if ! /usr/local/bin/zc-audit-write deny "\$SERVICE" "\$BODY" "\$VERDICT"; then
@@ -1790,7 +1797,7 @@ cat > /usr/local/bin/zc-set-outcome << 'SCRIPT'
 # Usage: zc-set-outcome "<one-line outcome>"
 TEXT="$1"
 [ -z "$TEXT" ] && exit 0
-printf '%s\n' "$TEXT" > /data/.last_outcome
+exec /usr/local/bin/ha-capability set_outcome "$TEXT" >/dev/null
 SCRIPT
 
 # zc-lesson-add — append a one-line lesson to LESSONS.md (deduped, FIFO-capped).
@@ -2331,8 +2338,9 @@ After every turn that produced a real action (NOT a status query, greeting, or
     <tool_call>
     {"name":"shell","arguments":{"command":"zc-set-outcome '<same one-line outcome>'"}}
     </tool_call>
-The shell helper underneath is /usr/local/bin/zc-set-outcome; it writes
-/data/.last_outcome. Never emit zc.set_outcome or zc-set-outcome as plain text.
+The shell helper underneath is /usr/local/bin/zc-set-outcome; it records a
+root-owned broker receipt under /data/capability. Never emit zc.set_outcome or
+zc-set-outcome as plain text.
 
 Concrete example for a turn that just turned on a light:
   <tool_call>
@@ -2772,11 +2780,10 @@ for planner_tree in "${WS}" "${WS}/sessions" /data/pending /data/routines /data/
     find "$planner_tree" -type d -exec chmod 0700 {} \; 2>/dev/null || true
     find "$planner_tree" -type f -exec chmod 0600 {} \; 2>/dev/null || true
 done
-if [ ! -e /data/.last_outcome ]; then
-    : > /data/.last_outcome
-fi
-chown zeroclaw:zeroclaw /data/.last_outcome
-chmod 0600 /data/.last_outcome
+# Older releases stored correction state in planner-writable /data. Remove
+# only that exact legacy path; current correction state is root-owned broker
+# state under /data/capability and is never read from a planner-owned path.
+rm -f /data/.last_outcome
 if [ -L /data/logs ]; then
     rm -f /data/logs
 fi
@@ -2822,9 +2829,9 @@ if [ -f /data/config.toml ]; then
     chmod 0640 /data/config.toml
 fi
 # Preserve any legacy root-level state as root-owned, read-only-to-planner
-# data.  The explicitly writable .last_outcome is handled above.
+# data.  Correction state is broker-owned under /data/capability.
 find /data -maxdepth 1 -type f \
-    ! -name options.json ! -name config.toml ! -name .last_outcome ! -name .state-version \
+    ! -name options.json ! -name config.toml ! -name .state-version \
     -exec chown root:zeroclaw {} \; -exec chmod 0640 {} \; 2>/dev/null || true
 chown root:root /data/.state-version
 chmod 0600 /data/.state-version

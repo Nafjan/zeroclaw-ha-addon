@@ -163,7 +163,11 @@ case "$input_chars" in
 esac
 [ "$input_chars" -le "$MAX_INPUT_CHARS" ] || \
     respond 413 "Payload Too Large" '{"error":"provider input is too large"}'
-requested_input_tokens=$(( (input_chars + 3) / 4 ))
+# Provider usage can include tokenizer overhead and can diverge materially
+# from a four-bytes-per-token estimate for Unicode, code, and structured tool
+# payloads. Reserve a conservative half-byte estimate plus a fixed envelope
+# allowance so a valid response is not misclassified as a budget overrun.
+requested_input_tokens=$(( (input_chars + 1) / 2 + 256 ))
 [ "$requested_input_tokens" -le "$MAX_INPUT_TOKENS" ] || \
     respond 400 "Bad Request" '{"error":"provider input token estimate exceeds the broker limit"}'
 

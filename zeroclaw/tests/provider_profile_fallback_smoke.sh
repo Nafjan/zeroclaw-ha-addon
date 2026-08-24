@@ -148,7 +148,8 @@ start_proxy() {
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
-        PROVIDER_MAX_TOKENS=16 PROVIDER_LEDGER_FILE="$LEDGER" \
+        PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
+        PROVIDER_LEDGER_FILE="$LEDGER" \
         PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
         PROVIDER_RESERVATION_TTL_SECONDS=180 \
         /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 \
@@ -354,5 +355,46 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 grep -F '"model":"openrouter/auto"' /data/provider/auto-success.log >/dev/null
 grep -F '"id":"auto-router"' /data/provider/auto-success.log >/dev/null
 grep -F '"cost_tier":"medium"' /data/provider/auto-success.log >/dev/null
+
+# The root broker must reject an oversized input estimate before contacting an
+# upstream.  This protects both provider spend and the durable token budget.
+rm -f "$LEDGER" "$LOCK" /data/provider/input-limit.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+ROUTE_SPEC="input-limit-route|openrouter|input-limit-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
+    /data/provider/input-limit.log
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+large_content=$(head -c 5000 /dev/zero | tr '\0' x)
+large_body=$(jq -nc --arg content "$large_content" \
+    '{model:"input-limit-route",messages:[{role:"user",content:$content}]}' )
+response=$(request_proxy "$large_body")
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
+printf '%s' "$response" | grep -F 'provider input token estimate exceeds the broker limit' >/dev/null
+[ ! -f /data/provider/input-limit.log ]
+
+# The estimate must also leave room for provider tokenizer overhead.  The
+# fake upstream reports more prompt tokens than the old bytes/4 heuristic but
+# less than the conservative reservation above; a valid response must remain
+# successful and settle the prompt usage durably.
+rm -f "$LEDGER" "$LOCK" /data/provider/input-overhead.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="input-overhead-route|openrouter|input-overhead-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"input-overhead-ok"}}],"usage":{"prompt_tokens":260,"completion_tokens":1,"total_tokens":261}}' \
+    /data/provider/input-overhead.log
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+overhead_content=$(head -c 800 /dev/zero | tr '\0' x)
+overhead_body=$(jq -nc --arg content "$overhead_content" \
+    '{model:"input-overhead-route",messages:[{role:"user",content:$content}]}' )
+response=$(request_proxy "$overhead_body")
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens == 260)] | length == 1' \
+    "$LEDGER" >/dev/null
 
 echo 'provider profile fallback smoke passed'

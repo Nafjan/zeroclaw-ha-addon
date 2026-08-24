@@ -73,8 +73,13 @@ fi
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 ROLLBACK_DIR="$MIGRATIONS_DIR/rollback-${STAMP}-$$"
-mkdir "$ROLLBACK_DIR"
-mkdir -p "$ROLLBACK_DIR/workspace"
+STAGE_DIR="$MIGRATIONS_DIR/.restore-stage-${STAMP}-$$"
+[ ! -L "$MIGRATIONS_DIR" ] || {
+    echo "ERROR: migrations directory is a symlink" >&2
+    exit 1
+}
+mkdir "$ROLLBACK_DIR" "$STAGE_DIR"
+mkdir -p "$ROLLBACK_DIR/workspace" "$STAGE_DIR/workspace"
 
 CURRENT_VERSION=""
 if [ -f "$VERSION_FILE" ]; then
@@ -102,47 +107,113 @@ write_snapshot_metadata() {
     sync
 }
 
-move_live() {
-    source_path="$1"
-    target_path="$2"
-    if [ -e "$source_path" ]; then
-        mkdir -p "$(dirname "$target_path")"
-        mv "$source_path" "$target_path"
+copy_state_set() {
+    source_root="$1"
+    target_root="$2"
+    for state_file in brain.db config.toml; do
+        source_path="$source_root/$state_file"
+        target_path="$target_root/$state_file"
+        if [ -e "$source_path" ]; then
+            [ ! -L "$source_path" ] || {
+                echo "ERROR: state file is a symlink: $source_path" >&2
+                return 1
+            }
+            mkdir -p "$(dirname "$target_path")"
+            cp -a -- "$source_path" "$target_path"
+        fi
+    done
+    source_workspace="$source_root/workspace"
+    target_workspace="$target_root/workspace"
+    if [ -e "$source_workspace" ]; then
+        [ ! -L "$source_workspace" ] || {
+            echo "ERROR: workspace is a symlink: $source_workspace" >&2
+            return 1
+        }
+        mkdir -p "$target_workspace"
+        for session_path in "$source_workspace"/sessions*; do
+            [ -e "$session_path" ] || continue
+            [ ! -L "$session_path" ] || {
+                echo "ERROR: session state is a symlink: $session_path" >&2
+                return 1
+            }
+            cp -a -- "$session_path" "$target_workspace/$(basename "$session_path")"
+        done
     fi
 }
 
-restore_copy() {
-    source_path="$1"
-    target_path="$2"
-    if [ -e "$source_path" ]; then
-        mkdir -p "$(dirname "$target_path")"
-        cp -a "$source_path" "$target_path"
+remove_live_state_set() {
+    rm -f -- "$DATA_DIR/brain.db" "$DATA_DIR/config.toml"
+    workspace="$DATA_DIR/workspace"
+    if [ -e "$workspace" ]; then
+        [ ! -L "$workspace" ] || {
+            echo "ERROR: live workspace is a symlink" >&2
+            return 1
+        }
+        for session_path in "$workspace"/sessions*; do
+            [ -e "$session_path" ] || continue
+            rm -rf -- "$session_path"
+        done
     fi
 }
 
-move_live "$DATA_DIR/brain.db" "$ROLLBACK_DIR/brain.db"
-move_live "$DATA_DIR/config.toml" "$ROLLBACK_DIR/config.toml"
-for session_path in "$DATA_DIR"/workspace/sessions*; do
-    [ -e "$session_path" ] || continue
-    move_live "$session_path" "$ROLLBACK_DIR/workspace/$(basename "$session_path")"
-done
+restore_version_marker() {
+    restore_version="$1"
+    if [ -n "$restore_version" ]; then
+        MARKER_TMP="${VERSION_FILE}.tmp.$$"
+        printf '%s\n' "$restore_version" > "$MARKER_TMP"
+        chmod 0600 "$MARKER_TMP"
+        mv -f "$MARKER_TMP" "$VERSION_FILE"
+    else
+        rm -f -- "$VERSION_FILE"
+    fi
+}
 
-restore_copy "$BACKUP_DIR/brain.db" "$DATA_DIR/brain.db"
-restore_copy "$BACKUP_DIR/config.toml" "$DATA_DIR/config.toml"
-for session_path in "$BACKUP_DIR"/workspace/sessions*; do
-    [ -e "$session_path" ] || continue
-    restore_copy "$session_path" "$DATA_DIR/workspace/$(basename "$session_path")"
-done
-
-if [ -n "$OLD_VERSION" ]; then
-    MARKER_TMP="${VERSION_FILE}.tmp.$$"
-    printf '%s\n' "$OLD_VERSION" > "$MARKER_TMP"
-    chmod 0600 "$MARKER_TMP"
-    mv -f "$MARKER_TMP" "$VERSION_FILE"
-else
-    rm -f "$VERSION_FILE"
+# Build the rollback snapshot and the replacement tree completely before
+# touching live state.  A failed copy therefore leaves the running state
+# unchanged and never creates a rollback directory without a manifest.
+if ! copy_state_set "$DATA_DIR" "$ROLLBACK_DIR"; then
+    echo "ERROR: current state could not be snapshotted; refusing restore" >&2
+    exit 1
 fi
-write_snapshot_metadata "$ROLLBACK_DIR" "$ROLLBACK_OLD_VERSION" "$OLD_VERSION"
+if ! write_snapshot_metadata "$ROLLBACK_DIR" "$ROLLBACK_OLD_VERSION" "$OLD_VERSION"; then
+    echo "ERROR: rollback snapshot metadata could not be written; refusing restore" >&2
+    exit 1
+fi
+if ! copy_state_set "$BACKUP_DIR" "$STAGE_DIR"; then
+    echo "ERROR: restore staging failed; live state was not changed" >&2
+    exit 1
+fi
+
+RESTORE_MUTATION_STARTED=0
+RESTORE_SUCCEEDED=0
+recover_on_failure() {
+    status=$?
+    if [ "$RESTORE_MUTATION_STARTED" -eq 1 ] && [ "$RESTORE_SUCCEEDED" -ne 1 ] && [ "$status" -ne 0 ]; then
+        if remove_live_state_set && copy_state_set "$ROLLBACK_DIR" "$DATA_DIR" && \
+            restore_version_marker "$ROLLBACK_OLD_VERSION"; then
+            echo "ERROR: restore failed; live state was restored from rollback snapshot $ROLLBACK_DIR" >&2
+        else
+            echo "ERROR: restore failed and automatic recovery from $ROLLBACK_DIR also failed" >&2
+            status=1
+        fi
+    fi
+    rm -rf -- "$STAGE_DIR" 2>/dev/null || true
+    if [ "$RESTORE_MUTATION_STARTED" -eq 0 ] && [ "$status" -ne 0 ]; then
+        rm -rf -- "$ROLLBACK_DIR" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap recover_on_failure EXIT
+
+RESTORE_MUTATION_STARTED=1
+remove_live_state_set
+copy_state_set "$STAGE_DIR" "$DATA_DIR"
+if [ "${STATE_RESTORE_TEST_FAIL_AFTER_MUTATION:-false}" = "true" ]; then
+    echo "ERROR: test failure injected after live-state replacement" >&2
+    exit 1
+fi
+restore_version_marker "$OLD_VERSION"
+RESTORE_SUCCEEDED=1
 sync
 printf 'STATE_RESTORE backup=%s rollback_snapshot=%s restored_version=%s\n' \
     "$BACKUP_DIR" "$ROLLBACK_DIR" "${OLD_VERSION:-fresh}"

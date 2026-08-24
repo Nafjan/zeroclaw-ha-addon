@@ -6,7 +6,7 @@ PORT="${ZEROCLAW_CAPABILITY_PORT:-42618}"
 HOST="127.0.0.1"
 
 usage() {
-    echo "Usage: ha-capability {read_lights|read_climate|read_covers|read_sensors|get_state|get_logbook|get_error_log|pending_count|call_service|audit} ..." >&2
+    echo "Usage: ha-capability {read_lights|read_climate|read_covers|read_sensors|get_state|get_logbook|get_error_log|pending_count|set_outcome|call_service|audit} ..." >&2
     exit 1
 }
 
@@ -19,6 +19,12 @@ case "$OP" in
         [ "$#" -eq 0 ] || usage
         REQUEST=$(jq -nc --arg operation "$OP" '{operation:$operation}')
         OUTPUT=json_text
+        ;;
+    set_outcome)
+        [ "$#" -eq 1 ] || usage
+        [ "${#1}" -le 512 ] || { echo "outcome is too long" >&2; exit 1; }
+        REQUEST=$(jq -nc --arg operation "$OP" --arg text "$1" '{operation:$operation,text:$text}')
+        OUTPUT=json_value
         ;;
     get_state)
         [ "$#" -eq 1 ] || usage
@@ -73,7 +79,18 @@ EOF
 
 OK=$(printf '%s' "$RESPONSE" | jq -r '.ok // false' 2>/dev/null || echo false)
 if [ "$OK" != "true" ]; then
+    ERROR_CODE=$(printf '%s' "$RESPONSE" | jq -r '.error_code // "capability_error"' 2>/dev/null || echo capability_error)
     printf '%s\n' "$RESPONSE" | jq -r '.error // "capability request failed"' >&2
+    if [ "$OP" = call_service ]; then
+        case "$ERROR_CODE" in
+            execution_outcome_unknown|executed_audit_unknown|executed_approval_audit_unknown|executed_finalize_unknown)
+                # Status 3 is reserved for a service that may already have
+                # executed but whose durable outcome/approval state is
+                # incomplete. Callers must not write a false failed row.
+                exit 3
+                ;;
+        esac
+    fi
     exit 1
 fi
 

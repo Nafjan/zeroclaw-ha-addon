@@ -53,6 +53,24 @@ teardown() {
     [ -s "$rollback_dir/checksums" ]
 }
 
+@test "a failed restore repairs live state from the durable rollback snapshot" {
+    printf 'new-brain\n' > "$DATA_DIR/brain.db"
+    printf 'new-config\n' > "$DATA_DIR/config.toml"
+    printf 'new-session\n' > "$DATA_DIR/workspace/sessions-1/state.db"
+
+    run env STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
+        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$DATA_DIR" "$BACKUP_DIR"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"live state was restored from rollback snapshot"* ]]
+    [ "$(cat "$DATA_DIR/brain.db")" = new-brain ]
+    [ "$(cat "$DATA_DIR/config.toml")" = new-config ]
+    [ "$(cat "$DATA_DIR/workspace/sessions-1/state.db")" = new-session ]
+    [ "$(cat "$DATA_DIR/.state-version")" = 3.1.3.5 ]
+    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 -type d -name 'rollback-*' -print -quit)"
+    [ -s "$rollback_dir/manifest" ]
+    [ -s "$rollback_dir/checksums" ]
+}
+
 @test "a tampered snapshot is rejected before live state moves" {
     printf 'tampered\n' > "$BACKUP_DIR/brain.db"
     printf 'current\n' > "$DATA_DIR/brain.db"
