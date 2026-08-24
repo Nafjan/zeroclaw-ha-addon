@@ -60,6 +60,19 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "correction state is broker-owned and not read from planner-writable data" {
+    run grep -F 'LAST_OUTCOME_FILE="/data/capability/last-outcome.json"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'set_outcome)' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'exec /usr/local/bin/ha-capability set_outcome' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'rm -f /data/.last_outcome' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "legacy textual guarded actions use the typed broker compatibility path" {
     run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/telegram-legacy-action' "$run_file"
     [ "$status" -eq 0 ]
@@ -278,6 +291,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F '((.tools // []) | length) == 0' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'input token estimate exceeds the broker limit' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'conservative half-byte estimate' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -516,6 +533,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "post-action audit failure is not reported as a successful action" {
     run grep -F 'service executed but broker outcome audit could not be persisted' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'executed_audit_unknown' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'exit 3' "$BATS_TEST_DIRNAME/../lib/ha-capability.sh"
+    [ "$status" -eq 0 ]
     run grep -F 'the claim remains for recovery' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'the denial audit row could not be persisted' "$run_file"
@@ -531,10 +552,12 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "Telegram approval execution failures are reported as failures" {
+@test "Telegram approval execution outcomes stay truthful when confirmation is incomplete" {
     run grep -F 'the execution outcome could not be confirmed; the claim remains for recovery' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'execution outcome could not be confirmed; claim retained for recovery' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Outcome unconfirmed; claim retained.' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram sendMessage rejected approval' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
     [ "$status" -eq 0 ]

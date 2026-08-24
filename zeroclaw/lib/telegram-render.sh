@@ -30,7 +30,7 @@ function contains_internal_command(line) {
     # punctuation-delimited, and standalone JSON forms cannot cross the
     # Telegram boundary. The model must never turn an internal helper into a
     # Telegram-visible instruction.
-    return line ~ /(^|[^[:alnum:]_.-])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|ha-[a-z0-9-]+)([^[:alnum:]_.-]|$)/
+    return line ~ /(^|[^[:alnum:]_.-])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|zc-[a-z0-9-]+|ha-[a-z0-9-]+)([^[:alnum:]_.-]|$)/
 }
 
 BEGIN {

@@ -77,3 +77,13 @@ render_file="$BATS_TEST_DIRNAME/../lib/telegram-render.sh"
     [ "$status" -eq 2 ]
     [ -z "$output" ]
 }
+
+@test "Telegram renderer blocks hyphenated zc helpers" {
+    set +e
+    output=$(printf '%s\n' 'zc-undo 1' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}

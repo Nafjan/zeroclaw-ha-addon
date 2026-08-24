@@ -12,9 +12,13 @@ ACTION_LIMIT="${CAPABILITY_MAX_ACTIONS_PER_HOUR:-200}"
 ACTION_QUOTA_FILE="${CAPABILITY_QUOTA_FILE:-/data/capability/quota.json}"
 ACTION_QUOTA_LOCK="${CAPABILITY_QUOTA_LOCK:-/data/capability/.quota.lock}"
 ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
+OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
 
 json_error() {
-    jq -nc --arg error "$1" '{ok:false,error:$error}'
+    error="$1"
+    error_code="${2:-capability_error}"
+    jq -nc --arg error "$error" --arg error_code "$error_code" \
+        '{ok:false,error:$error,error_code:$error_code}'
     exit 0
 }
 
@@ -115,6 +119,28 @@ run_pending_count() {
     # writable pending files are not authoritative for execution.
     count=$(find "$TICKET_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
     json_value "$count"
+}
+
+run_set_outcome() {
+    text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || \
+        json_error "outcome text must be a string"
+    [ "${#text}" -le 512 ] || json_error "outcome text is too long"
+    [ "$(printf '%s' "$text" | tr -d '\r\n')" = "$text" ] || \
+        json_error "outcome text must be one line"
+    [ ! -L "$OUTCOME_FILE" ] || json_error "outcome store is not a regular file"
+    outcome_dir=$(dirname "$OUTCOME_FILE")
+    mkdir -p "$outcome_dir"
+    outcome_tmp="${OUTCOME_FILE}.tmp.$$"
+    jq -nc --arg text "$text" --argjson created_at "$(date -u +%s)" \
+        '{text:$text,created_at:$created_at}' > "$outcome_tmp" || {
+        rm -f "$outcome_tmp"
+        json_error "outcome store could not be prepared"
+    }
+    chown root:root "$outcome_tmp"
+    chmod 0600 "$outcome_tmp"
+    mv -f "$outcome_tmp" "$OUTCOME_FILE"
+    sync
+    json_value '{"recorded":true}'
 }
 
 audit_capability_outcome() {
@@ -342,25 +368,36 @@ run_service() {
         -H 'Content-Type: application/json' \
         "${HA_URL}/services/${service}" -d "$payload"); then
         audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;dispatch_outcome_unknown" || true
-        json_error "execution outcome could not be confirmed; claim retained for recovery"
+        json_error "execution outcome could not be confirmed; claim retained for recovery" \
+            execution_outcome_unknown
     fi
     if [ -z "$result" ]; then
         result='[]'
     fi
     if ! printf '%s' "$result" | jq -e . >/dev/null 2>&1; then
         audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;invalid_service_response" || true
-        json_error "execution outcome could not be confirmed; claim retained for recovery"
+        json_error "execution outcome could not be confirmed; claim retained for recovery" \
+            execution_outcome_unknown
     fi
     if ! audit_capability_outcome broker_allow "$service" "$payload" "source=capability_broker"; then
-        json_error "service executed but broker outcome audit could not be persisted"
+        # HA has already accepted the service call. Do not manufacture a
+        # failed outcome when the durable audit write is unavailable.
+        audit_capability_outcome outcome_unknown "$service" "$payload" \
+            "source=capability_broker;service_executed_audit_unavailable" || true
+        json_error "service executed but broker outcome audit could not be persisted; claim retained for recovery" \
+            executed_audit_unknown
     fi
     if [ -n "$approval_ticket" ]; then
         if ! audit_capability_outcome apply "$service" "$payload" "source=capability_broker;ticket=${approval_ticket}"; then
-            json_error "service executed but approval outcome audit could not be persisted; claim retained"
+            audit_capability_outcome outcome_unknown "$service" "$payload" \
+                "source=capability_broker;approval_outcome_audit_unavailable;ticket=${approval_ticket}" || true
+            json_error "service executed but approval outcome audit could not be persisted; claim retained for recovery" \
+                executed_approval_audit_unknown
         fi
         if ! ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh complete "$approval_ticket" >/dev/null 2>&1; then
             audit_capability_outcome broker_finalize_failed "$service" "$payload" "source=capability_broker;ticket=${approval_ticket}" || true
-            json_error "service executed but approval ticket could not be finalized; claim retained"
+            json_error "service executed but approval ticket could not be finalized; claim retained for recovery" \
+                executed_finalize_unknown
         fi
     fi
     json_value "$result"
@@ -420,6 +457,9 @@ case "$operation" in
         ;;
     pending_count)
         run_pending_count
+        ;;
+    set_outcome)
+        run_set_outcome
         ;;
     call_service)
         [ "${ENABLE_WRITE_ACTIONS:-false}" = "true" ] || json_error "write capability is disabled"
