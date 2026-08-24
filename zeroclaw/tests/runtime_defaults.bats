@@ -51,6 +51,17 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "legacy textual guarded actions use the typed broker compatibility path" {
+    run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/telegram-legacy-action' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-legacy-action "\$REPLY"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "services already accepted by the typed capability broker" "$BATS_TEST_DIRNAME/../lib/telegram-legacy-action.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'ha-action-guarded' "$BATS_TEST_DIRNAME/../lib/telegram-legacy-action.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram watcher fails closed on a concurrent polling conflict" {
     run grep -F 'telegram_polling_conflict' "$run_file"
     [ "$status" -eq 0 ]

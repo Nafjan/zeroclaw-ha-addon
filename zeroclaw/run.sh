@@ -815,6 +815,7 @@ install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-b
 install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capability
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
 install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render
+install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/telegram-legacy-action
 TELEGRAM_PORT=42619
     if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
@@ -1249,7 +1250,15 @@ handle_message() {
         REPLY="\$SANITIZED"
     else
         printf '%s\n' "blocked internal tool syntax in Telegram reply or Telegram agent failure (status=\$AGENT_STATUS)" >>/data/logs/telegram-broker.log
-        if [ "\$AGENT_STATUS" -eq 0 ]; then
+        LEGACY_ACTION_REPLY=""
+        # Older/non-tool-capable models sometimes return the exact guarded
+        # action spelling as plain text. Recover only that bounded form; the
+        # helper validates it and sends it through the root broker.
+        if [ "\$AGENT_STATUS" -eq 0 ] && \
+            LEGACY_ACTION_REPLY=\$(/usr/local/bin/telegram-legacy-action "\$REPLY" 2>>/data/logs/telegram-broker.log); then
+            printf '%s\n' 'recovered one-line guarded action through the typed broker' >>/data/logs/telegram-broker.log
+            REPLY="\$LEGACY_ACTION_REPLY"
+        elif [ "\$AGENT_STATUS" -eq 0 ]; then
             # Recover once through the real agent loop.  This handles older or
             # provider-specific models that print an alias instead of emitting
             # a structured shell call, without executing model text directly.
