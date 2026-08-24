@@ -414,8 +414,14 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
 }
 
-@test "the app does not request broad Supervisor API rights" {
-    run grep -E '^(hassio_api|hassio_role):' "$BATS_TEST_DIRNAME/../config.yaml"
+@test "the typed broker requests the default Supervisor API role" {
+    run grep -F 'hassio_api: true' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'hassio_role: default' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'homeassistant_api: true' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -E '^hassio_role: (admin|manager|homeassistant)$' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -ne 0 ]
 }
 
