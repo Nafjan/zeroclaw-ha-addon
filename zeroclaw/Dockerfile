@@ -10,6 +10,12 @@ ARG ZEROCLAW_SOURCE_DATE_EPOCH
 ARG ZEROCLAW_LLVM_RNG_SEED
 ARG REQUIRE_VERIFIED_ARTIFACT=false
 
+# Keep the runtime migration marker bound to the Supervisor app metadata.
+# Canary descriptors intentionally carry a suffix; using a hard-coded stable
+# version would make a canary look like the stable release and could skip a
+# required migration on the next upgrade.
+ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"
+
 LABEL \
     io.hass.version="${BUILD_VERSION}" \
     io.hass.type="app" \

@@ -12,6 +12,11 @@ init: false
 startup: application
 boot: auto
 homeassistant_api: true
+hassio_api: true
+# The typed capability broker uses the least-privileged Supervisor role.
+# Do not widen this to admin/manager/homeassistant: the broker is the only
+# component that consumes SUPERVISOR_TOKEN and still enforces typed policy.
+hassio_role: default
 options:
   # --- Provider credentials (OpenRouter required; other providers optional) ---
   openrouter_api_key: ""

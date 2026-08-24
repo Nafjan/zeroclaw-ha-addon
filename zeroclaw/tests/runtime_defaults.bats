@@ -1,6 +1,15 @@
 #!/usr/bin/env bats
 
 run_file="$BATS_TEST_DIRNAME/../run.sh"
+
+@test "runtime migration version comes from the baked Supervisor app version" {
+    run grep -F 'ADDON_VERSION="${ZEROCLAW_ADDON_VERSION:-3.1.4.0}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "invalid baked app version; refusing to start" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
 agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "runtime uses the Supervisor core API and safe gateway defaults" {
@@ -414,8 +423,14 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
 }
 
-@test "the app does not request broad Supervisor API rights" {
-    run grep -E '^(hassio_api|hassio_role):' "$BATS_TEST_DIRNAME/../config.yaml"
+@test "the typed broker requests the default Supervisor API role" {
+    run grep -F 'hassio_api: true' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'hassio_role: default' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'homeassistant_api: true' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -E '^hassio_role: (admin|manager|homeassistant)$' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -ne 0 ]
 }
 
