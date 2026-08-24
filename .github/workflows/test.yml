@@ -152,6 +152,14 @@ jobs:
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
 
+      - name: Smoke-test startup rendering with Telegram disabled
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -e SMOKE_NO_TELEGRAM=true
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
       - name: Smoke-test Telegram session ownership boundary
         run: >-
           docker run --rm --network none --platform linux/arm64
