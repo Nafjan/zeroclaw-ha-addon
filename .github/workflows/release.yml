@@ -65,7 +65,6 @@ jobs:
       id-token: write
       packages: write
       attestations: write
-      artifact-metadata: write
     outputs:
       image: ${{ steps.metadata.outputs.image }}
       candidate_tag: ${{ steps.metadata.outputs.candidate_tag }}
@@ -73,6 +72,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.metadata.outputs.version }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
+      candidate_commit: ${{ steps.metadata.outputs.candidate_commit }}
       certificate_identity: ${{ steps.metadata.outputs.certificate_identity }}
     steps:
       - name: Check out repository
@@ -94,6 +94,9 @@ jobs:
             cross|direct|direct-aa|trusted-aa) ;;
             *) echo "unsupported builder_mode=$builder_mode" >&2; exit 1 ;;
           esac
+          # RELEASE_TAG is supplied by the workflow environment above; keep
+          # the lowercase local separate from the input name for shellcheck.
+          # shellcheck disable=SC2153
           release_tag="$RELEASE_TAG"
           release_version="${release_tag#v}"
           source_repository="$(jq -r '.source_repository' zeroclaw/binary-manifest.json)"
@@ -167,6 +170,7 @@ jobs:
             printf 'image=%s\n' "$image"
             printf 'candidate_tag=%s\n' "$candidate_tag"
             printf 'canary_tag=%s\n' "$canary_tag"
+            printf 'candidate_commit=%s\n' "$GITHUB_SHA"
             printf 'certificate_identity=%s\n' "$certificate_identity"
           } >> "$GITHUB_OUTPUT"
 
@@ -1199,10 +1203,11 @@ jobs:
         run: |
           set -euo pipefail
           release_tag="${{ needs.candidate.outputs.release_tag }}"
+          candidate_commit="${{ needs.candidate.outputs.candidate_commit }}"
           git fetch --tags origin
           if git show-ref --verify --quiet "refs/tags/$release_tag"; then
             echo "release tag already exists: $release_tag" >&2
             exit 1
           fi
-          git tag -a "$release_tag" "$GITHUB_SHA" -m "ZeroClaw Home Assistant app $release_tag"
+          git tag -a "$release_tag" "$candidate_commit" -m "ZeroClaw Home Assistant app $release_tag"
           git push origin "refs/tags/$release_tag"

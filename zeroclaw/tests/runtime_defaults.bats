@@ -62,6 +62,21 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "promotion tags the verified candidate commit" {
+    promote_file="$BATS_TEST_DIRNAME/../../.github/workflows/promote-existing.yml"
+    release_file="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    run grep -F 'CANDIDATE_COMMIT: ${{ needs.verify.outputs.candidate_commit }}' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'candidate_commit="${{ needs.candidate.outputs.candidate_commit }}"' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'git tag -a "$RELEASE_TAG" "$CANDIDATE_COMMIT"' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'git tag -a "$release_tag" "$candidate_commit"' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'artifact-metadata:' "$release_file"
+    [ "$status" -ne 0 ]
+}
+
 @test "Telegram watcher fails closed on a concurrent polling conflict" {
     run grep -F 'telegram_polling_conflict' "$run_file"
     [ "$status" -eq 0 ]

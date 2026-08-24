@@ -226,6 +226,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ needs.verify.outputs.candidate_commit }}
         run: |
           set -euo pipefail
           git fetch --tags origin
