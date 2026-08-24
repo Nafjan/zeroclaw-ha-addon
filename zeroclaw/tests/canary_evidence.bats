@@ -61,3 +61,10 @@ teardown() {
     run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
     [ "$status" -ne 0 ]
 }
+
+@test "canary evidence run and commit bindings are documented" {
+    run grep -F '"candidate_run_id":' "$BATS_TEST_DIRNAME/../CANARY-EVIDENCE.md"
+    [ "$status" -eq 0 ]
+    run grep -F '"candidate_commit":' "$BATS_TEST_DIRNAME/../CANARY-EVIDENCE.md"
+    [ "$status" -eq 0 ]
+}

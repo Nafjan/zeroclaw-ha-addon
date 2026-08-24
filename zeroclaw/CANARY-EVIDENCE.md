@@ -12,6 +12,8 @@ The evidence must contain:
   "schema_version": 1,
   "candidate_digest": "sha256:<exact candidate digest>",
   "canary_tag": "<exact temporary GHCR canary tag>",
+  "candidate_run_id": 123456789,
+  "candidate_commit": "<40-character add-on commit used by the candidate build>",
   "tested_at": "2026-08-21T12:00:00Z",
   "ha_version": "2026.8.2",
   "backup": {
