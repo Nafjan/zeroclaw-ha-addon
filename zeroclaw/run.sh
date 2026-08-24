@@ -1060,7 +1060,7 @@ cache_callback_result() {
     cache_tmp="\${CALLBACK_CACHE_DIR}/.\${update_id}.tmp.\$\$"
     if ! jq -nc --arg chat "\$chat_id" --argjson message "\$message_id" \
         --arg answer "\$answer" --arg edit "\$edit" \
-        '{chat_id:$chat,message_id:$message,answer:$answer,edit:$edit}' > "\$cache_tmp"; then
+        '{chat_id:\$chat,message_id:\$message,answer:\$answer,edit:\$edit}' > "\$cache_tmp"; then
         rm -f "\$cache_tmp"
         return 1
     fi

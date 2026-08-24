@@ -76,6 +76,10 @@ fi
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     sed -i 's/"provider_key_mode": "direct_temporary"/"provider_key_mode": "broker"/' /data/options.json
 fi
+if [ "${SMOKE_NO_TELEGRAM:-false}" = "true" ]; then
+    sed -i 's/"telegram_bot_token": "telegram-secret"/"telegram_bot_token": ""/' /data/options.json
+    sed -i 's/"telegram_allowed_users": "1"/"telegram_allowed_users": ""/' /data/options.json
+fi
 
 mkdir -p /tmp/zeroclaw-test-bin /config
 mkdir -p /data/workspace
@@ -255,6 +259,7 @@ chmod +x /tmp/zeroclaw-test-bin/zeroclaw
 
 cat > /tmp/bashio-test.sh <<'FAKE_BASHIO'
 #!/bin/bash
+set -u
 bashio::config() {
     jq -r --arg key "$1" 'if .[$key] == null then "" elif (.[$key] | type) == "array" then (.[$key] | join("\n")) else (.[$key] | tostring) end' /data/options.json
 }
