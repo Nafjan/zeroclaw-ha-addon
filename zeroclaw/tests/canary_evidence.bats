@@ -3,6 +3,8 @@
 VERIFIER="$BATS_TEST_DIRNAME/../../.github/scripts/verify-canary-evidence.sh"
 DIGEST='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 TAG='3.1.4.0-canary.test'
+RUN_ID='123456789'
+COMMIT='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 setup() {
     TMP_DIR=$(mktemp -d)
@@ -10,10 +12,14 @@ setup() {
     jq -n \
         --arg digest "$DIGEST" \
         --arg tag "$TAG" \
+        --arg run_id "$RUN_ID" \
+        --arg commit "$COMMIT" \
         '{
           schema_version: 1,
           candidate_digest: $digest,
           canary_tag: $tag,
+          candidate_run_id: ($run_id | tonumber),
+          candidate_commit: $commit,
           tested_at: "2026-08-21T12:00:00Z",
           ha_version: "2026.8.2",
           backup: {app_slug:"zeroclaw",created:true,artifact_sha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",restore_verified:true},
@@ -30,7 +36,7 @@ teardown() {
 
 @test "canary evidence verifier accepts complete evidence" {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
     [ "$status" -eq 0 ]
 }
 
@@ -38,7 +44,7 @@ teardown() {
     jq '.write_canary.writes_disabled_after = false' "$EVIDENCE" > "$EVIDENCE.tmp"
     mv "$EVIDENCE.tmp" "$EVIDENCE"
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
     [ "$status" -ne 0 ]
 }
 
@@ -46,12 +52,12 @@ teardown() {
     jq 'del(.read_only.telegram_transport_isolated)' "$EVIDENCE" > "$EVIDENCE.tmp"
     mv "$EVIDENCE.tmp" "$EVIDENCE"
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
     [ "$status" -ne 0 ]
 }
 
 @test "canary evidence verifier rejects a digest mismatch" {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
     [ "$status" -ne 0 ]
 }

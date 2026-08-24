@@ -65,7 +65,7 @@ case "$OP" in
         ;;
 esac
 
-RESPONSE=$(/bin/busybox nc -w 10 "$HOST" "$PORT" <<EOF
+RESPONSE=$(/bin/busybox nc -w 40 "$HOST" "$PORT" <<EOF
 $REQUEST
 EOF
 ) || { echo "capability broker unavailable" >&2; exit 1; }

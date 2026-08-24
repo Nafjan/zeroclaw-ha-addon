@@ -66,9 +66,7 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
         '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
         > "/data/approval-receipts/tickets/${APPLY_SHORT}.json"
     sha256sum "/data/approval-receipts/tickets/${APPLY_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${APPLY_SHORT}.sha256"
-    jq -nc --arg ticket "$APPLY_SHORT" \
-        '{ticket:$ticket,actor_user_id:"42",chat_id:"42",approved_at:now}' \
-        > "/data/approved/${APPLY_SHORT}.marker"
+    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 >/dev/null
 
     cat > /tmp/approval-fake-ha <<'FAKE_HA'
 #!/bin/sh

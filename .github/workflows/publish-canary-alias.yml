@@ -45,9 +45,16 @@ jobs:
           set -euo pipefail
           printf '%s' "$SOURCE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
           printf '%s' "$TARGET_TAG" | grep -Eq '^3\.1\.4\.0-canary\.[0-9]+$'
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${TARGET_TAG}" \
-            "${IMAGE}@${SOURCE_DIGEST}"
+          if existing_digest="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+            test "$existing_digest" = "$SOURCE_DIGEST" || {
+              echo "refusing to retarget existing canary tag ${TARGET_TAG}" >&2
+              exit 1
+            }
+          else
+            docker buildx imagetools create \
+              --tag "${IMAGE}:${TARGET_TAG}" \
+              "${IMAGE}@${SOURCE_DIGEST}"
+          fi
           resolved="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}')"
           test "${resolved}" = "${SOURCE_DIGEST}"
           printf 'canary_tag=%s:%s\ncanary_digest=%s\n' "${IMAGE}" "${TARGET_TAG}" "${resolved}"

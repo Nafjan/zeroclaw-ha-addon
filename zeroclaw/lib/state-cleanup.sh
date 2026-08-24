@@ -14,10 +14,13 @@ MARKER_DIR="${DATA_DIR}/approved"
 CLAIM_DIR="${RECEIPT_DIR}/.claims"
 LOCK_DIR="${RECEIPT_DIR}/.locks"
 REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
+CALLBACK_CACHE_DIR="${DATA_DIR}/capability/telegram-callbacks"
+ACTION_ADMISSION_DIR="${DATA_DIR}/capability/action-admissions"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
 LOCK_GRACE_SECONDS=300
 REPLY_CACHE_GRACE_SECONDS=604800
+PENDING_APPROVAL_GRACE_SECONDS=300
 
 [ "$(id -u)" -eq 0 ] || {
     echo "state cleanup must run as root" >&2
@@ -112,6 +115,23 @@ if [ -d "$CLAIM_DIR" ]; then
     done
 fi
 
+# Approval uses a two-phase marker: approval_pending is deliberately not
+# claimable.  Reclaim only an old pending marker after taking the same ticket
+# lock used by the transition helper so a killed approval can be retried.
+if [ -d "$MARKER_DIR" ]; then
+    for marker in "$MARKER_DIR"/*.marker; do
+        [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+        short=$(basename "$marker" .marker)
+        valid_short "$short" || continue
+        jq -e '.state == "approval_pending"' "$marker" >/dev/null 2>&1 || continue
+        old_enough "$marker" "$PENDING_APPROVAL_GRACE_SECONDS" || continue
+        lock="${LOCK_DIR}/approval-${short}.lock"
+        mkdir "$lock" 2>/dev/null || continue
+        rm -f "$marker"
+        rmdir "$lock" 2>/dev/null || true
+    done
+fi
+
 # A killed transition can leave an empty lock directory behind.  Only clear
 # locks older than the bounded transition timeout; active locks are retained.
 if [ -d "$LOCK_DIR" ]; then
@@ -132,5 +152,26 @@ if [ -d "$REPLY_CACHE_DIR" ] && [ ! -L "$REPLY_CACHE_DIR" ]; then
         [ -L "$reply" ] && continue
         old_enough "$reply" "$REPLY_CACHE_GRACE_SECONDS" || continue
         rm -f "$reply"
+    done
+fi
+
+if [ -d "$CALLBACK_CACHE_DIR" ] && [ ! -L "$CALLBACK_CACHE_DIR" ]; then
+    for callback in "$CALLBACK_CACHE_DIR"/*.json; do
+        [ -f "$callback" ] || [ -L "$callback" ] || continue
+        [ -L "$callback" ] && continue
+        old_enough "$callback" "$REPLY_CACHE_GRACE_SECONDS" || continue
+        rm -f "$callback"
+    done
+fi
+
+# Completed action admissions are the durable hourly quota record for
+# Telegram-approved writes.  Keep them through the retention horizon so a
+# restart cannot reset the budget, and never follow a symlink.
+if [ -d "$ACTION_ADMISSION_DIR" ] && [ ! -L "$ACTION_ADMISSION_DIR" ]; then
+    for admission in "$ACTION_ADMISSION_DIR"/*.json; do
+        [ -f "$admission" ] || [ -L "$admission" ] || continue
+        [ -L "$admission" ] && continue
+        old_enough "$admission" "$REPLY_CACHE_GRACE_SECONDS" || continue
+        rm -f "$admission"
     done
 fi

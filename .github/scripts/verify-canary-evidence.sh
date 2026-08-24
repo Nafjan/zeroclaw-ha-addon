@@ -4,7 +4,9 @@ set -euo pipefail
 EVIDENCE_FILE="${1:?evidence file is required}"
 EXPECTED_DIGEST="${2:?candidate digest is required}"
 EXPECTED_TAG="${3:?canary tag is required}"
-EXPECTED_SHA256="${4:?evidence SHA256 is required}"
+EXPECTED_RUN_ID="${4:?candidate workflow run id is required}"
+EXPECTED_COMMIT="${5:?candidate commit is required}"
+EXPECTED_SHA256="${6:?evidence SHA256 is required}"
 
 [ -s "$EVIDENCE_FILE" ] || {
     echo "canary evidence file is missing or empty" >&2
@@ -26,12 +28,25 @@ printf '%s' "$EXPECTED_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
     exit 1
 }
 
-jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" '
+printf '%s' "$EXPECTED_RUN_ID" | grep -Eq '^[0-9]+$' || {
+    echo "candidate workflow run id has an invalid format" >&2
+    exit 1
+}
+
+printf '%s' "$EXPECTED_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || {
+    echo "candidate commit has an invalid format" >&2
+    exit 1
+}
+
+jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" \
+  --arg run_id "$EXPECTED_RUN_ID" --arg commit "$EXPECTED_COMMIT" '
   def hash256: if type == "string" then test("^[0-9a-f]{64}$") else false end;
   def nonempty_text: if type == "string" then (length > 0 and length <= 256) else false end;
   (.schema_version == 1)
   and (.candidate_digest == $digest)
   and (.canary_tag == $tag)
+  and ((.candidate_run_id | tostring) == $run_id)
+  and (.candidate_commit == $commit)
   and (.tested_at | if type == "string" then test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") else false end)
   and (.ha_version | nonempty_text)
   and (.backup.app_slug == "zeroclaw")

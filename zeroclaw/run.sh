@@ -64,6 +64,7 @@ MAX_TOOL_ITER="$(bashio::config 'max_tool_iterations')"
 MAX_HISTORY_MSGS="$(bashio::config 'max_history_messages')"
 MAX_CONTEXT_TOKENS="$(bashio::config 'max_context_tokens')"
 PROVIDER_MAX_TOKENS="$(bashio::config 'provider_max_tokens')"
+PROVIDER_MAX_INPUT_TOKENS="$(bashio::config 'provider_max_input_tokens')"
 RESPONSE_CACHE_TTL="$(bashio::config 'response_cache_ttl_minutes')"
 CONV_RETENTION_DAYS="$(bashio::config 'conversation_retention_days')"
 
@@ -130,6 +131,7 @@ POLICY_REQUIRE_APPROVAL=true
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
+PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}"
 PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR="${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR:-${PROVIDER_MAX_REQUESTS_HOUR}}"
 PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET="${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET:-${PROVIDER_DAILY_TOKEN_BUDGET}}"
 PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR:-60}"
@@ -173,6 +175,13 @@ case "${PROVIDER_MAX_TOKENS}" in
 esac
 [ "${PROVIDER_MAX_TOKENS}" -ge 512 ] && [ "${PROVIDER_MAX_TOKENS}" -le 8192 ] || {
     bashio::log.fatal "provider_max_tokens is outside the safe range; refusing to start"
+    exit 1
+}
+case "${PROVIDER_MAX_INPUT_TOKENS}" in
+    ''|*[!0-9]*) bashio::log.fatal "provider_max_input_tokens is invalid; refusing to start"; exit 1 ;;
+esac
+[ "${PROVIDER_MAX_INPUT_TOKENS}" -ge 1024 ] && [ "${PROVIDER_MAX_INPUT_TOKENS}" -le 128000 ] || {
+    bashio::log.fatal "provider_max_input_tokens is outside the safe range; refusing to start"
     exit 1
 }
 
@@ -424,7 +433,14 @@ for entry in /data/* /data/.[!.]* /data/..?*; do
         exit 1
     fi
 done
-mkdir -p "${WS}/skills/ha" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets
+if [ -L "${WS}/sessions" ] ||
+    [ -e "${WS}/sessions" ] && [ ! -d "${WS}/sessions" ]; then
+    bashio::log.fatal "Telegram session directory is not a regular directory"
+    exit 1
+fi
+mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets
+chown zeroclaw:zeroclaw "${WS}/sessions"
+chmod 0700 "${WS}/sessions"
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
 # listener opens a log path, then keep the directory unreadable to the planner.
 find /data/logs -type l -exec rm -f {} \; 2>/dev/null || true
@@ -436,8 +452,17 @@ chmod 0700 /data/provider
 chown -R root:root /data/capability
 chmod 0700 /data/capability
 mkdir -p /data/capability/telegram-replies
+mkdir -p /data/capability/telegram-session-locks
+mkdir -p /data/capability/action-admissions
+mkdir -p /data/capability/telegram-callbacks
 chown -R root:root /data/capability/telegram-replies
 chmod 0700 /data/capability/telegram-replies
+chown root:root /data/capability/telegram-session-locks
+chmod 0700 /data/capability/telegram-session-locks
+chown root:root /data/capability/action-admissions
+chmod 0700 /data/capability/action-admissions
+chown root:root /data/capability/telegram-callbacks
+chmod 0700 /data/capability/telegram-callbacks
 
 # Do not let a planner-controlled symlink hide or redirect a root-owned state
 # file.  Workspace/pending/routines/tools are the only intentionally
@@ -574,21 +599,31 @@ ${COMPLEX_MODEL}|ark|${ARK_PRO_MODEL}|paid"
         if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
         fi
         if [ -n "${OPENROUTER_FREE_ROUTER_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free"
         fi
         if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ] && [ -n "${NVIDIA_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
         fi
         if [ "${ARK_FALLBACK_ENABLED}" = "true" ] && [ -n "${ARK_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|ark|${ARK_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
         fi
         export PROVIDER_FALLBACK_ENABLED PROVIDER_FREE_FALLBACK_ENABLED
-        export PROVIDER_MAX_TOKENS
+        export PROVIDER_MAX_TOKENS PROVIDER_MAX_INPUT_TOKENS
+        export PROVIDER_MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_HOUR}"
+        export PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET}"
         # Reuse the legacy quota path so the broker can atomically migrate the
         # previous hourly/day counters into the durable reservation ledger.
         export PROVIDER_LEDGER_FILE="/data/provider/quota.json"
@@ -756,12 +791,32 @@ TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
 printf '%s' "${TELEGRAM_TOKEN}" > "${TELEGRAM_TOKEN_FILE}"
 chown root:root "${TELEGRAM_TOKEN_FILE}"
 chmod 0600 "${TELEGRAM_TOKEN_FILE}"
+TELEGRAM_CONFLICT_FILE="/data/capability/telegram-conflict"
+TELEGRAM_CONFLICT_TOKEN_FILE="/data/capability/telegram-conflict.token"
+if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    TELEGRAM_TOKEN_HASH=$(sha256sum "${TELEGRAM_TOKEN_FILE}" | cut -d' ' -f1)
+    if [ -e "${TELEGRAM_CONFLICT_FILE}" ] || [ -L "${TELEGRAM_CONFLICT_FILE}" ]; then
+        if [ -L "${TELEGRAM_CONFLICT_FILE}" ] || [ ! -f "${TELEGRAM_CONFLICT_FILE}" ] ||
+            [ ! -f "${TELEGRAM_CONFLICT_TOKEN_FILE}" ]; then
+            bashio::log.fatal "Telegram conflict state is malformed; refusing to start"
+            exit 1
+        fi
+        previous_conflict_token=$(cat "${TELEGRAM_CONFLICT_TOKEN_FILE}")
+        if [ "$previous_conflict_token" = "$TELEGRAM_TOKEN_HASH" ]; then
+            bashio::log.fatal "Telegram polling conflict is latched; stop the other poller and remove ${TELEGRAM_CONFLICT_FILE} before restarting"
+            exit 1
+        fi
+        rm -f "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+    else
+        rm -f "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+    fi
+fi
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-broker-handler
 install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capability
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
 install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render
 TELEGRAM_PORT=42619
-if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
@@ -820,18 +875,26 @@ unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
 OFFSET_F="${TELEGRAM_OFFSET_FILE}"
 REPLY_CACHE_DIR="/data/capability/telegram-replies"
+CALLBACK_CACHE_DIR="/data/capability/telegram-callbacks"
 USERS_F="${TG_USERS_FILE}"
 GW="${GW}"
 AGENT_BIN="/usr/local/bin/zeroclaw"
 AGENT_CONFIG_DIR="${CONFIG_DIR}"
 AGENT_WORKSPACE="${WS}"
+AGENT_SESSION_LOCK_DIR="/data/capability/telegram-session-locks"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
 RECOVERY_MODEL="${COMPLEX_MODEL}"
 [ -n "\$TOKEN" ] || exit 1
+. /opt/zeroclaw/lib/telegram-session.sh
+. /opt/zeroclaw/lib/telegram-agent-turn.sh
 [ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
 if [ ! -d "\$REPLY_CACHE_DIR" ]; then
     mkdir -m 0700 "\$REPLY_CACHE_DIR" 2>/dev/null || exit 1
+fi
+[ ! -L "\$CALLBACK_CACHE_DIR" ] || exit 1
+if [ ! -d "\$CALLBACK_CACHE_DIR" ]; then
+    mkdir -m 0700 "\$CALLBACK_CACHE_DIR" 2>/dev/null || exit 1
 fi
 [ ! -L "\$OFFSET_F" ] && [ -f "\$OFFSET_F" ] || exit 1
 
@@ -870,6 +933,7 @@ commit_offset() {
         rm -f "\$offset_tmp"
         return 1
     fi
+    sync
 }
 
 bootstrap_offset() {
@@ -887,7 +951,7 @@ bootstrap_offset() {
     if ! telegram_response_ok "\$bootstrap_response"; then
         if telegram_polling_conflict "\$bootstrap_response"; then
             printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
-            exit 1
+            exit 42
         fi
         return 1
     fi
@@ -909,7 +973,7 @@ telegram_curl() {
     config_file=\$(mktemp /run/zeroclaw/.telegram-curl.XXXXXX) || return 1
     chmod 0600 "\$config_file"
     printf 'url = "https://api.telegram.org/bot%s/%s"\n' "\$TOKEN" "\$method" > "\$config_file"
-    curl --config "\$config_file" "\$@"
+    curl --connect-timeout 5 --max-time 35 --config "\$config_file" "\$@"
     rc=\$?
     rm -f "\$config_file"
     return "\$rc"
@@ -959,6 +1023,7 @@ cache_reply() {
     fi
     chmod 0600 "\$cache_tmp"
     mv -f "\$cache_tmp" "\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    sync
 }
 
 send_and_cache() {
@@ -975,28 +1040,56 @@ send_cached_reply() {
     cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
     [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
     cached_reply=\$(cat "\$cached_file") || return 1
+    if sanitized_cached=\$(printf '%s' "\$cached_reply" | /usr/local/bin/telegram-render 2>/dev/null); then
+        cached_reply="\$sanitized_cached"
+    else
+        printf '%s\n' 'blocked internal tool syntax in cached Telegram reply; replacing it with a safe status message' >>/data/logs/telegram-broker.log
+        cached_reply="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
+        cache_reply "\$update_id" "\$cached_reply" || true
+    fi
     send_msg "\$chat_id" "\$cached_reply"
 }
 
-# Run one Telegram turn through ZeroClaw's full agent loop. The agent process
-# runs as the unprivileged planner, while the typed HA/Telegram/provider
-# brokers retain their root-owned credentials and policy boundaries.
-run_agent_turn() {
-    chat_id="\$1"; prompt="\$2"; retry_model="\${3:-}"
-    session_file="\${AGENT_WORKSPACE}/sessions/telegram_\${chat_id}.json"
-    mkdir -p "\$(dirname "\$session_file")" 2>/dev/null || true
-    if [ -n "\$retry_model" ]; then
-        su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
-            --config-dir "\$AGENT_CONFIG_DIR" agent \\
-            --model "\$retry_model" \\
-            --message "\$prompt" \\
-            --session-state-file "\$session_file"
-    else
-        su-exec zeroclaw:zeroclaw timeout 75 "\$AGENT_BIN" \\
-            --config-dir "\$AGENT_CONFIG_DIR" agent \\
-            --message "\$prompt" \\
-            --session-state-file "\$session_file"
+cache_callback_result() {
+    update_id="\$1"; chat_id="\$2"; message_id="\$3"; answer="\$4"; edit="\$5"
+    case "\$update_id:\$message_id" in
+        *[!0-9:]*|:*) return 1 ;;
+    esac
+    [ ! -L "\$CALLBACK_CACHE_DIR" ] && [ -d "\$CALLBACK_CACHE_DIR" ] || return 1
+    cache_tmp="\${CALLBACK_CACHE_DIR}/.\${update_id}.tmp.\$\$"
+    if ! jq -nc --arg chat "\$chat_id" --argjson message "\$message_id" \
+        --arg answer "\$answer" --arg edit "\$edit" \
+        '{chat_id:$chat,message_id:$message,answer:$answer,edit:$edit}' > "\$cache_tmp"; then
+        rm -f "\$cache_tmp"
+        return 1
     fi
+    chmod 0600 "\$cache_tmp"
+    mv -f "\$cache_tmp" "\${CALLBACK_CACHE_DIR}/\${update_id}.json"
+    sync
+}
+
+replay_callback_result() {
+    update_id="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    cached_file="\${CALLBACK_CACHE_DIR}/\${update_id}.json"
+    [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
+    cached_chat=\$(jq -r '.chat_id // empty' "\$cached_file" 2>/dev/null) || return 1
+    cached_message=\$(jq -r '.message_id // empty' "\$cached_file" 2>/dev/null) || return 1
+    [ "\$cached_chat" = "\$chat_id" ] && [ "\$cached_message" = "\$message_id" ] || return 1
+    cached_answer=\$(jq -r '.answer // empty' "\$cached_file" 2>/dev/null) || return 1
+    cached_edit=\$(jq -r '.edit // empty' "\$cached_file" 2>/dev/null) || return 1
+    answer_cb "\$cb_id" "\$cached_answer" || return 1
+    [ -z "\$cached_edit" ] || edit_msg "\$chat_id" "\$message_id" "\$cached_edit"
+}
+
+approval_marker_ready() {
+    short="\$1"
+    marker="/data/approved/\${short}.marker"
+    [ -f "\$marker" ] && [ ! -L "\$marker" ] || return 1
+    jq -e '.state == "approved_audited"' "\$marker" >/dev/null 2>&1
+}
+
+run_agent_turn() {
+    run_telegram_agent_turn "\$@"
 }
 
 is_allowed_user() {
@@ -1086,13 +1179,17 @@ handle_message() {
         fi
         SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
         if [ -n "\$APPROVE_ID" ]; then
-            if ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
+            # A watcher restart can occur after the durable approved_audited
+            # marker but before HA execution. Resume that approval instead of
+            # treating the redelivery as a duplicate and abandoning it.
+            if approval_marker_ready "\$SHORT" || \
+                ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
                 if OUT=\$(apply_approved_ticket "\$SHORT" "\$from_id" "\$chat_id"); then
                     if ! send_and_cache "\$update_id" "\$chat_id" "✅ Approved and applied: \${SUMMARY}
 \${OUT}"
                     then return 1; fi
                 else
-                    if ! send_and_cache "\$update_id" "\$chat_id" "⚠️ Approved, but execution failed; the claim remains for recovery.
+                    if ! send_and_cache "\$update_id" "\$chat_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                     then return 1; fi
                 fi
@@ -1205,7 +1302,7 @@ while true; do
         2>/dev/null)
     if telegram_polling_conflict "\$RESP"; then
         printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
-        exit 1
+        exit 42
     fi
     OK=\$(printf '%s' "\$RESP" | jq -r '.ok // false' 2>/dev/null)
     if [ "\$OK" != "true" ]; then
@@ -1280,6 +1377,9 @@ while true; do
             if ! answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."; then BATCH_OK=false; break; fi
             continue
         fi
+        if replay_callback_result "\$UPDATE_ID" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+            continue
+        fi
         case "\$DATA" in
             zcv1:*) ;;
             *) if ! answer_cb "\$CB_ID" "Unknown chip."; then BATCH_OK=false; break; fi; continue ;;
@@ -1299,9 +1399,12 @@ while true; do
         fi
 
         SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        CALLBACK_ANSWER=""
+        CALLBACK_EDIT=""
         case "\$VERB" in
           approve)
-              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
+              if ! approval_marker_ready "\$SHORT" && \
+                  ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
@@ -1310,16 +1413,22 @@ while true; do
                   if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
                   then BATCH_OK=false; break; fi
-                  run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" \\
-                      >/dev/null 2>>/data/logs/telegram-broker.log &
-              else
+                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" \\
+                       >/dev/null 2>>/data/logs/telegram-broker.log &
+                   CALLBACK_ANSWER="Applied."
+                   CALLBACK_EDIT="✅ Approved by \${FROM_NAME}: \${SUMMARY}
+\${OUT}"
+               else
                   if ! answer_cb "\$CB_ID" "Execution failed; claim retained."; then BATCH_OK=false; break; fi
-                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but execution failed; claim retained for recovery.
+                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                   then BATCH_OK=false; break; fi
-                  run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" \\
-                      >/dev/null 2>>/data/logs/telegram-broker.log &
-              fi
+                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" \\
+                       >/dev/null 2>>/data/logs/telegram-broker.log &
+                   CALLBACK_ANSWER="Execution failed; claim retained."
+                   CALLBACK_EDIT="⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
+\${OUT}"
+               fi
               ;;
           reject)
               if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
@@ -1327,16 +1436,24 @@ while true; do
                   continue
               fi
               if ! answer_cb "\$CB_ID" "Rejected."; then BATCH_OK=false; break; fi
-              if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"; then BATCH_OK=false; break; fi
-              ;;
+               if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Rejected."
+               CALLBACK_EDIT="❌ Rejected by \${FROM_NAME}: \${SUMMARY}"
+               ;;
           discuss)
               if ! answer_cb "\$CB_ID" "Tell me more."; then BATCH_OK=false; break; fi
-              if ! send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"; then BATCH_OK=false; break; fi
-              ;;
+               if ! send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Tell me more."
+               ;;
           *)
-              if ! answer_cb "\$CB_ID" "Unknown verb: \$VERB"; then BATCH_OK=false; break; fi
-              ;;
+               if ! answer_cb "\$CB_ID" "Unknown verb: \$VERB"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Unknown verb: \$VERB"
+               ;;
         esac
+        if [ -n "\$CALLBACK_ANSWER" ] && ! cache_callback_result "\$UPDATE_ID" "\$CHAT_ID" "\$MSG_ID" "\$CALLBACK_ANSWER" "\$CALLBACK_EDIT"; then
+            BATCH_OK=false
+            break
+        fi
     done <"\$BATCH_FILE"
     rm -f "\$BATCH_FILE"
     if [ "\$BATCH_OK" != "true" ]; then
@@ -2002,7 +2119,7 @@ base_url = "${PROVIDER_BASE_URL}"
 api_path = "/chat/completions"
 model = "${DEFAULT_MODEL}"
 temperature = 0.2
-timeout_secs = 20
+timeout_secs = 80
 wire_api = "chat_completions"
 max_tokens = ${PROVIDER_MAX_TOKENS}
 
@@ -2018,7 +2135,7 @@ model = "${COMPLEX_MODEL}"
 
 [channels]
 cli = true
-message_timeout_secs = 60
+message_timeout_secs = 150
 ack_reactions = true
 session_persistence = true
 session_backend = "sqlite"
@@ -2574,7 +2691,16 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
             /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
                 bashio::log.info "[tg-cb] $line"
             done
-            bashio::log.warning "tg-callback-watcher exited; restarting in 5s"
+            watcher_status=${PIPESTATUS[0]}
+            if [ "$watcher_status" -eq 42 ]; then
+                printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) Telegram polling conflict" > "${TELEGRAM_CONFLICT_FILE}"
+                printf '%s\n' "${TELEGRAM_TOKEN_HASH}" > "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                chown root:root "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                chmod 0600 "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                bashio::log.fatal "Telegram polling conflict; watcher is latched and will not restart"
+                exit 1
+            fi
+            bashio::log.warning "tg-callback-watcher exited (status ${watcher_status}); restarting in 5s"
             sleep 5
         done
     ) &
@@ -2627,7 +2753,7 @@ chmod 1770 /data
 # every restore service and records the real HA outcome; keeping the directory
 # planner-writable makes the advertised undo tool functional without granting
 # the planner access to trusted audit or approval state.
-for planner_tree in "${WS}" /data/pending /data/routines /data/tools /data/undo; do
+for planner_tree in "${WS}" "${WS}/sessions" /data/pending /data/routines /data/tools /data/undo; do
     mkdir -p "$planner_tree"
     chown -R zeroclaw:zeroclaw "$planner_tree"
     find "$planner_tree" -type d -exec chmod 0700 {} \; 2>/dev/null || true

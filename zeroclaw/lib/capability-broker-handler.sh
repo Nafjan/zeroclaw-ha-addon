@@ -11,6 +11,7 @@ TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 ACTION_LIMIT="${CAPABILITY_MAX_ACTIONS_PER_HOUR:-200}"
 ACTION_QUOTA_FILE="${CAPABILITY_QUOTA_FILE:-/data/capability/quota.json}"
 ACTION_QUOTA_LOCK="${CAPABILITY_QUOTA_LOCK:-/data/capability/.quota.lock}"
+ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -100,7 +101,9 @@ run_logbook() {
         fi
     else
         if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
-            --header "@${HA_AUTH_FILE}" "${HA_URL}/logbook/${now}"); then
+            --header "@${HA_AUTH_FILE}" -G \
+            --data-urlencode "end_time=${now}" \
+            "${HA_URL}/logbook/${ago}"); then
             json_error "Home Assistant logbook request failed"
         fi
     fi
@@ -170,7 +173,8 @@ verify_approval_context() {
     payload="$3"
     printf '%s' "$ticket" | grep -Eq '^[a-f0-9]{8}$' || json_error "approval ticket id is invalid"
     ticket_file="${TICKET_DIR}/${ticket}.json"
-    [ -f "$ticket_file" ] || json_error "approval ticket is not valid, sealed, or actor-bound"
+    [ -f "$ticket_file" ] && [ ! -L "$ticket_file" ] || \
+        json_error "approval ticket is not valid, sealed, or actor-bound"
     ticket_service=$(jq -er '.service | select(type == "string")' "$ticket_file" 2>/dev/null) || \
         json_error "approval ticket is not valid, sealed, or actor-bound"
     ticket_payload=$(jq -ce '.payload | select(type == "object")' "$ticket_file" 2>/dev/null) || \
@@ -193,12 +197,20 @@ verify_approval_context() {
         esac
     fi
 
-    # Claim is the broker-side consume operation.  The planner cannot reserve
-    # a ticket in a separate process and then smuggle a claimed flag across the
-    # TCP boundary; the root broker verifies the sealed canonical payload and
-    # atomically claims it before any HA write.
-    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$ticket" >/dev/null 2>&1 || \
-        json_error "approval ticket is not valid, sealed, actor-bound, or already claimed"
+}
+
+claim_approval_context() {
+    ticket="$1"
+    # Approval claim and action admission share one fixed lock order inside the
+    # root transition helper (approval lock, then quota lock). An unapproved or
+    # replayed ticket therefore cannot burn the action budget.
+    ZEROCLAW_APPROVAL_INTERNAL=1 \
+        ZEROCLAW_ACTION_QUOTA_FILE="$ACTION_QUOTA_FILE" \
+        ZEROCLAW_ACTION_QUOTA_LOCK="$ACTION_QUOTA_LOCK" \
+        ZEROCLAW_ACTION_ADMISSION_DIR="$ACTION_ADMISSION_DIR" \
+        CAPABILITY_MAX_ACTIONS_PER_HOUR="$ACTION_LIMIT" \
+        /opt/zeroclaw/lib/approval-transition.sh claim_admit "$ticket" >/dev/null 2>&1 || \
+        json_error "approval ticket is not valid, sealed, actor-bound, admitted, or already claimed"
 }
 
 acquire_action_quota_lock() {
@@ -286,8 +298,8 @@ authorize_service() {
             if [ -n "$approval_ticket" ]; then
                 printf '%s' "$approval_ticket" | grep -Eq '^[a-f0-9]{8}$' || \
                     json_error "approval ticket id is invalid"
-                reserve_action_quota
                 verify_approval_context "$approval_ticket" "$service" "$payload"
+                claim_approval_context "$approval_ticket"
             fi
             audit_capability_outcome intent "$service" "$payload" "source=capability_broker;${verdict}" || \
                 json_error "audit store unavailable; action not attempted"
@@ -301,8 +313,8 @@ authorize_service() {
             fi
             printf '%s' "$approval_ticket" | grep -Eq '^[a-f0-9]{8}$' || \
                 json_error "approval ticket id is invalid"
-            reserve_action_quota
             verify_approval_context "$approval_ticket" "$service" "$payload"
+            claim_approval_context "$approval_ticket"
             audit_capability_outcome intent "$service" "$payload" "source=capability_broker;ticket=${approval_ticket};${verdict}" || \
                 json_error "audit store unavailable; action not attempted"
             ;;
@@ -329,14 +341,15 @@ run_service() {
         --header "@${HA_AUTH_FILE}" \
         -H 'Content-Type: application/json' \
         "${HA_URL}/services/${service}" -d "$payload"); then
-        audit_capability_outcome broker_failed "$service" "$payload" "source=capability_broker" || true
-        json_error "Home Assistant service request failed"
+        audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;dispatch_outcome_unknown" || true
+        json_error "execution outcome could not be confirmed; claim retained for recovery"
     fi
     if [ -z "$result" ]; then
         result='[]'
     fi
     if ! printf '%s' "$result" | jq -e . >/dev/null 2>&1; then
-        json_error "Home Assistant returned invalid service JSON"
+        audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;invalid_service_response" || true
+        json_error "execution outcome could not be confirmed; claim retained for recovery"
     fi
     if ! audit_capability_outcome broker_allow "$service" "$payload" "source=capability_broker"; then
         json_error "service executed but broker outcome audit could not be persisted"

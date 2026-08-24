@@ -5,6 +5,7 @@ ARG BUILD_VERSION=3.1.4.0
 ARG BUILD_ARCH=aarch64
 ARG ZEROCLAW_SHA256
 ARG ZEROCLAW_SOURCE_COMMIT
+ARG ADDON_SOURCE_COMMIT=unknown
 ARG ZEROCLAW_SOURCE_DATE_EPOCH
 ARG ZEROCLAW_LLVM_RNG_SEED
 ARG REQUIRE_VERIFIED_ARTIFACT=false
@@ -15,7 +16,8 @@ LABEL \
     io.hass.arch="${BUILD_ARCH}" \
     org.opencontainers.image.title="ZeroClaw Home Assistant app" \
     org.opencontainers.image.source="https://github.com/Nafjan/zeroclaw-ha-addon" \
-    org.opencontainers.image.revision="${ZEROCLAW_SOURCE_COMMIT}" \
+    org.opencontainers.image.revision="${ADDON_SOURCE_COMMIT}" \
+    org.opencontainers.image.upstream.revision="${ZEROCLAW_SOURCE_COMMIT}" \
     org.opencontainers.image.build.source-date-epoch="${ZEROCLAW_SOURCE_DATE_EPOCH}" \
     org.opencontainers.image.build.llvm-rng-seed="${ZEROCLAW_LLVM_RNG_SEED}"
 
@@ -51,6 +53,7 @@ RUN chmod +x /run.sh
 RUN mkdir -p /data/memory /data/logs /data/tools
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
+    CMD test ! -e /data/capability/telegram-conflict && \
+        curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
 
 CMD ["/run.sh"]
