@@ -241,7 +241,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'BROKER_WRITE_CONTEXT_BYPASS\n' > /tmp/zeroclaw-broker-test
     elif ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
         printf 'BROKER_TICKET_GATE_BYPASS\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! POLICY_REQUIRE_APPROVAL=true /usr/local/bin/policy-decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}' | grep -E '^confirm:approval_required:' >/dev/null 2>&1; then
+    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! POLICY_REQUIRE_APPROVAL=true POLICY_QUIET_CONFIRM=false POLICY_NOW_HOUR=12 /usr/local/bin/policy-decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}' | grep -E '^confirm:approval_required:' >/dev/null 2>&1; then
         printf 'BROKER_APPROVAL_POLICY_MISSING\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && /usr/local/bin/zc-audit-write broker_allow light/turn_on '{"entity_id":"light.kitchen"}' forged >/dev/null 2>&1; then
         printf 'AUDIT_OUTCOME_CLIENT_BYPASS\n' > /tmp/zeroclaw-broker-test
