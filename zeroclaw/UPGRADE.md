@@ -152,3 +152,12 @@ authenticated canary and backup evidence. The promotion job creates the Git
 tag only after the arm64 OCI image has BuildKit provenance/SBOM attestations
 and a keyless Cosign signature. Verify the exact digest and signature before
 allowing Supervisor to deploy it.
+
+Use the workflows in two phases so the evidence can be created after the
+candidate has actually run: dispatch `release.yml` with `promote: false`, then
+publish the exact signed candidate through `publish-canary-alias.yml`, install
+only that immutable canary tag, and perform the live canary. Commit the
+redacted evidence JSON, then dispatch `promote-existing.yml` with the original
+candidate digest, candidate tag/run/commit, canary tag, evidence URL, and
+evidence SHA256. This final workflow verifies the existing artifact and
+attestations without rebuilding it, then promotes only that digest.

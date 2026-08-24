@@ -48,11 +48,20 @@ The evidence must contain:
 }
 ```
 
-After committing the redacted file, use a raw URL pinned to that commit and
-the file SHA256 as `canary_evidence` and `canary_evidence_sha256` when running
-the protected promotion workflow. The workflow verifies the URL, downloads
-the file, checks its hash, binds it to the exact candidate digest and canary
-tag, and requires every listed gate to be true.
+After the live canary, commit the redacted file to the repository. The
+evidence commit may be newer than the candidate commit; the JSON itself binds
+the evidence to the candidate workflow run and add-on commit. Use a raw URL
+pinned to the evidence commit and the file SHA256 as `canary_evidence` and
+`canary_evidence_sha256` when dispatching `.github/workflows/promote-existing.yml`.
+That workflow verifies the signed candidate tag, exact canary alias digest,
+attestations, evidence hash, candidate run/commit binding, and every listed
+gate before creating Supervisor release tags.
+
+Create the temporary alias with `.github/workflows/publish-canary-alias.yml`,
+providing the candidate digest, candidate tag, candidate commit, and the
+matching `<version>-canary.<candidate-run-id>` tag. The alias workflow verifies
+the candidate signature and provenance/SBOM attestations before writing the
+alias.
 
 ## Telegram canary procedure
 

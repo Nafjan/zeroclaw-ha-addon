@@ -518,3 +518,17 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'is outside the valid 24-hour range; refusing to start' "$run_file"
     [ "$status" -eq 0 ]
 }
+
+@test "canary alias requires the signed candidate and its attestations" {
+    alias_file="$BATS_TEST_DIRNAME/../../.github/workflows/publish-canary-alias.yml"
+    run grep -F 'candidate_tag:' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'candidate_commit:' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'cosign verify --certificate-oidc-issuer=https://token.actions.githubusercontent.com' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'predicate-type https://slsa.dev/provenance/v1' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'predicate-type https://spdx.dev/Document/v2.3' "$alias_file"
+    [ "$status" -eq 0 ]
+}
