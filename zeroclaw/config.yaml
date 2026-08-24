@@ -12,6 +12,10 @@ init: false
 startup: application
 boot: auto
 homeassistant_api: true
+# The root-owned HA capability broker needs the narrowly scoped Supervisor
+# credential at boot; run.sh copies it only into that broker and scrubs it
+# before the planner, provider, Telegram, and scheduler children start.
+hassio_api: true
 options:
   # --- Provider credentials (OpenRouter required; other providers optional) ---
   openrouter_api_key: ""
