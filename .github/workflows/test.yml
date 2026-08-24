@@ -118,6 +118,7 @@ jobs:
             --build-arg BUILD_VERSION="$(yq -r '.version' zeroclaw/config.yaml)" \
             --build-arg ZEROCLAW_SHA256="$(yq -r '.sha256' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_SOURCE_COMMIT="$(yq -r '.source_commit' zeroclaw/binary-manifest.json)" \
+            --build-arg ADDON_SOURCE_COMMIT="$GITHUB_SHA" \
             --build-arg ZEROCLAW_SOURCE_DATE_EPOCH="$(yq -r '.source_date_epoch' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_LLVM_RNG_SEED="$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)" \
             --build-arg REQUIRE_VERIFIED_ARTIFACT="${{ inputs.require_verified_artifact == true && 'true' || 'false' }}" \
@@ -141,7 +142,8 @@ jobs:
           manifest_sha="$(yq -r '.sha256' zeroclaw/binary-manifest.json)"
           image_sha="$(docker run --rm --platform linux/arm64 --entrypoint /bin/sh zeroclaw-ci -c 'sha256sum /usr/local/bin/zeroclaw' | awk '{print $1}')"
           test "$manifest_sha" = "$image_sha"
-          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.upstream.revision" }}')" = "$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
 
       - name: Smoke-test startup rendering without external services
         run: >-
@@ -149,6 +151,13 @@ jobs:
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Smoke-test Telegram session ownership boundary
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/telegram_session_smoke.sh'
 
       - name: Smoke-test broker-backed write path with fake HA
         run: >-

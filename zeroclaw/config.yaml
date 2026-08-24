@@ -75,6 +75,7 @@ options:
   max_history_messages: 30
   max_context_tokens: 16000
   provider_max_tokens: 2048
+  provider_max_input_tokens: 16384
   response_cache_ttl_minutes: 2
   conversation_retention_days: 30
 
@@ -157,6 +158,7 @@ schema:
   max_history_messages: int(5,100)
   max_context_tokens: int(2000,128000)
   provider_max_tokens: int(512,8192)
+  provider_max_input_tokens: int(1024,128000)
   response_cache_ttl_minutes: int(0,60)
   conversation_retention_days: int(1,365)
 

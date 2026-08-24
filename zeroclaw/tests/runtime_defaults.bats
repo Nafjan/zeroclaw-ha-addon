@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 run_file="$BATS_TEST_DIRNAME/../run.sh"
+agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "runtime uses the Supervisor core API and safe gateway defaults" {
     run grep -F 'HA_URL="http://supervisor/core/api"' "$run_file"
@@ -15,6 +16,15 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F '[channels_config]' "$run_file"
     [ "$status" -ne 0 ]
+}
+
+@test "cached Telegram replies are revalidated before replay" {
+    run grep -F 'sanitized_cached=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'blocked internal tool syntax in cached Telegram reply' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'replacing it with a safe status message' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "Telegram transport is optional and starts only when configured" {
@@ -48,27 +58,35 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram polling conflict; refusing to run alongside another poller.' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'exit 42' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'PIPESTATUS[0]' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Telegram polling conflict is latched' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "Telegram turns use the full agent tool loop" {
     run grep -F 'run_agent_turn' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'su-exec zeroclaw:zeroclaw timeout 75' "$run_file"
+    run grep -F '. /opt/zeroclaw/lib/telegram-agent-turn.sh' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F -- '--config-dir "\$AGENT_CONFIG_DIR" agent' "$run_file"
+    run grep -F 'su-exec zeroclaw:zeroclaw timeout 120' "$agent_turn_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--config-dir "$AGENT_CONFIG_DIR" agent' "$agent_turn_file"
     [ "$status" -eq 0 ]
     run grep -F 'REPLY=\$(run_agent_turn' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'runs as the unprivileged planner' "$run_file"
+    run grep -F 'unprivileged planner' "$agent_turn_file"
     [ "$status" -eq 0 ]
 }
 
 @test "Telegram protocol recovery escalates to the complex route and stays truthful" {
     run grep -F 'RECOVERY_MODEL="${COMPLEX_MODEL}"' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'retry_model="\${3:-}"' "$run_file"
+    run grep -F 'retry_model="${3:-}"' "$agent_turn_file"
     [ "$status" -eq 0 ]
-    run grep -F -- '--model "\$retry_model"' "$run_file"
+    run grep -F -- '--model "$retry_model"' "$agent_turn_file"
     [ "$status" -eq 0 ]
     run grep -F 'run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" "\$RECOVERY_MODEL"' "$run_file"
     [ "$status" -eq 0 ]
@@ -149,6 +167,8 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_max_requests_per_hour is outside the safe range' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'provider_max_input_tokens is outside the safe range' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'chmod 0700 /run/zeroclaw' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"' "$run_file"
@@ -161,7 +181,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -ne 0 ]
     run grep -F 'telegram_curl()' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'curl --config "\$config_file"' "$run_file"
+    run grep -F 'curl --connect-timeout 5 --max-time 35 --config "\$config_file"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Authorization: Bearer ${HA_TOKEN}' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -ne 0 ]
@@ -192,6 +212,8 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_free_fallback_enabled: true' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
+    run grep -F 'provider_max_input_tokens: 16384' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
     run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_ark_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
@@ -210,7 +232,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_retries = 0' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'streaming is not supported by the provider broker' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    run grep -F '((.stream // false) == false)' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'FAILURE_CLASS="credit_exhausted"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
@@ -221,6 +243,17 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F '((.tools // []) | length) == 0' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "free fallback routes cover both primary and complex no-tools turns" {
+    run grep -F '${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Tool-capable turns never get downgraded to a free model.' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -395,7 +428,11 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 }
 
 @test "confirmed execution is claimed and finalized inside the root broker" {
-    run grep -F 'approval-transition.sh claim "$ticket"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    run grep -F 'verify_approval_context "$approval_ticket" "$service" "$payload"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'reserve_action_quota' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'claim_approval_context "$approval_ticket"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'ZEROCLAW_APPROVAL_CLAIMED=1' "$run_file"
     [ "$status" -ne 0 ]
@@ -454,9 +491,9 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
 }
 
 @test "Telegram approval execution failures are reported as failures" {
-    run grep -F 'Approved, but execution failed; the claim remains for recovery' "$run_file"
+    run grep -F 'the execution outcome could not be confirmed; the claim remains for recovery' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Execution failed; claim retained.' "$run_file"
+    run grep -F 'execution outcome could not be confirmed; claim retained for recovery' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram sendMessage rejected approval' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
     [ "$status" -eq 0 ]

@@ -69,6 +69,7 @@ jobs:
     outputs:
       image: ${{ steps.metadata.outputs.image }}
       candidate_tag: ${{ steps.metadata.outputs.candidate_tag }}
+      canary_tag: ${{ steps.metadata.outputs.canary_tag }}
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.metadata.outputs.version }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
@@ -113,6 +114,7 @@ jobs:
           image="$(printf '%s' "$configured_image" | tr '[:upper:]' '[:lower:]')"
           certificate_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           candidate_tag="candidate-${GITHUB_RUN_ID}-${GITHUB_SHA:0:12}"
+          canary_tag="${version}-canary.${GITHUB_RUN_ID}"
           test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
           test "$release_version" = "$version"
           printf '%s' "$release_tag" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
@@ -142,6 +144,10 @@ jobs:
               echo "production promotion requires a workflow_dispatch run from refs/heads/master" >&2
               exit 1
             fi
+            if [ "$builder_mode" != "trusted-aa" ]; then
+              echo "production promotion requires the trusted-aa reproducible builder" >&2
+              exit 1
+            fi
           fi
           {
             printf 'version=%s\n' "$version"
@@ -160,6 +166,7 @@ jobs:
             printf 'binary_sha=%s\n' "$binary_sha"
             printf 'image=%s\n' "$image"
             printf 'candidate_tag=%s\n' "$candidate_tag"
+            printf 'canary_tag=%s\n' "$canary_tag"
             printf 'certificate_identity=%s\n' "$certificate_identity"
           } >> "$GITHUB_OUTPUT"
 
@@ -900,6 +907,7 @@ jobs:
             BUILD_VERSION=${{ steps.metadata.outputs.version }}
             ZEROCLAW_SHA256=${{ steps.metadata.outputs.binary_sha }}
             ZEROCLAW_SOURCE_COMMIT=${{ steps.metadata.outputs.source_commit }}
+            ADDON_SOURCE_COMMIT=${{ github.sha }}
             ZEROCLAW_SOURCE_DATE_EPOCH=${{ steps.metadata.outputs.source_date_epoch }}
             ZEROCLAW_LLVM_RNG_SEED=${{ steps.metadata.outputs.llvm_rng_seed }}
             REQUIRE_VERIFIED_ARTIFACT=true
@@ -1085,11 +1093,7 @@ jobs:
             *) echo "canary evidence must be pinned to this exact release commit: $GITHUB_SHA" >&2; exit 1 ;;
           esac
           test "$CANARY_DIGEST" = "${{ needs.candidate.outputs.digest }}"
-          test -n "$CANARY_TAG"
-          case "$CANARY_TAG" in
-            "${VERSION}"-canary.*) ;;
-            *) echo "canary tag is not derived from the candidate version" >&2; exit 1 ;;
-          esac
+          test "$CANARY_TAG" = "${{ needs.candidate.outputs.canary_tag }}"
           resolved="$(docker buildx imagetools inspect "${IMAGE}:${CANARY_TAG}" --format '{{.Manifest.Digest}}')"
           test "$resolved" = "$CANDIDATE_DIGEST"
           printf '%s' "$CANARY_EVIDENCE" | grep -Eq "^https://raw\\.githubusercontent\\.com/${GITHUB_REPOSITORY}/[0-9a-f]{40}/[^?]+$" || {
@@ -1104,7 +1108,8 @@ jobs:
           curl --fail --location --retry 2 --silent --show-error --max-time 30 \
             --output "$evidence_file" "$CANARY_EVIDENCE"
           bash .github/scripts/verify-canary-evidence.sh \
-            "$evidence_file" "$CANDIDATE_DIGEST" "$CANARY_TAG" "$CANARY_EVIDENCE_SHA256"
+            "$evidence_file" "$CANDIDATE_DIGEST" "$CANARY_TAG" \
+            "${{ github.run_id }}" "${{ github.sha }}" "$CANARY_EVIDENCE_SHA256"
 
       - name: Re-verify candidate before promotion
         env:
@@ -1160,8 +1165,19 @@ jobs:
           digest="${{ needs.candidate.outputs.digest }}"
           version="${{ needs.candidate.outputs.version }}"
           release_tag="${{ needs.candidate.outputs.release_tag }}"
-          docker buildx imagetools create --tag "$image:$version" "$image@$digest"
-          docker buildx imagetools create --tag "$image:$release_tag" "$image@$digest"
+          ensure_immutable_tag() {
+            tag="$1"
+            if existing_digest="$(docker buildx imagetools inspect "$image:$tag" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+              test "$existing_digest" = "$digest" || {
+                echo "refusing to retarget existing release tag $tag" >&2
+                exit 1
+              }
+            else
+              docker buildx imagetools create --tag "$image:$tag" "$image@$digest"
+            fi
+          }
+          ensure_immutable_tag "$version"
+          ensure_immutable_tag "$release_tag"
           for tag in "$version" "$release_tag"; do
             resolved="$(docker buildx imagetools inspect "$image:$tag" --format '{{.Manifest.Digest}}')"
             test "$resolved" = "$digest"

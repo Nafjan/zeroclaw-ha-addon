@@ -36,6 +36,7 @@ cat > /data/options.json <<'JSON'
   "max_history_messages": 30,
   "max_context_tokens": 16000,
   "provider_max_tokens": 2048,
+  "provider_max_input_tokens": 16384,
   "response_cache_ttl_minutes": 2,
   "conversation_retention_days": 30,
   "home_location": "Test Home",
@@ -246,7 +247,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'BROKER_OK\n' > /tmp/zeroclaw-broker-test
     fi
     printf '%s\n' "$(id -u)" > /tmp/zeroclaw-planner-uid
-    sleep 120
+    [ "${SMOKE_NO_SLEEP:-false}" = "true" ] || sleep 120
 fi
 exit 0
 FAKE

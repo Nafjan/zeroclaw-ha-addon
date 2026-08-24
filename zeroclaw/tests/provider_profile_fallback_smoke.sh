@@ -87,7 +87,7 @@ if [ "$count" -eq 1 ]; then
 else
     status=200
     reason='OK'
-    body='{"choices":[{"message":{"content":"same-profile-free-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}'
+    body='{"choices":[{"message":{"content":"same-profile-free-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}'
 fi
 length=$(printf '%s' "$body" | wc -c | tr -d ' ')
 printf 'HTTP/1.1 %s %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
@@ -187,7 +187,7 @@ trap cleanup EXIT
 rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-credit.log \
     /data/provider/nvidia-success.log /data/provider/free-success.log
 NOW=$(date -u +%s)
-printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":84}\n' \
+printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":40}\n' \
     "$((NOW / 3600))" "$((NOW / 86400))" > "$LEDGER"
 
 next_case_ports
@@ -200,7 +200,7 @@ start_upstream "$OPENROUTER_PORT" 402 "Payment Required" \
     '{"error":{"code":"insufficient_quota","message":"credits exhausted"}}' \
     /data/provider/openrouter-credit.log
 start_upstream "$NVIDIA_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"nvidia-fallback-ok"}}],"usage":{"completion_tokens":3,"total_tokens":3}}' \
+    '{"choices":[{"message":{"content":"nvidia-fallback-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":3,"total_tokens":4}}' \
     /data/provider/nvidia-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"hello"}]}')
@@ -243,7 +243,7 @@ nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100
 ROUTE_SPEC="default-route|nvidia|nvidia-model|paid
 default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"free-fallback-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"free-fallback-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/free-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
@@ -259,7 +259,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|openrouter/free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"free-router-fallback-ok"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"free-router-fallback-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/free-router-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
@@ -275,7 +275,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/free-blocked.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"turn on the light"}],"tools":[{"type":"function","function":{"name":"call_service"}}]}')
@@ -290,7 +290,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/function-blocked.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 FUNCTION_BODY='{"model":"default-route","messages":[{"role":"user","content":"call a function"}],"functions":[{"name":"turn_on","parameters":{"type":"object"}}],"function_call":"auto"}'
@@ -300,7 +300,7 @@ stop_listeners
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/function-blocked.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 FUNCTION_MESSAGE_BODY='{"model":"default-route","messages":[{"role":"assistant","content":null,"function_call":{"name":"turn_on","arguments":"{}"}}]}'
@@ -316,7 +316,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="default-route|openrouter|~deepseek/deepseek-v4-flash-latest|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"deepseek-latest-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"deepseek-latest-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/deepseek-latest-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"hello"}]}')
@@ -330,7 +330,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="fusion-route|openrouter|openrouter/fusion|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"fusion-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"fusion-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/fusion-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"fusion-route","messages":[{"role":"user","content":"compare"}]}')
@@ -345,7 +345,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
 ROUTE_SPEC="auto-route|openrouter|openrouter/auto|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"auto-shaped"}}],"usage":{"completion_tokens":1,"total_tokens":1}}' \
+    '{"choices":[{"message":{"content":"auto-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/auto-success.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"auto-route","messages":[{"role":"user","content":"plan"}]}')
