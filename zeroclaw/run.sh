@@ -904,7 +904,6 @@ AGENT_WORKSPACE="${WS}"
 AGENT_SESSION_LOCK_DIR="/data/capability/telegram-session-locks"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
-RECOVERY_MODEL="${COMPLEX_MODEL}"
 [ -n "\$TOKEN" ] || exit 1
 . /opt/zeroclaw/lib/telegram-session.sh
 . /opt/zeroclaw/lib/telegram-agent-turn.sh
@@ -1244,6 +1243,7 @@ handle_message() {
             rm -f "\$LAST_OUTCOME_FILE"
         fi
     fi
+    CORRECTION_PROMPT=""
     if [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
         # Lowercase + trim leading whitespace for matching only
         tlc=\$(printf '%s' "\$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')
@@ -1259,9 +1259,10 @@ handle_message() {
                 LAST=\$(jq -r '.text // empty' "\$LAST_OUTCOME_FILE" 2>/dev/null)
                 rm -f "\$LAST_OUTCOME_FILE"
                 if [ -n "\$LAST" ]; then
-                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then use the shell tool with zc-lesson-add. Do not message the user — this is a silent learning hook."
-                    run_agent_turn "\$chat_id" "\$CP" \\
-                        >/dev/null 2>>/data/logs/telegram-broker.log &
+                    # Queue the learning prompt for after the foreground turn.
+                    # It uses the same durable session file, so running it in the
+                    # background here races the user turn for the session lock.
+                    CORRECTION_PROMPT="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then use the native shell tool with zc-lesson-add. Do not message the user — this is a silent learning hook."
                 fi
                 ;;
         esac
@@ -1289,33 +1290,26 @@ handle_message() {
             printf '%s\n' 'recovered one-line guarded action through the typed broker' >>/data/logs/telegram-broker.log
             REPLY="\$LEGACY_ACTION_REPLY"
         elif [ "\$AGENT_STATUS" -eq 0 ]; then
-            # Recover once through the real agent loop.  This handles older or
-            # provider-specific models that print an alias instead of emitting
-            # a structured shell call, without executing model text directly.
-            RECOVERY_PROMPT="Review the previous turn for: \${text}. If a tool/action already ran, do not repeat it; summarize its result. If nothing ran and the request still needs Home Assistant, use the actual structured shell tool. Never print a bare command, Markdown tool block, or internal syntax; return only the short user-facing answer."
-            # Tool-protocol recovery is a complex turn: use the configured
-            # complex route rather than asking the same failing default model
-            # to repeat an invalid plain-text command.
-            RECOVERY=\$(run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" "\$RECOVERY_MODEL" 2>>/data/logs/telegram-broker.log)
-            RECOVERY_STATUS=\$?
-            if [ "\$RECOVERY_STATUS" -eq 0 ] && [ -n "\$RECOVERY" ] && \\
-                RECOVERED=\$(printf '%s' "\$RECOVERY" | /usr/local/bin/telegram-render 2>/dev/null); then
-                REPLY="\$RECOVERED"
-            else
-                # A recovery turn may have reached a broker before producing
-                # an invalid final message.  Do not claim that no action ran;
-                # require the operator to check HA history instead.
-                REPLY="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
-            fi
+            # Do not launch a second model turn here. A recovery turn can race
+            # the chat session and can repeat a tool request after the first
+            # turn has already reached a broker. The bounded legacy parser above
+            # is the only text-to-action compatibility path; all other malformed
+            # output gets a truthful, non-retrying response.
+            REPLY="I couldn't safely complete that request because the model returned an invalid tool request. I did not retry it. Please check Home Assistant history before retrying."
         else
-            REPLY="I couldn't confirm the result. Please check Home Assistant history before retrying."
+            REPLY="I couldn't complete that request. I did not retry it. Please check Home Assistant history before retrying."
         fi
     fi
-    [ -z "\$REPLY" ] && REPLY="I couldn't confirm the result. Please check Home Assistant history before retrying."
+    [ -z "\$REPLY" ] && REPLY="I couldn't complete that request. I did not retry it. Please check Home Assistant history before retrying."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
     cache_reply "\$update_id" "\$REPLY" || return 1
     send_msg "\$chat_id" "\$REPLY"
+    if [ -n "\${CORRECTION_PROMPT:-}" ]; then
+        # The foreground turn has released the per-chat lock before this hook.
+        run_agent_turn "\$chat_id" "\$CORRECTION_PROMPT" \\
+            >/dev/null 2>>/data/logs/telegram-broker.log || true
+    fi
 }
 
 while true; do
@@ -2270,20 +2264,15 @@ When a Home Assistant or ZeroClaw command helper is needed, use the runtime's
 structured shell tool exactly. Command helpers are valid only inside that tool;
 they are never a user-facing response syntax. Only call a name directly when
 it is present in the runtime's actual tool list.
-Never write a tool call as Markdown, a bare shell command, or prose.
-When native function calling is unavailable, use this exact text fallback:
-<tool_call>
-{"name":"shell","arguments":{"command":"..."}}
-</tool_call>
-For example, a Home Assistant action uses:
-<tool_call>
-{"name":"shell","arguments":{"command":"ha-action-guarded 'scene/reload' '{}'"}}
-</tool_call>
+Never write a tool call as Markdown, a bare shell command, or prose. If the
+native shell tool is unavailable, do not print command syntax or a Markdown/XML
+tool block. Explain briefly that tool execution is unavailable; never imply
+that an action ran.
 Do not add approved:true; the HA policy gate owns action approval. The command must be
 inside the shell tool's JSON arguments so the gateway can execute it and
 continue the tool loop.
 After the tool result, continue until you can give the user a short final
-answer. Never show <tool_call>, <tool_result>, or internal shell syntax to the user.
+answer. Never show internal tool results or shell syntax to the user.
 
 ## World state
 A WORLD STATE block may appear in your prompt. Trust it. Don't re-fetch what's already there
@@ -2362,22 +2351,14 @@ To switch routes, prepend your first scratchpad/reasoning line with the literal 
 
 ## Outcome tracking (lessons loop) — REQUIRED after real actions
 After every turn that produced a real action (NOT a status query, greeting, or
-"already at" no-op), use the shell tool exactly once:
-    <tool_call>
-    {"name":"shell","arguments":{"command":"zc-set-outcome '<same one-line outcome>'"}}
-    </tool_call>
+"already at" no-op), use the native shell tool exactly once with
+zc-set-outcome '<same one-line outcome>'.
 The shell helper underneath is /usr/local/bin/zc-set-outcome; it records a
 root-owned broker receipt under /data/capability. Never emit zc.set_outcome or
 zc-set-outcome as plain text.
 
-Concrete example for a turn that just turned on a light:
-  <tool_call>
-  {"name":"shell","arguments":{"command":"ha-action-guarded 'light/turn_on' '{\"entity_id\":\"light.example\"}'"}}
-  </tool_call>
-  → "Example light on."
-  <tool_call>
-  {"name":"shell","arguments":{"command":"zc-set-outcome 'Example light on.'"}}
-  </tool_call>
+Do not write either command in the user-facing assistant message. If the
+native shell tool is not available, do not emit a textual substitute.
 
 If you skip the zc-set-outcome shell command the lessons loop cannot fire on the user's next reply
 and the agent will not learn from corrections. Skipping it is a SOUL violation.
@@ -2536,13 +2517,10 @@ cat > "${WS}/TOOLS.md" << 'TOOLSEOF'
 ## Home Assistant command reference
 
 The entries below are command aliases, not function-call names. Invoke every
-command through the runtime's `shell` tool using the structured protocol:
-
-<tool_call>
-{"name":"shell","arguments":{"command":"ha-all-status"}}
-</tool_call>
-
-Never emit a bare `ha.*` or `zc.*` line to the user or as the assistant turn.
+command through the runtime's native `shell` tool. Never emit a bare `ha.*`,
+`ha-*`, or `zc-*` line, Markdown/XML tool syntax, or an internal command in a
+user-facing assistant turn. If the native shell tool is unavailable, say that
+the action could not be executed and stop.
 
 STATUS:
 - ha-all-status     — lights + AC + covers (use for "home overview")

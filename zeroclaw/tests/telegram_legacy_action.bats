@@ -28,6 +28,42 @@ SCRIPT
     [ "$(sed -n '2p' "$invocation")" = "{}" ]
 }
 
+@test "recovers the exact fenced scene reload shown by legacy Telegram output" {
+    fenced=$'```tool_call\n'
+    action="ha.action_guarded 'scene/reload' '{}'"
+    fenced+="$action"$'\n'
+    fenced+='```'
+    run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" \
+        "$legacy_file" "$fenced"
+    [ "$status" -eq 0 ]
+    [ "$output" = "Home Assistant scenes reloaded." ]
+    [ "$(sed -n '1p' "$invocation")" = "scene/reload" ]
+    [ "$(sed -n '2p' "$invocation")" = "{}" ]
+}
+
+@test "accepts only the canonical hyphenated guarded helper inside the fence" {
+    fenced=$'```tool_call\n'
+    action="ha-action-guarded 'scene/reload' '{}'"
+    fenced+="$action"$'\n'
+    fenced+='```'
+    run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" \
+        "$legacy_file" "$fenced"
+    [ "$status" -eq 0 ]
+    [ "$output" = "Home Assistant scenes reloaded." ]
+    [ "$(sed -n '1p' "$invocation")" = "scene/reload" ]
+}
+
+@test "rejects prose around a fenced guarded action" {
+    fenced=$'Here is the action:\n```tool_call\n'
+    action="ha.action_guarded 'scene/reload' '{}'"
+    fenced+="$action"$'\n'
+    fenced+='```'
+    run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" \
+        "$legacy_file" "$fenced"
+    [ "$status" -eq 2 ]
+    [ ! -f "$invocation" ]
+}
+
 @test "turns a broker confirmation into a Telegram-safe prompt" {
     run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" GATE_RESULT=confirm \
         "$legacy_file" "ha.action_guarded 'scene/reload' '{}'"
