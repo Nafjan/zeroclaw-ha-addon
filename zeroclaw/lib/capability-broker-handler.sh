@@ -131,8 +131,10 @@ run_set_outcome() {
     outcome_dir=$(dirname "$OUTCOME_FILE")
     mkdir -p "$outcome_dir"
     outcome_tmp="${OUTCOME_FILE}.tmp.$$"
-    jq -nc --arg text "$text" --argjson created_at "$(date -u +%s)" \
-        '{text:$text,created_at:$created_at}' > "$outcome_tmp" || {
+    created_at="$(date -u +%s)"
+    jq -nc --arg text "$text" --argjson created_at "$created_at" \
+        --argjson expires_at "$((created_at + 300))" \
+        '{text:$text,created_at:$created_at,expires_at:$expires_at}' > "$outcome_tmp" || {
         rm -f "$outcome_tmp"
         json_error "outcome store could not be prepared"
     }

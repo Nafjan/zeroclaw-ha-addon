@@ -16,6 +16,7 @@ LOCK_DIR="${RECEIPT_DIR}/.locks"
 REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
 CALLBACK_CACHE_DIR="${DATA_DIR}/capability/telegram-callbacks"
 ACTION_ADMISSION_DIR="${DATA_DIR}/capability/action-admissions"
+OUTCOME_FILE="${DATA_DIR}/capability/last-outcome.json"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
 LOCK_GRACE_SECONDS=300
@@ -174,4 +175,18 @@ if [ -d "$ACTION_ADMISSION_DIR" ] && [ ! -L "$ACTION_ADMISSION_DIR" ]; then
         old_enough "$admission" "$REPLY_CACHE_GRACE_SECONDS" || continue
         rm -f "$admission"
     done
+fi
+
+# A correction receipt is valid only for the bounded turn immediately after
+# the action that created it.  Remove expired receipts here as a second line
+# of defense; the Telegram watcher also consumes the receipt on the next
+# ordinary message, whether or not it matches a correction marker.
+if [ -f "$OUTCOME_FILE" ] && [ ! -L "$OUTCOME_FILE" ]; then
+    if expires=$(jq -er '.expires_at | select(type == "number" and floor == . and . >= 0)' \
+        "$OUTCOME_FILE" 2>/dev/null); then
+        case "$expires" in
+            ''|*[!0-9]*) ;;
+            *) [ "$expires" -le "$NOW" ] && rm -f "$OUTCOME_FILE" ;;
+        esac
+    fi
 fi

@@ -15,6 +15,7 @@ OPENROUTER_KEY_FILE=/data/provider/openrouter-profile.key
 NVIDIA_KEY_FILE=/data/provider/nvidia-profile.key
 LEDGER=/data/provider/profile-ledger.json
 LOCK=/data/provider/.profile-ledger.lock
+PROFILE_DAILY_BUDGET=32768
 mkdir -p /data/provider
 install -m 0755 /opt/zeroclaw/lib/provider-broker-handler.sh /usr/local/bin/provider-broker-handler
 install -m 0755 /opt/zeroclaw/lib/provider-broker-entrypoint.sh /usr/local/bin/provider-broker-entrypoint
@@ -192,8 +193,8 @@ printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":40}\n' 
     "$((NOW / 3600))" "$((NOW / 86400))" > "$LEDGER"
 
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
-nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
+nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|primary-model|paid
 default-route|openrouter|alternate-model|paid
 default-route|nvidia|nvidia-model|paid"
@@ -225,7 +226,7 @@ jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].set
 # out-of-credits fallback path, and it remains limited to a no-tools request.
 rm -f "$LEDGER" "$LOCK" /data/provider/same-profile-free.state /data/provider/same-profile-free.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|primary-model|paid
 default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
 start_credit_then_free_upstream /data/provider/same-profile-free.state /data/provider/same-profile-free.log
@@ -239,8 +240,8 @@ grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/same-profi
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-success.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100
-nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
+nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|nvidia|nvidia-model|paid
 default-route|openrouter|nvidia/nemotron-3.5-lightning:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
@@ -257,7 +258,7 @@ grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/free-succe
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-router-success.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|openrouter/free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"free-router-fallback-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -273,7 +274,7 @@ grep -F '"model":"openrouter/free"' /data/provider/free-router-success.log >/dev
 
 rm -f "$LEDGER" "$LOCK" /data/provider/free-blocked.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -288,7 +289,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 # be downgraded to a free route when the modern tools field is absent.
 rm -f "$LEDGER" "$LOCK" /data/provider/function-blocked.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|free-model:free|free"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -299,7 +300,7 @@ response=$(request_proxy "$FUNCTION_BODY")
 printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 stop_listeners
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
     /data/provider/function-blocked.log
@@ -314,7 +315,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 # a more expensive Fusion preset or an unbounded Auto tier.
 rm -f "$LEDGER" "$LOCK" /data/provider/deepseek-latest-success.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="default-route|openrouter|~deepseek/deepseek-v4-flash-latest|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"deepseek-latest-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -328,7 +329,7 @@ grep -F '"model":"~deepseek/deepseek-v4-flash-latest"' /data/provider/deepseek-l
 
 rm -f "$LEDGER" "$LOCK" /data/provider/fusion-success.log /data/provider/auto-success.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="fusion-route|openrouter|openrouter/fusion|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"fusion-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -343,7 +344,7 @@ grep -F '"preset":"general-budget"' /data/provider/fusion-success.log >/dev/null
 
 rm -f "$LEDGER" "$LOCK"
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="auto-route|openrouter|openrouter/auto|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"auto-shaped"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
@@ -360,7 +361,7 @@ grep -F '"cost_tier":"medium"' /data/provider/auto-success.log >/dev/null
 # upstream.  This protects both provider spend and the durable token budget.
 rm -f "$LEDGER" "$LOCK" /data/provider/input-limit.log
 next_case_ports
-PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|100"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="input-limit-route|openrouter|input-limit-model|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \

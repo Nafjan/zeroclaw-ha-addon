@@ -10,7 +10,7 @@ setup() {
     mkdir -p "$DATA_DIR/approval-receipts/tickets" \
         "$DATA_DIR/approval-receipts/.claims" \
         "$DATA_DIR/approval-receipts/.locks" \
-        "$DATA_DIR/approved" "$DATA_DIR/pending"
+        "$DATA_DIR/approved" "$DATA_DIR/pending" "$DATA_DIR/capability"
     NOW="$(date -u +%s)"
 }
 
@@ -76,4 +76,13 @@ teardown() {
     [ ! -e "$DATA_DIR/approved/feedcafe.marker" ]
     [ ! -e "$DATA_DIR/approval-receipts/.claims/badc0de1.claim" ]
     [ ! -e "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock" ]
+}
+
+@test "expired correction receipts are removed" {
+    printf '{"text":"stale","created_at":%s,"expires_at":%s}\n' \
+        "$((NOW - 600))" "$((NOW - 1))" > "$DATA_DIR/capability/last-outcome.json"
+
+    run_cleanup
+    [ "$status" -eq 0 ]
+    [ ! -e "$DATA_DIR/capability/last-outcome.json" ]
 }
