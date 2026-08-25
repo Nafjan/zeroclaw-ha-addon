@@ -36,7 +36,7 @@ cat > /data/options.json <<'JSON'
   "max_history_messages": 30,
   "max_context_tokens": 16000,
   "provider_max_tokens": 2048,
-  "provider_max_input_tokens": 16384,
+  "provider_max_input_tokens": 32768,
   "response_cache_ttl_minutes": 2,
   "conversation_retention_days": 30,
   "home_location": "Test Home",
