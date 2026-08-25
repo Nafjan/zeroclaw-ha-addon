@@ -1,8 +1,8 @@
 #!/bin/sh
-# Recover the exact one-line action form emitted by older/non-tool-capable
-# models. This is deliberately narrower than a shell parser: only one
-# non-empty line, one canonical ha.action_guarded call, an object payload, and
-# services already accepted by the typed capability broker are eligible.
+# Recover the exact guarded action form emitted by older/non-tool-capable
+# models. This is deliberately narrower than a shell parser: either one
+# non-empty line or the exact three-line Markdown fence seen in legacy output,
+# one canonical guarded call, an object payload, and services already accepted by the typed capability broker are eligible.
 #
 # The action still goes through ha-action-guarded. This helper never executes
 # model text as shell and never grants an approval or bypasses policy.
@@ -15,13 +15,29 @@ REPLY="$1"
 [ "${#REPLY}" -le 8192 ] || exit 2
 
 NON_EMPTY_LINES=$(printf '%s\n' "$REPLY" | awk 'NF { count++ } END { print count + 0 }')
-[ "$NON_EMPTY_LINES" -eq 1 ] || exit 2
-LINE=$(printf '%s\n' "$REPLY" | awk 'NF { sub(/\r$/, ""); print; exit }')
+case "$NON_EMPTY_LINES" in
+    1)
+        LINE=$(printf '%s\n' "$REPLY" | awk 'NF { sub(/\r$/, ""); print; exit }')
+        ;;
+    3)
+        FENCE_START=$(printf '%s\n' "$REPLY" | sed -n '1p' | sed 's/\r$//')
+        FENCE_LINE=$(printf '%s\n' "$REPLY" | sed -n '2p' | sed 's/\r$//')
+        FENCE_END=$(printf '%s\n' "$REPLY" | sed -n '3p' | sed 's/\r$//')
+        printf '%s\n' "$FENCE_START" | grep -Eq '^[[:space:]]*```[[:space:]]*tool_call[[:space:]]*$' || exit 2
+        printf '%s\n' "$FENCE_END" | grep -Eq '^[[:space:]]*```[[:space:]]*$' || exit 2
+        [ -n "$FENCE_LINE" ] || exit 2
+        LINE="$FENCE_LINE"
+        ;;
+    *)
+        exit 2
+        ;;
+esac
 
-# Do not accept prose, fenced blocks, function-style calls, or arbitrary
-# helper names. The observed field form is the exact syntax below.
+# Do not accept prose, arbitrary fences, function-style calls, or arbitrary
+# helper names. The accepted field form is the exact syntax below, with either
+# the historical dot name or the canonical hyphenated shell helper name.
 PARSED=$(printf '%s\n' "$LINE" | sed -nE \
-    "s/^[[:space:]]*ha[.]action_guarded[[:space:]]+'([a-z0-9_]+\/[a-z0-9_]+)'[[:space:]]+'(\\{.*\\})'[[:space:]]*$/\\1\t\\2/p")
+    "s/^[[:space:]]*(ha[.]action_guarded|ha-action-guarded)[[:space:]]+'([a-z0-9_]+\/[a-z0-9_]+)'[[:space:]]+'(\\{.*\\})'[[:space:]]*$/\\2\t\\3/p")
 [ -n "$PARSED" ] || exit 2
 
 SERVICE=${PARSED%%	*}
