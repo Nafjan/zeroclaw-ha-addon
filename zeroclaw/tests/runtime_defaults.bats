@@ -49,6 +49,13 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "broker mode does not require a direct provider key at the Supervisor boundary" {
+    run grep -F 'if [ "${PROVIDER_KEY_MODE}" = "direct_temporary" ]; then' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'OPENROUTER_KEY is required in direct_temporary mode!' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "gateway tool protocol and Telegram reply guard are installed" {
     run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render' "$run_file"
     [ "$status" -eq 0 ]
