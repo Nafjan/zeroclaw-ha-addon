@@ -369,10 +369,12 @@ case "${PROVIDER_KEY_MODE}" in
 esac
 export RUST_LOG="${LOG_LEVEL}"
 
-[ -n "${OPENROUTER_KEY}" ] || {
-    bashio::log.fatal "OPENROUTER_KEY not set!"
-    exit 1
-}
+if [ "${PROVIDER_KEY_MODE}" = "direct_temporary" ]; then
+    [ -n "${OPENROUTER_KEY}" ] || {
+        bashio::log.fatal "OPENROUTER_KEY is required in direct_temporary mode!"
+        exit 1
+    }
+fi
 [ -n "${HA_TOKEN}" ] || {
     bashio::log.fatal "HA_TOKEN not set!"
     exit 1
