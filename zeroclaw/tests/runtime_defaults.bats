@@ -64,6 +64,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F '## Tool invocation protocol (gateway/channel safety)' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '<tool_call>' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F 'model returned an invalid tool request' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -155,19 +157,19 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "Telegram protocol recovery escalates to the complex route and stays truthful" {
+@test "Telegram protocol fallback is deterministic and does not retry a tool request" {
     run grep -F 'RECOVERY_MODEL="${COMPLEX_MODEL}"' "$run_file"
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
     run grep -F 'retry_model="${3:-}"' "$agent_turn_file"
     [ "$status" -eq 0 ]
     run grep -F -- '--model "$retry_model"' "$agent_turn_file"
     [ "$status" -eq 0 ]
     run grep -F 'run_agent_turn "\$chat_id" "\$RECOVERY_PROMPT" "\$RECOVERY_MODEL"' "$run_file"
-    [ "$status" -eq 0 ]
-    run grep -F "I couldn't confirm the result safely. Please check Home Assistant history before retrying." "$run_file"
-    [ "$status" -eq 0 ]
-    run grep -F "no new action was dispatched" "$run_file"
     [ "$status" -ne 0 ]
+    run grep -F "I couldn't safely complete that request because the model returned an invalid tool request." "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'I did not retry it.' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "HA skill documents shell commands instead of fake callable tables" {
@@ -179,7 +181,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "planner uses the actual shell tool for structured gateway calls" {
     run grep -F '{"name":"shell","arguments":{"command":"ha-action-guarded' "$run_file"
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
     run grep -F 'structured shell tool exactly' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Never write a tool call as Markdown, a bare shell command, or prose.' "$run_file"
