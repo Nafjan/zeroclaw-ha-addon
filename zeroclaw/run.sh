@@ -358,9 +358,10 @@ case "${PROVIDER_KEY_MODE}" in
         export ZEROCLAW_API_KEY="${OPENROUTER_KEY}"
         ;;
     broker)
-        # The planner gets only a non-secret local credential.  The root-owned
-        # provider broker below attaches OPENROUTER_KEY to the fixed upstream.
-        export ZEROCLAW_API_KEY="local-provider-broker"
+        # The per-start local provider credential is generated immediately
+        # before the broker children are launched below. Do not retain a
+        # predictable placeholder in the entrypoint environment.
+        unset ZEROCLAW_API_KEY
         ;;
     *)
         bashio::log.fatal "provider_key_mode must be direct_temporary or broker."
@@ -566,6 +567,61 @@ install -m 0755 /opt/zeroclaw/lib/capability-broker-handler.sh /usr/local/bin/ha
 install -m 0755 /opt/zeroclaw/lib/ha-capability.sh /usr/local/bin/ha-capability
 install -m 0755 /opt/zeroclaw/lib/capability-broker-entrypoint.sh /usr/local/bin/ha-broker-entrypoint
 
+# BusyBox nc provides the small local transport used by the typed brokers.
+# Bind it to loopback and require a fresh, per-start client credential as a
+# second boundary so another process in the container cannot invoke a root
+# broker merely by discovering its port. The planner is allowed to read only
+# these non-provider client credentials; the root broker retains the matching
+# value in its private environment.
+BROKER_RUNTIME_DIR="/run/zeroclaw"
+mkdir -p "${BROKER_RUNTIME_DIR}"
+if [ -L "${BROKER_RUNTIME_DIR}" ] || [ ! -d "${BROKER_RUNTIME_DIR}" ]; then
+    bashio::log.fatal "broker runtime directory is not a regular directory"
+    exit 1
+fi
+chown root:zeroclaw "${BROKER_RUNTIME_DIR}"
+chmod 0710 "${BROKER_RUNTIME_DIR}"
+
+create_broker_client_auth() {
+    auth_name="$1"
+    auth_path="${BROKER_RUNTIME_DIR}/${auth_name}"
+    [ ! -L "${auth_path}" ] || {
+        bashio::log.fatal "broker auth path is a symlink: ${auth_path}"
+        exit 1
+    }
+    if [ -e "${auth_path}" ] && [ ! -f "${auth_path}" ]; then
+        bashio::log.fatal "broker auth path is not a regular file: ${auth_path}"
+        exit 1
+    fi
+    auth_tmp=$(mktemp "${BROKER_RUNTIME_DIR}/.${auth_name}.XXXXXX") || {
+        bashio::log.fatal "could not create broker auth file"
+        exit 1
+    }
+    auth_value=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+    case "${auth_value}" in
+        [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+        *) rm -f "${auth_tmp}"; bashio::log.fatal "could not generate broker auth credential"; exit 1 ;;
+    esac
+    printf '%s\n' "${auth_value}" > "${auth_tmp}"
+    chown root:zeroclaw "${auth_tmp}"
+    chmod 0640 "${auth_tmp}"
+    mv -f "${auth_tmp}" "${auth_path}"
+    printf '%s' "${auth_value}"
+}
+
+PROVIDER_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-client-auth"
+CAPABILITY_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/capability-client-auth"
+TELEGRAM_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-client-auth"
+PROVIDER_CLIENT_AUTH_TOKEN="$(create_broker_client_auth provider-client-auth)"
+CAPABILITY_CLIENT_AUTH_TOKEN="$(create_broker_client_auth capability-client-auth)"
+TELEGRAM_CLIENT_AUTH_TOKEN="$(create_broker_client_auth telegram-client-auth)"
+if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
+    # Native ZeroClaw sends ZEROCLAW_API_KEY as the Authorization bearer on
+    # its OpenAI-compatible provider request. In broker mode that value is a
+    # local client credential, never a provider secret.
+    export ZEROCLAW_API_KEY="${PROVIDER_CLIENT_AUTH_TOKEN}"
+fi
+
 # Broker provider credentials when requested.  The direct_temporary mode is
 # retained only as an explicit migration exception for existing installs.
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
@@ -584,6 +640,7 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     (
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             LEGACY_HA_TOKEN ZEROCLAW_API_KEY
+        export PROVIDER_CLIENT_AUTH_TOKEN
         # The endpoint remains root-controlled.  The test-only override lets
         # the real arm64 planner binary exercise this broker against a local
         # deterministic upstream without ever exposing a provider key to it.
@@ -669,7 +726,7 @@ CAPABILITY_PORT=42618
     unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-    export HA_TOKEN HA_URL
+    export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
     export CAPABILITY_QUOTA_FILE="/data/capability/quota.json"
@@ -775,7 +832,8 @@ install -m 0755 /opt/zeroclaw/lib/state-restore.sh /usr/local/bin/state-restore
 # Telegram credentials are held in a root-only runtime file and consumed by a
 # root-owned broker/watcher. Agent-side helpers only send typed local requests.
 mkdir -p /run/zeroclaw
-chmod 0700 /run/zeroclaw
+chown root:zeroclaw /run/zeroclaw
+chmod 0710 /run/zeroclaw
 TG_USERS_FILE="/run/zeroclaw/telegram-users"
 echo "${TELEGRAM_USERS}" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$' > "${TG_USERS_FILE}" || true
 chown root:root "${TG_USERS_FILE}"
@@ -841,7 +899,7 @@ TELEGRAM_PORT=42619
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
             ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-        export TELEGRAM_TOKEN_FILE
+        export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN
         export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
         while true; do
             if ! /bin/busybox nc -l -p "${TELEGRAM_PORT}" -s 127.0.0.1 \
@@ -2641,7 +2699,8 @@ bashio::log.info "Config ready | mode=${POLICY_MODE} | ${DEFAULT_MODEL} + ${COMP
 scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY \
+        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
 }
 
 # ==============================================================
@@ -2767,7 +2826,8 @@ fi
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
- unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY
+ unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
+    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from

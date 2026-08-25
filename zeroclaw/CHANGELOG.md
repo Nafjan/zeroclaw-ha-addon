@@ -2,6 +2,10 @@
 
 ## 3.1.4.0 (August 2026) — Root provider profile broker
 
+- Authenticate all three loopback brokers with fresh per-start client
+  credentials; the provider broker validates the planner bearer and the HA/
+  Telegram clients use typed authenticated requests before any privileged
+  operation is considered.
 - Replace the single-provider allowlist with root-owned profile/model bindings
   for OpenRouter plus opt-in NVIDIA and BytePlus ModelArk fallback profiles.
 - Classify timeout, 429, 5xx, 401, 402/credit, and model-unavailable failures;

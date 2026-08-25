@@ -13,6 +13,7 @@ ACTION_QUOTA_FILE="${CAPABILITY_QUOTA_FILE:-/data/capability/quota.json}"
 ACTION_QUOTA_LOCK="${CAPABILITY_QUOTA_LOCK:-/data/capability/.quota.lock}"
 ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
 OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
+CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
 
 json_error() {
     error="$1"
@@ -34,6 +35,13 @@ request=""
 IFS= read -r request || true
 [ -n "$request" ] || json_error "empty broker request"
 [ "${#request}" -le 32768 ] || json_error "broker request too large"
+[ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
+provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
+    json_error "broker request is not valid JSON" "invalid_request"
 [ -n "${HA_TOKEN:-}" ] || json_error "broker is not configured"
 
 # curl supports @file header sources. Keep the credential in a root-owned

@@ -204,7 +204,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'CREDENTIAL_ARG_VISIBLE\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && env | grep -F 'ZEROCLAW_API_KEY=provider-secret' >/dev/null 2>&1; then
         printf 'PROVIDER_KEY_ENV_VISIBLE\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && ! env | grep -F 'ZEROCLAW_API_KEY=local-provider-broker' >/dev/null 2>&1; then
+    elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && ! env | grep -Eq '^ZEROCLAW_API_KEY=[a-f0-9]{64}$' >/dev/null 2>&1; then
         printf 'PROVIDER_BROKER_CREDENTIAL_MISSING\n' > /tmp/zeroclaw-broker-test
     elif [ -r /data/options.json ]; then
         printf 'OPTIONS_READABLE\n' > /tmp/zeroclaw-broker-test
@@ -298,7 +298,7 @@ test "$(stat -c '%u:%a' /data/logs)" = "0:750"
 test "$(stat -c '%u:%a' /data/provider)" = "0:700"
 test "$(stat -c '%u:%a' /data/capability)" = "0:700"
 test "$(stat -c '%u:%a' /data/capability/telegram-replies)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:700"
+test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:710"
 test "$(stat -c '%u:%a' /data/capability/telegram-offset)" = "0:600"
 test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
 test -x /usr/local/bin/ha-broker-entrypoint

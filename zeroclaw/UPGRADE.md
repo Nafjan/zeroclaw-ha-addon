@@ -54,6 +54,10 @@ logs are sanitized for symlinks before listeners start and remain root-owned.
 The persistent `/data` mount is root-owned with a sticky group boundary: the
 planner can create only its own runtime entries and cannot unlink or replace
 root-owned audit, approval, migration, or configuration state.
+Each boot also rotates ephemeral, root-created client credentials for the
+loopback provider, HA, and Telegram brokers; `/run/zeroclaw` is not included in
+backups and the planner receives no Supervisor, Telegram-bot, or provider
+secret.
 The CI backup gate archives the persistent `/data` volume, restores it
 byte-for-byte, preserves secret-file mode, and excludes ephemeral `/run` state.
 The app deliberately does not map `addon_config`: its state and Supervisor
