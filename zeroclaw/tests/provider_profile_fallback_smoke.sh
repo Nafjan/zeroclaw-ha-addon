@@ -151,6 +151,8 @@ start_proxy() {
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
         PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
+        PROVIDER_DAILY_COST_LIMIT_MICROS="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
+        PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 \
         PROVIDER_LEDGER_FILE="$LEDGER" \
         PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
         PROVIDER_RESERVATION_TTL_SECONDS=180 \
@@ -377,6 +379,21 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
 printf '%s' "$response" | grep -F 'provider input token estimate exceeds the broker limit' >/dev/null
 [ ! -f /data/provider/input-limit.log ]
 
+# The root broker must reject fan-out requests instead of forwarding n>1 while
+# reserving only one completion budget.
+rm -f "$LEDGER" "$LOCK" /data/provider/n-invalid.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="n-invalid-route|openrouter|n-invalid-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
+    /data/provider/n-invalid.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+n_invalid_response=$(request_proxy '{"model":"n-invalid-route","messages":[{"role":"user","content":"hello"}],"n":2}')
+stop_listeners
+printf '%s' "$n_invalid_response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
+[ ! -f /data/provider/n-invalid.log ]
+
 # The estimate must also leave room for provider tokenizer overhead.  The
 # fake upstream reports more prompt tokens than the old bytes/4 heuristic but
 # less than the conservative reservation above; a valid response must remain
@@ -398,5 +415,21 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
 jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens == 260)] | length == 1' \
     "$LEDGER" >/dev/null
+
+# Dollar limits are enforced by the root broker before the upstream call. A
+# request whose conservative reservation exceeds the configured daily cap
+# must not spend provider credits or contact the upstream.
+rm -f "$LEDGER" "$LOCK" /data/provider/cost-limit.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="cost-limit-route|openrouter|cost-limit-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
+    /data/provider/cost-limit.log
+TEST_PROVIDER_DAILY_COST_LIMIT_MICROS=10000 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+cost_limit_response=$(request_proxy '{"model":"cost-limit-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$cost_limit_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/cost-limit.log ]
 
 echo 'provider profile fallback smoke passed'

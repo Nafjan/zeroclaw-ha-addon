@@ -17,6 +17,9 @@ MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-32768}"
 MAX_INPUT_CHARS="${PROVIDER_MAX_INPUT_CHARS:-65536}"
 MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_PER_HOUR:-120}"
 DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
+DAILY_COST_LIMIT_MICROS="${PROVIDER_DAILY_COST_LIMIT_MICROS:-}"
+MONTHLY_COST_LIMIT_MICROS="${PROVIDER_MONTHLY_COST_LIMIT_MICROS:-}"
+MAX_COST_MICROS_PER_1K_TOKENS="${PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS:-100000}"
 ALLOWED_MODELS="${PROVIDER_ALLOWED_MODELS:-}"
 PROFILE_SPEC="${PROVIDER_PROFILE_SPEC:-}"
 ROUTE_SPEC="${PROVIDER_ROUTE_SPEC:-}"
@@ -52,6 +55,22 @@ case "$MAX_TOKENS:$MAX_INPUT_TOKENS:$MAX_INPUT_CHARS:$MAX_REQUESTS_PER_HOUR:$DAI
         respond 503 "Service Unavailable" '{"error":"provider broker limits are invalid"}'
         ;;
 esac
+if [ -n "$DAILY_COST_LIMIT_MICROS" ] || [ -n "$MONTHLY_COST_LIMIT_MICROS" ]; then
+    [ -n "$DAILY_COST_LIMIT_MICROS" ] && [ -n "$MONTHLY_COST_LIMIT_MICROS" ] || \
+        respond 503 "Service Unavailable" '{"error":"provider cost budgets are incomplete"}'
+fi
+[ -z "$DAILY_COST_LIMIT_MICROS" ] || printf '%s' "$DAILY_COST_LIMIT_MICROS" | grep -Eq '^[0-9]+$' || \
+    respond 503 "Service Unavailable" '{"error":"provider daily cost budget is invalid"}'
+[ -z "$MONTHLY_COST_LIMIT_MICROS" ] || printf '%s' "$MONTHLY_COST_LIMIT_MICROS" | grep -Eq '^[0-9]+$' || \
+    respond 503 "Service Unavailable" '{"error":"provider monthly cost budget is invalid"}'
+printf '%s' "$MAX_COST_MICROS_PER_1K_TOKENS" | grep -Eq '^[0-9]+$' || \
+    respond 503 "Service Unavailable" '{"error":"provider cost ceiling is invalid"}'
+[ "$MAX_COST_MICROS_PER_1K_TOKENS" -ge 1 ] && [ "$MAX_COST_MICROS_PER_1K_TOKENS" -le 10000000 ] || \
+    respond 503 "Service Unavailable" '{"error":"provider cost ceiling is outside the safe range"}'
+[ -z "$DAILY_COST_LIMIT_MICROS" ] || [ "$MONTHLY_COST_LIMIT_MICROS" -ge "$DAILY_COST_LIMIT_MICROS" ] || \
+    respond 503 "Service Unavailable" '{"error":"provider monthly cost budget is below the daily budget"}'
+COST_BUDGET_ENABLED=0
+[ -z "$DAILY_COST_LIMIT_MICROS" ] || COST_BUDGET_ENABLED=1
 [ "$MAX_TOKENS" -ge 1 ] && [ "$MAX_TOKENS" -le "$DAILY_TOKEN_BUDGET" ] || \
     respond 503 "Service Unavailable" '{"error":"provider token limits are invalid"}'
 [ "$MAX_INPUT_TOKENS" -ge 1024 ] && [ "$MAX_INPUT_TOKENS" -le 128000 ] || \
@@ -149,6 +168,12 @@ jq -e '
     (.messages | type == "array") and
     ((.stream // false) == false) and
     (.max_completion_tokens == null) and
+    (.n == null or (.n | type == "number" and floor == . and . == 1)) and
+    (.stop == null or
+      (.stop | type == "string" and length <= 128) or
+      (.stop | type == "array" and length <= 4 and all(.[]; type == "string" and length <= 128))) and
+    (.response_format == null or
+      (.response_format | type == "object" and (tojson | length <= 4096))) and
     ((.tools // null) == null or (.tools | type == "array")) and
     ((.functions // null) == null or (.functions | type == "array")) and
     ((.tool_choice // null) == null or ((.tool_choice | type) == "string" or (.tool_choice | type) == "object")) and
@@ -170,7 +195,10 @@ esac
 [ "$requested_tokens" -gt 0 ] || requested_tokens="$MAX_TOKENS"
 [ "$requested_tokens" -le "$MAX_TOKENS" ] || \
     respond 400 "Bad Request" '{"error":"max_tokens exceeds the broker limit"}'
-input_chars=$(jq -c '{messages:.messages,tools:(.tools // []),functions:(.functions // [])}' "$body_file" | wc -c | tr -d ' ')
+# Account for the complete accepted envelope, not only messages/tools. This
+# keeps bounded metadata such as stop/response_format from bypassing the
+# input-token reservation by being omitted from the estimate.
+input_chars=$(wc -c < "$body_file" | tr -d ' ')
 case "$input_chars" in
     ''|*[!0-9]*) respond 400 "Bad Request" '{"error":"provider input size could not be measured"}' ;;
 esac
@@ -268,6 +296,27 @@ EOF
     return 1
 }
 
+cost_for_tokens() {
+    cost_tokens="$1"
+    cost_tier="$2"
+    [ "$cost_tier" = "free" ] && { printf '%s\n' 0; return 0; }
+    case "$cost_tokens" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    # Ceiling is configured in micro-USD per 1,000 tokens. Round up so the
+    # reservation cannot understate a paid request's worst-case cost.
+    printf '%s\n' "$(( (cost_tokens * MAX_COST_MICROS_PER_1K_TOKENS + 999) / 1000 ))"
+}
+
+decimal_cost_to_micros() {
+    cost_value="$1"
+    awk -v value="$cost_value" 'BEGIN {
+        if (value !~ /^[0-9]+([.][0-9]{1,6})?$/) exit 1
+        scaled = value * 1000000
+        printf "%.0f\n", scaled
+    }'
+}
+
 write_ledger() {
     ledger_tmp="${LEDGER_FILE}.tmp.$$"
     printf '%s\n' "$1" > "$ledger_tmp" || return 1
@@ -323,12 +372,14 @@ migrate_legacy_ledger() {
                  hour_window:$hour,day_window:$day,route_id:"legacy",profile_id:$profile,
                  upstream_model:"legacy",reserved_tokens:0,reserved_input_tokens:0,
                  settled_tokens:0,settled_input_tokens:0,
+                 reserved_cost_micros:0,settled_cost_micros:0,
                  state:"settled",settlement:"migrated_request_count",updated_at:0}] +
             (if $tokens > 0 then
                 [{id:"legacy-tokens",created_at:0,expires_at:0,hour_window:$hour,
                   day_window:$day,route_id:"legacy",profile_id:$profile,
                   upstream_model:"legacy",reserved_tokens:$tokens,reserved_input_tokens:0,
                   settled_tokens:$tokens,settled_input_tokens:0,
+                  reserved_cost_micros:0,settled_cost_micros:0,
                   state:"settled",settlement:"migrated_reserved_max",updated_at:0}]
              else [] end)
         )}')
@@ -354,6 +405,8 @@ load_and_reconcile_ledger() {
             ((.reserved_input_tokens // 0) | type == "number" and floor == . and . >= 0) and
             ((.settled_tokens // .reserved_tokens) | type == "number" and floor == . and . >= 0) and
             ((.settled_input_tokens // .reserved_input_tokens // 0) | type == "number" and floor == . and . >= 0) and
+            ((.reserved_cost_micros // 0) | type == "number" and floor == . and . >= 0) and
+            ((.settled_cost_micros // .reserved_cost_micros // 0) | type == "number" and floor == . and . >= 0) and
             (.state == "reserved" or .state == "settled" or .state == "expired")
         )
     ' >/dev/null 2>&1 || return 1
@@ -365,6 +418,7 @@ load_and_reconcile_ledger() {
                 .state = "expired" |
                 .settled_tokens = .reserved_tokens |
                 .settled_input_tokens = (.reserved_input_tokens // 0) |
+                .settled_cost_micros = (.reserved_cost_micros // 0) |
                 .settlement = "expired_reserved_max" |
                 .updated_at = $now
             else . end
@@ -382,7 +436,9 @@ reserve_attempt() {
     reserve_upstream_model="$3"
     reserve_tokens="$4"
     reserve_input_tokens="${5:-0}"
+    reserve_tier="${6:-paid}"
     reserve_total_tokens=$((reserve_tokens + reserve_input_tokens))
+    reserve_cost_micros=$(cost_for_tokens "$reserve_total_tokens" "$reserve_tier") || return 1
     reserve_id="$(date -u +%s)-$$-${attempt_number}"
     reserve_now="$(date -u +%s)"
     reserve_hour=$((reserve_now / 3600))
@@ -404,7 +460,20 @@ reserve_attempt() {
         release_ledger_lock
         return 1
     }
-    case "$hour_count:$day_tokens:$reserve_total_tokens" in
+    reserve_month=$(date -u +%Y-%m)
+    day_cost=$(printf '%s' "$ledger" | jq -r --argjson day "$reserve_day" \
+        '[.records[] | select(.day_window == $day) |
+          (.settled_cost_micros // .reserved_cost_micros // 0)] | add // 0') || {
+        release_ledger_lock
+        return 1
+    }
+    month_cost=$(printf '%s' "$ledger" | jq -r --arg month "$reserve_month" \
+        '[.records[] | select((.month_window // "") == $month) |
+          (.settled_cost_micros // .reserved_cost_micros // 0)] | add // 0') || {
+        release_ledger_lock
+        return 1
+    }
+    case "$hour_count:$day_tokens:$reserve_total_tokens:$day_cost:$month_cost:$reserve_cost_micros" in
         *[!0-9:]*|:*|*::*)
             release_ledger_lock
             return 1
@@ -418,15 +487,28 @@ reserve_attempt() {
         release_ledger_lock
         return 2
     }
+    if [ "$COST_BUDGET_ENABLED" -eq 1 ]; then
+        [ "$day_cost" -le $((DAILY_COST_LIMIT_MICROS - reserve_cost_micros)) ] || {
+            release_ledger_lock
+            return 2
+        }
+        [ "$month_cost" -le $((MONTHLY_COST_LIMIT_MICROS - reserve_cost_micros)) ] || {
+            release_ledger_lock
+            return 2
+        }
+    fi
     ledger=$(printf '%s' "$ledger" | jq \
         --arg id "$reserve_id" --arg profile "$reserve_profile" --arg route "$reserve_route" \
         --arg upstream "$reserve_upstream_model" --argjson now "$reserve_now" \
         --argjson expires "$reserve_expires" --argjson hour "$reserve_hour" --argjson day "$reserve_day" \
         --argjson reserved "$reserve_tokens" --argjson reserved_input "$reserve_input_tokens" \
+        --arg month "$reserve_month" --argjson reserved_cost "$reserve_cost_micros" \
         '.records += [{id:$id,created_at:$now,expires_at:$expires,hour_window:$hour,day_window:$day,
+                       month_window:$month,
                        route_id:$route,profile_id:$profile,upstream_model:$upstream,
                        reserved_tokens:$reserved,reserved_input_tokens:$reserved_input,
-                       settled_tokens:null,settled_input_tokens:null,state:"reserved",
+                       reserved_cost_micros:$reserved_cost,settled_tokens:null,
+                       settled_input_tokens:null,settled_cost_micros:null,state:"reserved",
                        settlement:null,updated_at:$now}]') || {
         release_ledger_lock
         return 1
@@ -446,6 +528,7 @@ settle_attempt() {
     settle_failure="$3"
     settle_actual="$4"
     settle_actual_prompt="${5:-}"
+    settle_actual_cost="${6:-}"
     settle_now=$(date -u +%s)
     settle_value=""
     settle_prompt_value=""
@@ -495,6 +578,17 @@ settle_attempt() {
             return 1
             ;;
     esac
+    reserve_cost_value=$(printf '%s' "$ledger" | jq -r --arg id "$settle_id" \
+        '[.records[] | select(.id == $id and .state == "reserved") | (.reserved_cost_micros // 0)] | .[0] // 0') || {
+        release_ledger_lock
+        return 1
+    }
+    case "$reserve_cost_value" in
+        ''|*[!0-9]*)
+            release_ledger_lock
+            return 1
+            ;;
+    esac
     case "$settle_status:$settle_value:$settle_prompt_value" in
         200:?*:?*)
             if [ "$settle_value" -gt "$reserve_value" ] || [ "$settle_prompt_value" -gt "$reserve_input_value" ]; then
@@ -505,14 +599,32 @@ settle_attempt() {
         *)
             settle_value="$reserve_value"
             settle_prompt_value="$reserve_input_value"
+            settle_cost_value="$reserve_cost_value"
             ;;
     esac
+    if [ "$settle_status" = "200" ]; then
+        case "$settle_actual_cost" in
+            ''|*[!0-9]*)
+                settle_cost_value="$reserve_cost_value"
+                [ "$settle_reason" = "actual_usage" ] && settle_reason="reserved_max_missing_cost"
+                ;;
+            *)
+                settle_cost_value="$settle_actual_cost"
+                if [ "$settle_cost_value" -gt "$reserve_cost_value" ]; then
+                    settle_reason="cost_overrun"
+                    settle_hard_failure=1
+                fi
+                ;;
+        esac
+    fi
     ledger=$(printf '%s' "$ledger" | jq \
         --arg id "$settle_id" --arg status "$settle_status" --arg reason "$settle_reason" \
         --argjson actual "$settle_value" --argjson now "$settle_now" \
         --argjson actual_prompt "$settle_prompt_value" \
+        --argjson actual_cost "$settle_cost_value" \
         '.records |= map(if .id == $id and .state == "reserved" then
-            .state = "settled" | .settled_tokens = $actual | .settled_input_tokens = $actual_prompt | .settlement = $reason |
+            .state = "settled" | .settled_tokens = $actual | .settled_input_tokens = $actual_prompt |
+            .settled_cost_micros = $actual_cost | .settlement = $reason |
             .http_status = ($status | tonumber? // null) | .updated_at = $now
          else . end)') || {
         release_ledger_lock
@@ -641,6 +753,19 @@ extract_usage() {
     USAGE_STATE="valid"
 }
 
+extract_usage_cost() {
+    USAGE_COST_MICROS=""
+    usage_cost_raw=$(jq -r '.usage.cost // empty' "$response_file" 2>/dev/null || true)
+    [ -n "$usage_cost_raw" ] || return 0
+    if USAGE_COST_MICROS=$(decimal_cost_to_micros "$usage_cost_raw" 2>/dev/null); then
+        case "$USAGE_COST_MICROS" in
+            ''|*[!0-9]*) USAGE_COST_MICROS="" ;;
+        esac
+    else
+        USAGE_COST_MICROS=""
+    fi
+}
+
 route_candidates=$(printf '%s\n' "$ROUTE_SPEC" | awk -F '|' -v route="$requested_model" '$1 == route {print}')
 [ -n "$route_candidates" ] || respond 403 "Forbidden" '{"error":"model route is not allowed by the provider broker"}'
 
@@ -724,7 +849,7 @@ ${candidate_key}"
         last_failure="provider route request shaping failed"
         break
     fi
-    if reserve_attempt "$profile_id" "$requested_model" "$upstream_model" "$requested_tokens" "$requested_input_tokens"; then
+    if reserve_attempt "$profile_id" "$requested_model" "$upstream_model" "$requested_tokens" "$requested_input_tokens" "$tier"; then
         reserve_status=0
     else
         reserve_status=$?
@@ -800,9 +925,13 @@ ${candidate_key}"
                 continue
             fi
             extract_usage
+            extract_usage_cost
             case "$USAGE_STATE" in
                 valid)
-                    settle_attempt "$RESERVATION_ID" "$http_code" "actual_usage" "$USAGE_COMPLETION" "$USAGE_PROMPT" || \
+                    if [ "$tier" = "free" ]; then
+                        USAGE_COST_MICROS=0
+                    fi
+                    settle_attempt "$RESERVATION_ID" "$http_code" "actual_usage" "$USAGE_COMPLETION" "$USAGE_PROMPT" "$USAGE_COST_MICROS" || \
                         respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
                     ;;
                 missing)

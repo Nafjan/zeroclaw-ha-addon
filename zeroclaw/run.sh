@@ -23,7 +23,7 @@ HA_TOKEN="${SUPERVISOR_TOKEN:-${LEGACY_HA_TOKEN}}"
 TELEGRAM_TOKEN="$(bashio::config 'telegram_bot_token')"
 TELEGRAM_USERS="$(bashio::config 'telegram_allowed_users')"
 if [ -z "${PROVIDER_KEY_MODE}" ]; then
-    bashio::log.warning "provider_key_mode is absent in existing options; using the broker default. Set direct_temporary only for a controlled migration comparison."
+    bashio::log.warning "provider_key_mode is absent in existing options; using the broker default."
     PROVIDER_KEY_MODE="broker"
 fi
 DEFAULT_MODEL="$(bashio::config 'default_model')"
@@ -144,6 +144,31 @@ PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-32768}"
+DAILY_COST_LIMIT="${DAILY_COST_LIMIT:-5.0}"
+MONTHLY_COST_LIMIT="${MONTHLY_COST_LIMIT:-20.0}"
+PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000
+
+cost_to_micros() {
+    awk -v cost="$1" 'BEGIN {
+        if (cost !~ /^[0-9]+([.][0-9]{1,6})?$/) exit 1
+        printf "%.0f\n", cost * 1000000
+    }'
+}
+
+DAILY_COST_LIMIT_MICROS="$(cost_to_micros "${DAILY_COST_LIMIT}")" || {
+    bashio::log.fatal "daily_cost_limit_usd is invalid; refusing to start"
+    exit 1
+}
+MONTHLY_COST_LIMIT_MICROS="$(cost_to_micros "${MONTHLY_COST_LIMIT}")" || {
+    bashio::log.fatal "monthly_cost_limit_usd is invalid; refusing to start"
+    exit 1
+}
+[ "${DAILY_COST_LIMIT_MICROS}" -le 1000000000000 ] &&
+    [ "${MONTHLY_COST_LIMIT_MICROS}" -le 1000000000000 ] &&
+    [ "${MONTHLY_COST_LIMIT_MICROS}" -ge "${DAILY_COST_LIMIT_MICROS}" ] || {
+    bashio::log.fatal "cost budgets are outside the safe range; refusing to start"
+    exit 1
+}
 PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR="${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR:-${PROVIDER_MAX_REQUESTS_HOUR}}"
 PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET="${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET:-${PROVIDER_DAILY_TOKEN_BUDGET}}"
 PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR:-60}"
@@ -348,14 +373,11 @@ esac
 
 case "${PROVIDER_KEY_MODE}" in
     direct_temporary)
-        # Explicit, temporary exception for existing installations that have
-        # not migrated to the root-owned model broker yet.
-        if [ "${ENABLE_WRITE_ACTIONS}" = "true" ]; then
-            bashio::log.fatal "provider_key_mode=direct_temporary cannot be combined with write actions; migrate to broker mode first."
-            exit 1
-        fi
-        bashio::log.warning "Provider key is in direct_temporary mode; the planner can read it. Keep production writes disabled and migrate to provider_key_mode=broker."
-        export ZEROCLAW_API_KEY="${OPENROUTER_KEY}"
+        # Existing Supervisor options may retain the removed compatibility
+        # value. Migrate it in memory before any provider credential is
+        # exported; the planner must never receive a real provider key.
+        bashio::log.warning "provider_key_mode=direct_temporary is retired; forcing the root-owned broker mode."
+        PROVIDER_KEY_MODE="broker"
         ;;
     broker)
         # The per-start local provider credential is generated immediately
@@ -364,18 +386,20 @@ case "${PROVIDER_KEY_MODE}" in
         unset ZEROCLAW_API_KEY
         ;;
     *)
-        bashio::log.fatal "provider_key_mode must be direct_temporary or broker."
+        bashio::log.fatal "provider_key_mode must be broker."
         exit 1
         ;;
 esac
 export RUST_LOG="${LOG_LEVEL}"
 
-if [ "${PROVIDER_KEY_MODE}" = "direct_temporary" ]; then
-    [ -n "${OPENROUTER_KEY}" ] || {
-        bashio::log.fatal "OPENROUTER_KEY is required in direct_temporary mode!"
-        exit 1
-    }
-fi
+[ "${PROVIDER_KEY_MODE}" = "broker" ] || {
+    bashio::log.fatal "provider_key_mode did not resolve to broker; refusing to start"
+    exit 1
+}
+[ -n "${OPENROUTER_KEY}" ] || {
+    bashio::log.fatal "OPENROUTER_KEY not set!"
+    exit 1
+}
 [ -n "${HA_TOKEN}" ] || {
     bashio::log.fatal "HA_TOKEN not set!"
     exit 1
@@ -458,7 +482,7 @@ if [ -L "${WS}/sessions" ] ||
     bashio::log.fatal "Telegram session directory is not a regular directory"
     exit 1
 fi
-mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets
+mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets /data/approval-receipts/outcomes
 chown zeroclaw:zeroclaw "${WS}/sessions"
 chmod 0700 "${WS}/sessions"
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
@@ -622,8 +646,9 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     export ZEROCLAW_API_KEY="${PROVIDER_CLIENT_AUTH_TOKEN}"
 fi
 
-# Broker provider credentials when requested.  The direct_temporary mode is
-# retained only as an explicit migration exception for existing installs.
+# Broker provider credentials. Provider secrets never enter the planner
+# environment, including when an existing options object still contains the
+# retired direct_temporary value.
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     install -m 0755 /opt/zeroclaw/lib/provider-broker-handler.sh /usr/local/bin/provider-broker-handler
     install -m 0755 /opt/zeroclaw/lib/provider-broker-entrypoint.sh /usr/local/bin/provider-broker-entrypoint
@@ -700,6 +725,9 @@ ${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
         export PROVIDER_MAX_TOKENS PROVIDER_MAX_INPUT_TOKENS
         export PROVIDER_MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_HOUR}"
         export PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET}"
+        export PROVIDER_DAILY_COST_LIMIT_MICROS="${DAILY_COST_LIMIT_MICROS}"
+        export PROVIDER_MONTHLY_COST_LIMIT_MICROS="${MONTHLY_COST_LIMIT_MICROS}"
+        export PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS="${PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS}"
         # Reuse the legacy quota path so the broker can atomically migrate the
         # previous hourly/day counters into the durable reservation ledger.
         export PROVIDER_LEDGER_FILE="/data/provider/quota.json"
@@ -731,6 +759,7 @@ CAPABILITY_PORT=42618
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
     export CAPABILITY_QUOTA_FILE="/data/capability/quota.json"
     export CAPABILITY_QUOTA_LOCK="/data/capability/.quota.lock"
+    export ZEROCLAW_APPROVAL_OUTCOME_DIR="/data/approval-receipts/outcomes"
     export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA POLICY_REQUIRE_APPROVAL
     export QUIET_HOURS
     export EXTRA_DENY="${POLICY_EXTRA_DENY}"
@@ -954,6 +983,7 @@ TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
 OFFSET_F="${TELEGRAM_OFFSET_FILE}"
 REPLY_CACHE_DIR="/data/capability/telegram-replies"
 CALLBACK_CACHE_DIR="/data/capability/telegram-callbacks"
+APPROVAL_OUTCOME_DIR="/data/approval-receipts/outcomes"
 USERS_F="${TG_USERS_FILE}"
 GW="${GW}"
 AGENT_BIN="/usr/local/bin/zeroclaw"
@@ -1158,6 +1188,43 @@ replay_callback_result() {
     [ -z "\$cached_edit" ] || edit_msg "\$chat_id" "\$message_id" "\$cached_edit"
 }
 
+canonical_ticket_summary() {
+    summary_file="\$1"
+    summary_service=\$(jq -r '.service // empty' "\$summary_file" 2>/dev/null) || return 1
+    summary_payload=\$(jq -cS '.payload' "\$summary_file" 2>/dev/null) || return 1
+    [ -n "\$summary_service" ] && [ -n "\$summary_payload" ] || return 1
+    printf '%s | %s' "\$summary_service" "\$summary_payload"
+}
+
+approval_outcome_text() {
+    outcome_file="\$1"
+    [ ! -L "\$outcome_file" ] && [ -f "\$outcome_file" ] || return 1
+    jq -e --arg actor "\$APPROVAL_USER" --arg chat "\$APPROVAL_CHAT" \
+        '.state == "applied" and .actor_user_id == $actor and .chat_id == $chat and
+         (.service | type == "string") and (.payload | type == "object")' \
+        "\$outcome_file" >/dev/null 2>&1 || return 1
+    outcome_summary=\$(canonical_ticket_summary "\$outcome_file") || return 1
+    outcome_result=\$(jq -c '.result // null' "\$outcome_file" 2>/dev/null) || return 1
+    printf '✅ Approved and applied: %s\\nHome Assistant accepted the exact service call.\\nResult: %s' \
+        "\$outcome_summary" "\$outcome_result" | cut -c1-4000
+}
+
+replay_approval_message() {
+    short="\$1"; update_id="\$2"; chat_id="\$3"
+    outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
+    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    send_and_cache "\$update_id" "\$chat_id" "\$outcome_reply"
+}
+
+replay_approval_outcome() {
+    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
+    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    answer_cb "\$cb_id" "Applied." || return 1
+    edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
+    cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "Applied." "\$outcome_reply"
+}
+
 approval_marker_ready() {
     short="\$1"
     marker="/data/approved/\${short}.marker"
@@ -1251,11 +1318,17 @@ handle_message() {
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
         if [ ! -f "\$TICKET" ]; then
+            if [ -n "\$APPROVE_ID" ] && replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+                return 0
+            fi
             if ! send_and_cache "\$update_id" "\$chat_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
             return 0
         fi
-        SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        SUMMARY=\$(canonical_ticket_summary "\$TICKET") || return 1
         if [ -n "\$APPROVE_ID" ]; then
+            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+                return 0
+            fi
             # A watcher restart can occur after the durable approved_audited
             # marker but before HA execution. Resume that approval instead of
             # treating the redelivery as a duplicate and abandoning it.
@@ -1484,16 +1557,22 @@ while true; do
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
         if [ ! -f "\$TICKET" ]; then
+            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+                continue
+            fi
             if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
             if [ -n "\$MSG_ID" ] && ! edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"; then BATCH_OK=false; break; fi
             continue
         fi
 
-        SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        SUMMARY=\$(canonical_ticket_summary "\$TICKET") || { BATCH_OK=false; break; }
         CALLBACK_ANSWER=""
         CALLBACK_EDIT=""
         case "\$VERB" in
           approve)
+              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+                  continue
+              fi
               if ! approval_marker_ready "\$SHORT" && \
                   ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
@@ -2871,11 +2950,13 @@ find /data/capability -type l -exec rm -f {} \; 2>/dev/null || true
 chown -R root:root /data/capability
 chmod 0700 /data/capability
 find /data/capability -type f -exec chmod 0600 {} \; 2>/dev/null || true
-mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets
+mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets /data/approval-receipts/outcomes
 chown root:root /data/approved /data/approval-receipts
 chmod 0700 /data/approved /data/approval-receipts
 chown -R root:root /data/approval-receipts
 chmod 0700 /data/approval-receipts/tickets
+chown root:root /data/approval-receipts/outcomes
+chmod 0700 /data/approval-receipts/outcomes
 mkdir -p /data/approval-receipts/.locks
 chown root:root /data/approval-receipts/.locks
 chmod 0700 /data/approval-receipts/.locks

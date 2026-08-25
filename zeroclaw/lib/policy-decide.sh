@@ -98,6 +98,58 @@ first_match() {
     return 1
 }
 
+# Entity arrays are valid typed capability payloads.  Evaluate every entity
+# independently so a deny/confirm glob cannot be bypassed by rendering the
+# array as one aggregate shell value.
+entity_values() {
+    if [ -n "$BODY" ] && command -v jq >/dev/null 2>&1; then
+        values=$(printf '%s' "$BODY" | jq -r '
+            if (.entity_id? | type) == "array" then .entity_id[]
+            elif (.entity_id? | type) == "string" then .entity_id
+            else empty end
+        ' 2>/dev/null || true)
+        if [ -n "$values" ]; then
+            printf '%s\n' "$values"
+            return 0
+        fi
+    fi
+    [ -n "$ENTITY" ] && printf '%s\n' "$ENTITY"
+}
+
+first_entity_match() {
+    list="$1"
+    values=$(entity_values || true)
+    [ -n "$values" ] || return 1
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if HIT=$(first_match "$list" "$candidate"); then
+            printf '%s\n' "$HIT"
+            return 0
+        fi
+    done <<EOF
+$values
+EOF
+    return 1
+}
+
+all_entities_match() {
+    list="$1"
+    values=$(entity_values || true)
+    [ -n "$values" ] || return 1
+    matched=""
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if HIT=$(first_match "$list" "$candidate"); then
+            [ -n "$matched" ] || matched="$HIT"
+        else
+            return 1
+        fi
+    done <<EOF
+$values
+EOF
+    [ -n "$matched" ] && printf '%s\n' "$matched"
+}
+
 # ---------------------------------------------------------------------------
 # 2. Extras: deny first → allow → confirm
 #    (we prefer to DENY-list first so that an entity in both deny and allow
@@ -105,11 +157,11 @@ first_match() {
 # ---------------------------------------------------------------------------
 VERDICT=""
 
-if HIT=$(first_match "$EXTRA_DENY" "$ENTITY"); then
+if HIT=$(first_entity_match "$EXTRA_DENY"); then
     VERDICT="deny:extra_deny:$HIT"
-elif HIT=$(first_match "$EXTRA_ALLOW" "$ENTITY"); then
+elif HIT=$(all_entities_match "$EXTRA_ALLOW"); then
     VERDICT="allow:extra_allow:$HIT"
-elif HIT=$(first_match "$EXTRA_CONFIRM" "$ENTITY"); then
+elif HIT=$(first_entity_match "$EXTRA_CONFIRM"); then
     VERDICT="confirm:extra_confirm:$HIT"
 fi
 
