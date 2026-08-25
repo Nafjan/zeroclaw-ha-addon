@@ -55,7 +55,7 @@ start_proxy() {
     PROVIDER_UPSTREAM_URL="$UPSTREAM_URL" OPENROUTER_KEY=provider-secret \
         PROVIDER_ALLOWED_MODELS='deepseek/deepseek-v4-flash' \
         PROVIDER_MAX_TOKENS=2048 PROVIDER_MAX_REQUESTS_PER_HOUR=10 \
-        PROVIDER_DAILY_TOKEN_BUDGET=10000 PROVIDER_QUOTA_FILE=/data/provider/quota.json \
+        PROVIDER_DAILY_TOKEN_BUDGET=32768 PROVIDER_QUOTA_FILE=/data/provider/quota.json \
         PROVIDER_QUOTA_LOCK=/data/provider/.quota.lock \
         /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 -e /usr/local/bin/provider-broker-entrypoint &
     PROXY_PID=$!
