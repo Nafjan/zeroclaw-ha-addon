@@ -9,6 +9,9 @@ mkdir -p /run/zeroclaw
 printf '%s\n' telegram-secret > /run/zeroclaw/telegram-token
 chown root:root /run/zeroclaw/telegram-token
 chmod 0600 /run/zeroclaw/telegram-token
+printf '%s\n' telegram-client-secret > /run/zeroclaw/telegram-client-auth
+chown root:root /run/zeroclaw/telegram-client-auth
+chmod 0600 /run/zeroclaw/telegram-client-auth
 mkdir -p /data/audit
 cat > /usr/local/bin/zc-audit-write <<'AUDIT'
 #!/bin/sh
@@ -44,6 +47,7 @@ jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
 (
     export PATH="/tmp/fake-curl:$PATH"
     export TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
+    export TELEGRAM_CLIENT_AUTH_TOKEN=telegram-client-secret
     export TELEGRAM_APPROVAL_CHAT=42
     export ZEROCLAW_TELEGRAM_PORT=42629
     while true; do

@@ -71,6 +71,15 @@ case "$OP" in
         ;;
 esac
 
+AUTH_FILE="${ZEROCLAW_CAPABILITY_AUTH_FILE:-/run/zeroclaw/capability-client-auth}"
+[ -r "$AUTH_FILE" ] || { echo "capability broker credential is unavailable" >&2; exit 1; }
+AUTH=$(tr -d '\r\n' < "$AUTH_FILE") || { echo "capability broker credential could not be read" >&2; exit 1; }
+[ -n "$AUTH" ] || { echo "capability broker credential is empty" >&2; exit 1; }
+REQUEST=$(printf '%s' "$REQUEST" | jq -c --arg auth "$AUTH" '. + {auth:$auth}') || {
+    echo "capability request could not be authenticated" >&2
+    exit 1
+}
+
 RESPONSE=$(/bin/busybox nc -w 40 "$HOST" "$PORT" <<EOF
 $REQUEST
 EOF

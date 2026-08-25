@@ -245,7 +245,13 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_max_input_tokens is outside the safe range' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'chmod 0700 /run/zeroclaw' "$run_file"
+    run grep -F 'chmod 0710 /run/zeroclaw' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'PROVIDER_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'CAPABILITY_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TELEGRAM_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"' "$run_file"
     [ "$status" -eq 0 ]
@@ -263,6 +269,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
     run grep -F 'Authorization: Bearer ${OPENROUTER_KEY}' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -ne 0 ]
+    run grep -F 'provider broker client authentication failed' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
     run grep -F 'write capabilities are internal-only' "$BATS_TEST_DIRNAME/../lib/ha-capability.sh"
     [ "$status" -eq 0 ]
     run grep -F 'TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"

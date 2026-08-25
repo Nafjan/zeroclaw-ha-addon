@@ -147,6 +147,7 @@ start_proxy() {
     profile_spec="$1"
     route_spec="$2"
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
+        PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
         PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
@@ -176,7 +177,7 @@ request_proxy() {
     body_length=$(printf '%s' "$request_body" | wc -c | tr -d ' ')
     {
         printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-        printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
             "$body_length" "$request_body"
     } | /bin/busybox nc -w 15 127.0.0.1 "$PROXY_PORT"
 }

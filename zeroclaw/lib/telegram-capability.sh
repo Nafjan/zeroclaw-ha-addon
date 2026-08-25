@@ -45,6 +45,15 @@ case "$OP" in
         ;;
 esac
 
+AUTH_FILE="${ZEROCLAW_TELEGRAM_AUTH_FILE:-/run/zeroclaw/telegram-client-auth}"
+[ -r "$AUTH_FILE" ] || { echo "Telegram broker credential is unavailable" >&2; exit 1; }
+AUTH=$(tr -d '\r\n' < "$AUTH_FILE") || { echo "Telegram broker credential could not be read" >&2; exit 1; }
+[ -n "$AUTH" ] || { echo "Telegram broker credential is empty" >&2; exit 1; }
+REQUEST=$(printf '%s' "$REQUEST" | jq -c --arg auth "$AUTH" '. + {auth:$auth}') || {
+    echo "Telegram request could not be authenticated" >&2
+    exit 1
+}
+
 RESPONSE=$(/bin/busybox nc -w 45 127.0.0.1 "$PORT" <<EOF
 $REQUEST
 EOF

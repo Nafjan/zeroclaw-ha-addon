@@ -6,6 +6,7 @@ set -eu
 TOKEN_FILE="${TELEGRAM_TOKEN_FILE:-/run/zeroclaw/telegram-token}"
 APPROVAL_CHAT="${TELEGRAM_APPROVAL_CHAT:-}"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
+CLIENT_AUTH_TOKEN="${TELEGRAM_CLIENT_AUTH_TOKEN:-}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -24,6 +25,13 @@ request=""
 IFS= read -r request || true
 [ -n "$request" ] || json_error "empty Telegram request"
 [ "${#request}" -le 131072 ] || json_error "Telegram request too large"
+[ -n "$CLIENT_AUTH_TOKEN" ] || json_error "Telegram broker client authentication is unavailable"
+provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
+    json_error "Telegram broker client authentication failed"
+[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+    json_error "Telegram broker client authentication failed"
+request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
+    json_error "Telegram request is not valid JSON"
 [ -r "$TOKEN_FILE" ] || json_error "Telegram broker credential is unavailable"
 TOKEN=$(cat "$TOKEN_FILE")
 [ -n "$TOKEN" ] || json_error "Telegram broker credential is empty"

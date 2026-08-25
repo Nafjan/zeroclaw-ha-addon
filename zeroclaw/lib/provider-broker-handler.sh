@@ -24,6 +24,7 @@ FALLBACK_ENABLED="${PROVIDER_FALLBACK_ENABLED:-true}"
 FREE_FALLBACK_ENABLED="${PROVIDER_FREE_FALLBACK_ENABLED:-false}"
 FUSION_PRESET="${PROVIDER_FUSION_PRESET:-general-budget}"
 AUTO_COST_TIER="${PROVIDER_AUTO_COST_TIER:-medium}"
+CLIENT_AUTH_TOKEN="${PROVIDER_CLIENT_AUTH_TOKEN:-}"
 LEDGER_FILE="${PROVIDER_LEDGER_FILE:-${PROVIDER_QUOTA_FILE:-/data/provider/ledger.json}}"
 LEDGER_FILE=$(printf '%s' "$LEDGER_FILE" | sed 's/[[:space:]]*$//')
 LEDGER_LOCK="${PROVIDER_LEDGER_LOCK:-${PROVIDER_QUOTA_LOCK:-/data/provider/.ledger.lock}}"
@@ -102,6 +103,8 @@ request_line=$(printf '%s' "$request_line" | tr -d '\r')
     respond 404 "Not Found" '{"error":"route is not available"}'
 
 content_length=""
+client_auth_header=""
+client_auth_header_count=0
 while IFS= read -r header; do
     header=$(printf '%s' "$header" | tr -d '\r')
     [ -z "$header" ] && break
@@ -112,8 +115,18 @@ while IFS= read -r header; do
         Transfer-Encoding:*|transfer-encoding:*)
             respond 400 "Bad Request" '{"error":"chunked requests are not supported"}'
             ;;
+        Authorization:*|authorization:*)
+            client_auth_header_count=$((client_auth_header_count + 1))
+            client_auth_header=$(printf '%s' "$header" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+            ;;
     esac
 done
+
+[ -n "$CLIENT_AUTH_TOKEN" ] || \
+    respond 503 "Service Unavailable" '{"error":"provider broker client authentication is unavailable"}'
+[ "$client_auth_header_count" -eq 1 ] &&
+    [ "$client_auth_header" = "Bearer ${CLIENT_AUTH_TOKEN}" ] || \
+    respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
 
 printf '%s' "$content_length" | grep -Eq '^[0-9]+$' || \
     respond 411 "Length Required" '{"error":"content length is required"}'
