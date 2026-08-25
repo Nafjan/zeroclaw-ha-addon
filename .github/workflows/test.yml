@@ -92,7 +92,9 @@ jobs:
 
   container:
     name: Build and smoke-test arm64 image
-    timeout-minutes: 20
+    # The acceptance lane runs several sequential arm64/QEMU containers,
+    # including the real daemon/provider round-trip and backup contract.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
