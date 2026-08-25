@@ -73,6 +73,25 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "learning loop is opt-in and correction receipts are bounded" {
+    run grep -F 'ENABLE_LEARNING="${ENABLE_LEARNING:-false}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'enable_learning_loops is invalid; refusing to start' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'LEARNING_ENABLED="${ENABLE_LEARNING}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '[ "\$LEARNING_ENABLED" = "true" ] || exit 0' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'expires_at:$expires_at' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'OUTCOME_NOW=\$(date -u +%s)' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.expires_at | type == "number" and floor == . and . >= \$now' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'A correction receipt is valid only' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "legacy textual guarded actions use the typed broker compatibility path" {
     run grep -F 'install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/telegram-legacy-action' "$run_file"
     [ "$status" -eq 0 ]

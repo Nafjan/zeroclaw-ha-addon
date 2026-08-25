@@ -100,6 +100,14 @@ POLICY_TRUST_PROMOTE="$(bashio::config 'policy_trust_promote_after')"
 # user-controlled string is used by a generated helper or policy function.
 DAILY_REPORT_TIME="${DAILY_REPORT_TIME:-08:00}"
 QUIET_HOURS="${QUIET_HOURS:-23:00-06:00}"
+ENABLE_LEARNING="${ENABLE_LEARNING:-false}"
+case "${ENABLE_LEARNING}" in
+    true|false) ;;
+    *)
+        bashio::log.fatal "enable_learning_loops is invalid; refusing to start"
+        exit 1
+        ;;
+esac
 
 validate_clock_value() {
     clock_label="$1"
@@ -188,6 +196,11 @@ esac
     bashio::log.fatal "provider_max_input_tokens is outside the safe range; refusing to start"
     exit 1
 }
+# The broker reserves the configured input ceiling plus the configured output
+# ceiling before contacting any provider. A profile budget that covers only
+# output tokens is an accepted-but-unusable configuration, so reject it at the
+# Supervisor boundary rather than failing every request later with 429.
+MIN_PROVIDER_PROFILE_DAILY_BUDGET=$((PROVIDER_MAX_TOKENS + PROVIDER_MAX_INPUT_TOKENS))
 
 validate_model_id() {
     model_label="$1"
@@ -290,10 +303,10 @@ done
         bashio::log.fatal "provider profile token budgets are outside the safe range; refusing to start"
         exit 1
     }
-[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
-    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
-    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] || {
-        bashio::log.fatal "provider profile token budgets must cover one maximum request; refusing to start"
+[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] &&
+    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] &&
+    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] || {
+        bashio::log.fatal "provider profile token budgets must cover maximum input plus output reservation; refusing to start"
         exit 1
     }
 
@@ -1219,6 +1232,16 @@ handle_message() {
     # "still off", "isn't", "nothing happened" — common real corrections that
     # don't open with the "no/wrong" markers.
     LAST_OUTCOME_FILE="/data/capability/last-outcome.json"
+    if [ "${ENABLE_LEARNING}" != "true" ]; then
+        LAST_OUTCOME_FILE="/data/capability/.learning-disabled"
+    fi
+    if [ "${ENABLE_LEARNING}" = "true" ] && [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
+        OUTCOME_NOW=\$(date -u +%s)
+        if ! jq -e --argjson now "\$OUTCOME_NOW" \
+            '(.expires_at | type == "number" and floor == . and . >= \$now)' "\$LAST_OUTCOME_FILE" >/dev/null 2>&1; then
+            rm -f "\$LAST_OUTCOME_FILE"
+        fi
+    fi
     if [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
         # Lowercase + trim leading whitespace for matching only
         tlc=\$(printf '%s' "\$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')
@@ -1240,6 +1263,7 @@ handle_message() {
                 fi
                 ;;
         esac
+        rm -f "\$LAST_OUTCOME_FILE"
     fi
 
     send_typing "\$chat_id"
@@ -1792,12 +1816,14 @@ SCRIPT
 # zc-set-outcome — agent records the one-line outcome of a completed action
 # so the next user message can be classified as a correction (or not).
 # Empty/missing file = no outcome to correct (greetings, status queries).
-cat > /usr/local/bin/zc-set-outcome << 'SCRIPT'
+cat > /usr/local/bin/zc-set-outcome << SCRIPT
 #!/bin/sh
 # Usage: zc-set-outcome "<one-line outcome>"
-TEXT="$1"
-[ -z "$TEXT" ] && exit 0
-exec /usr/local/bin/ha-capability set_outcome "$TEXT" >/dev/null
+LEARNING_ENABLED="${ENABLE_LEARNING}"
+TEXT="\$1"
+[ -z "\$TEXT" ] && exit 0
+[ "\$LEARNING_ENABLED" = "true" ] || exit 0
+exec /usr/local/bin/ha-capability set_outcome "\$TEXT" >/dev/null
 SCRIPT
 
 # zc-lesson-add — append a one-line lesson to LESSONS.md (deduped, FIFO-capped).
@@ -2798,6 +2824,9 @@ chown -R root:root /data/provider
 chmod 0700 /data/provider
 find /data/provider -type f -exec chmod 0600 {} \; 2>/dev/null || true
 mkdir -p /data/capability
+if [ "${ENABLE_LEARNING}" != "true" ]; then
+    rm -f /data/capability/last-outcome.json
+fi
 find /data/capability -type l -exec rm -f {} \; 2>/dev/null || true
 chown -R root:root /data/capability
 chmod 0700 /data/capability

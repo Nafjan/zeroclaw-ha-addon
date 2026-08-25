@@ -222,6 +222,7 @@ load_profile() {
     esac
     [ "$PROFILE_MAX_REQUESTS" -ge 1 ] || return 1
     [ "$PROFILE_DAILY_BUDGET" -ge 1 ] || return 1
+    [ "$PROFILE_DAILY_BUDGET" -ge $((MAX_TOKENS + MAX_INPUT_TOKENS)) ] || return 1
     PROFILE_KEY=""
     if [ -n "$PROFILE_KEY_FILE" ] && [ -r "$PROFILE_KEY_FILE" ]; then
         PROFILE_KEY=$(tr -d '\r\n' < "$PROFILE_KEY_FILE")
