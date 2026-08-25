@@ -24,8 +24,9 @@ options:
   # and never receive a request.
   nvidia_api_key: ""
   ark_api_key: ""
-  # broker keeps the provider key in the root-owned local model gateway.
-  # direct_temporary is retained only for migration/compatibility testing.
+  # The broker keeps provider keys in the root-owned local model gateway.
+  # direct_temporary remains schema-compatible only so an upgrade can migrate
+  # an older saved options object; run.sh forces it into broker mode in memory.
   provider_key_mode: broker
   # Deprecated compatibility option. Prefer the Supervisor-provided token.
   ha_token: ""

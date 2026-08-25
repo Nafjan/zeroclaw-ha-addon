@@ -92,7 +92,7 @@ if [ "$OK" != "true" ]; then
     printf '%s\n' "$RESPONSE" | jq -r '.error // "capability request failed"' >&2
     if [ "$OP" = call_service ]; then
         case "$ERROR_CODE" in
-            execution_outcome_unknown|executed_audit_unknown|executed_approval_audit_unknown|executed_finalize_unknown)
+            execution_outcome_unknown|executed_audit_unknown|executed_approval_audit_unknown|executed_approval_outcome_unknown|executed_finalize_unknown)
                 # Status 3 is reserved for a service that may already have
                 # executed but whose durable outcome/approval state is
                 # incomplete. Callers must not write a false failed row.

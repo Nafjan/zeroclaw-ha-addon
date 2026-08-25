@@ -61,6 +61,83 @@ valid_ticket() {
     printf '%s' "$1" | grep -Eq '^[a-f0-9]{8}$'
 }
 
+valid_entity_value() {
+    printf '%s' "$1" | jq -e '
+      if type == "string" then
+        test("^[a-z0-9_]+\\.[a-z0-9_-]+$")
+      elif type == "array" then
+        length > 0 and length <= 100 and
+        all(.[]; type == "string" and test("^[a-z0-9_]+\\.[a-z0-9_-]+$"))
+      else false end
+    ' >/dev/null 2>&1
+}
+
+# This is a defense-in-depth copy of the typed capability contract. The
+# Telegram broker must reject a ticket it cannot render exactly, even if a
+# compromised planner bypassed the normal action helper.
+validate_ticket_payload() {
+    service="$1"
+    payload="$2"
+    case "$service" in
+        light/turn_on|light/turn_off|light/toggle|\
+        switch/turn_on|switch/turn_off|switch/toggle|\
+        input_boolean/turn_on|input_boolean/turn_off|input_boolean/toggle|\
+        cover/open_cover|cover/close_cover|cover/stop_cover)
+            entity=$(printf '%s' "$payload" | jq -c '.entity_id // empty')
+            [ -n "$entity" ] && valid_entity_value "$entity" || return 1
+            ;;
+        climate/set_temperature)
+            entity=$(printf '%s' "$payload" | jq -c '.entity_id // empty')
+            valid_entity_value "$entity" || return 1
+            printf '%s' "$payload" | jq -e '
+              (.temperature | type == "number") and
+              (.temperature >= 4 and .temperature <= 40)
+            ' >/dev/null 2>&1 || return 1
+            ;;
+        climate/set_hvac_mode)
+            entity=$(printf '%s' "$payload" | jq -c '.entity_id // empty')
+            valid_entity_value "$entity" || return 1
+            printf '%s' "$payload" | jq -e '
+              (.hvac_mode | type == "string") and
+              (.hvac_mode | IN("off","heat","cool","auto","dry","fan_only"))
+            ' >/dev/null 2>&1 || return 1
+            ;;
+        scene/turn_on)
+            entity=$(printf '%s' "$payload" | jq -c '.entity_id // empty')
+            valid_entity_value "$entity" || return 1
+            printf '%s' "$payload" | jq -e '.entity_id | if type == "string" then startswith("scene.") else all(.[]; startswith("scene.")) end' >/dev/null 2>&1 || return 1
+            ;;
+        scene/reload|automation/reload)
+            [ "$payload" = '{}' ] || return 1
+            ;;
+        scene/create)
+            printf '%s' "$payload" | jq -e '
+              .kind == "scene" and
+              (.scene_id | type == "string" and test("^[a-z0-9_]{1,128}$")) and
+              (.friendly_name | type == "string" and length >= 1 and length <= 128 and (test("[\\r\\n]") | not)) and
+              (.entities | type == "object" and all(keys[]; test("^[a-z0-9_]+\\.[a-z0-9_-]+$")) and length <= 100)
+            ' >/dev/null 2>&1 || return 1
+            ;;
+        automation/create)
+            printf '%s' "$payload" | jq -e '
+              .kind == "automation" and
+              (.alias | type == "string" and length >= 1 and length <= 128 and (test("[\\r\\n]") | not)) and
+              (.yaml | type == "string" and length >= 1 and length <= 32768 and contains("trigger:") and contains("action:"))
+            ' >/dev/null 2>&1 || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+canonical_ticket_summary() {
+    summary_service="$1"
+    summary_payload="$2"
+    summary_canonical=$(printf '%s' "$summary_payload" | jq -cS .)
+    printf '%s | %s' "$summary_service" "$summary_canonical"
+}
+
 mark_delivery_state() {
     state="$1"
     now=$(date -u +%s)
@@ -149,6 +226,18 @@ send_approval() {
         staged_ticket=""
         json_error "approval ticket schema is invalid"
     fi
+    service=$(jq -r '.service' "$staged_ticket")
+    payload=$(jq -c '.payload' "$staged_ticket")
+    validate_ticket_payload "$service" "$payload" || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket service or payload is not allowed"
+    }
+    [ "${#payload}" -le 4096 ] || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval payload is too large to render exactly"
+    }
     mv "$staged_ticket" "$ticket_file"
     staged_ticket=""
     expires_at=$(jq -r '.expires_at' "$ticket_file")
@@ -171,13 +260,14 @@ send_approval() {
     fi
     mark_delivery_state sending || json_error "approval delivery state could not be persisted"
     service=$(jq -r '.service' "$ticket_file")
-    entity=$(jq -r '.payload.entity_id // "(no entity)" | if type == "array" then join(",") else tostring end' "$ticket_file")
-    verdict=$(jq -r '.verdict // "policy confirmation"' "$ticket_file")
-    # The planner-supplied prose is intentionally ignored.  The approval
-    # message is derived from the root-owned canonical ticket so a forged or
-    # stale summary cannot disguise the actual service/target being approved.
-    text=$(printf 'Approval needed (%s)\nAction: %s\nTarget: %s\nPolicy: %s\nReply YES %s or NO %s. Expires in 30 min.' \
-        "$ticket" "$service" "$entity" "$verdict" "$ticket" "$ticket")
+    payload=$(jq -cS '.payload' "$ticket_file")
+    summary=$(canonical_ticket_summary "$service" "$payload")
+    # The planner-supplied prose is intentionally ignored. The root broker
+    # renders the exact canonical payload and uses a
+    # fixed safety statement, so an operator cannot approve hidden parameters
+    # or planner-controlled policy prose.
+    text=$(printf 'Approval needed (%s)\nAction: %s\nParameters: %s\nSafety gate: approval is required for this exact action.\nReply YES %s or NO %s. Expires in 30 min.' \
+        "$ticket" "$service" "$payload" "$ticket" "$ticket")
     keyboard=$(jq -nc --arg id "$ticket" '{inline_keyboard:[[{text:"✅ Approve",callback_data:("zcv1:approve:" + $id)},{text:"❌ Reject",callback_data:("zcv1:reject:" + $id)}],[{text:"💬 Discuss",callback_data:("zcv1:discuss:" + $id)}]]}')
     body=$(jq -nc --arg cid "$chat_id" --arg text "$text" --argjson keyboard "$keyboard" \
         '{chat_id:$cid,text:$text,reply_markup:$keyboard}')

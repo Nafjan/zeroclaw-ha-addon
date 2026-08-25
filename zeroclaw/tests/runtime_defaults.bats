@@ -49,10 +49,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "broker mode does not require a direct provider key at the Supervisor boundary" {
-    run grep -F 'if [ "${PROVIDER_KEY_MODE}" = "direct_temporary" ]; then' "$run_file"
+@test "provider credentials are always broker-owned at the Supervisor boundary" {
+    run grep -F 'provider_key_mode=direct_temporary is retired; forcing the root-owned broker mode.' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'OPENROUTER_KEY is required in direct_temporary mode!' "$run_file"
+    run grep -F '[ "${PROVIDER_KEY_MODE}" = "broker" ]' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -277,6 +277,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'The planner-supplied prose is intentionally ignored' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'Parameters: %s' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'validate_ticket_payload' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
 }
 
 @test "provider fallback is root-owned, profile-bound, and safely enabled by default" {
@@ -331,6 +335,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'input token estimate exceeds the broker limit' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'conservative half-byte estimate' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'input_chars=$(wc -c < "$body_file"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F '(.n == null or' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -487,8 +495,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
 }
 
-@test "direct provider compatibility mode cannot enable writes" {
-    run grep -F 'provider_key_mode=direct_temporary cannot be combined with write actions' "$run_file"
+@test "legacy direct provider mode is forced into the root broker" {
+    run grep -F 'provider_key_mode=direct_temporary is retired; forcing the root-owned broker mode.' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_key_mode: list(direct_temporary|broker)' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
 }
 
@@ -533,6 +543,12 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'approval-transition.sh complete "$approval_ticket"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'approval outcome audit could not be persisted; claim retained' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'write_approval_outcome "$approval_ticket" "$service" "$payload" "$result"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_outcome_receipt_unavailable' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'executed_approval_outcome_unknown' "$BATS_TEST_DIRNAME/../lib/ha-capability.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -630,5 +646,17 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'predicate-type https://slsa.dev/provenance/v1' "$alias_file"
     [ "$status" -eq 0 ]
     run grep -F 'predicate-type https://spdx.dev/Document/v2.3' "$alias_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "existing-candidate promotion requires the trusted reproducible builder run" {
+    promote_file="$BATS_TEST_DIRNAME/../../.github/workflows/promote-existing.yml"
+    run grep -F 'candidate_run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")"' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F '(.head_sha == $commit)' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Rebuild, attest, and sign candidate digest' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zeroclaw-release-linux-x64' "$promote_file"
     [ "$status" -eq 0 ]
 }

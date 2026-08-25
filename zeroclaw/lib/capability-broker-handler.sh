@@ -13,6 +13,7 @@ ACTION_QUOTA_FILE="${CAPABILITY_QUOTA_FILE:-/data/capability/quota.json}"
 ACTION_QUOTA_LOCK="${CAPABILITY_QUOTA_LOCK:-/data/capability/.quota.lock}"
 ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
 OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
+APPROVAL_OUTCOME_DIR="${ZEROCLAW_APPROVAL_OUTCOME_DIR:-/data/approval-receipts/outcomes}"
 CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
 
 json_error() {
@@ -160,6 +161,51 @@ audit_capability_outcome() {
     reason="$4"
     [ -x /usr/local/bin/zc-audit-write ] || return 1
     /usr/local/bin/zc-audit-write "$kind" "$service" "$payload" "$reason"
+}
+
+write_approval_outcome() {
+    outcome_ticket="$1"
+    outcome_service="$2"
+    outcome_payload="$3"
+    outcome_result="$4"
+    printf '%s' "$outcome_ticket" | grep -Eq '^[a-f0-9]{8}$' || return 1
+    [ ! -L "$APPROVAL_OUTCOME_DIR" ] || return 1
+    if [ -e "$APPROVAL_OUTCOME_DIR" ] && [ ! -d "$APPROVAL_OUTCOME_DIR" ]; then
+        return 1
+    fi
+    mkdir -p "$APPROVAL_OUTCOME_DIR" || return 1
+    chmod 0700 "$APPROVAL_OUTCOME_DIR" 2>/dev/null || true
+    outcome_file="${APPROVAL_OUTCOME_DIR}/${outcome_ticket}.json"
+    [ ! -L "$outcome_file" ] || return 1
+    if [ -e "$outcome_file" ]; then
+        jq -e --arg service "$outcome_service" --argjson payload "$outcome_payload" \
+            '.state == "applied" and .service == $service and .payload == $payload' \
+            "$outcome_file" >/dev/null 2>&1
+        return $?
+    fi
+    outcome_ticket_file="${TICKET_DIR}/${outcome_ticket}.json"
+    [ -f "$outcome_ticket_file" ] && [ ! -L "$outcome_ticket_file" ] || return 1
+    outcome_actor=$(jq -er '.approval.actor_user_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_chat=$(jq -er '.approval.chat_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_summary=$(printf '%s' "$outcome_payload" | jq -rS -c --arg service "$outcome_service" \
+        '($service + " | " + (tojson))') || return 1
+    outcome_now=$(date -u +%s)
+    outcome_tmp=$(mktemp "${APPROVAL_OUTCOME_DIR}/.${outcome_ticket}.XXXXXX") || return 1
+    if ! jq -nc --arg ticket "$outcome_ticket" --arg service "$outcome_service" \
+        --arg actor "$outcome_actor" --arg chat "$outcome_chat" \
+        --arg summary "$outcome_summary" --argjson payload "$outcome_payload" \
+        --argjson result "$outcome_result" --argjson now "$outcome_now" \
+        '{version:1,state:"applied",ticket:$ticket,service:$service,payload:$payload,
+          summary:$summary,result:$result,actor_user_id:$actor,chat_id:$chat,
+          applied_at:$now}' > "$outcome_tmp"; then
+        rm -f "$outcome_tmp"
+        return 1
+    fi
+    chown root:root "$outcome_tmp"
+    chmod 0600 "$outcome_tmp"
+    sync
+    mv -f "$outcome_tmp" "$outcome_file"
+    sync
 }
 
 validate_service_payload() {
@@ -403,6 +449,12 @@ run_service() {
                 "source=capability_broker;approval_outcome_audit_unavailable;ticket=${approval_ticket}" || true
             json_error "service executed but approval outcome audit could not be persisted; claim retained for recovery" \
                 executed_approval_audit_unknown
+        fi
+        if ! write_approval_outcome "$approval_ticket" "$service" "$payload" "$result"; then
+            audit_capability_outcome outcome_unknown "$service" "$payload" \
+                "source=capability_broker;approval_outcome_receipt_unavailable;ticket=${approval_ticket}" || true
+            json_error "service executed but its durable approval outcome receipt could not be persisted; claim retained for recovery" \
+                executed_approval_outcome_unknown
         fi
         if ! ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh complete "$approval_ticket" >/dev/null 2>&1; then
             audit_capability_outcome broker_finalize_failed "$service" "$payload" "source=capability_broker;ticket=${approval_ticket}" || true

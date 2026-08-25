@@ -16,6 +16,7 @@ LOCK_DIR="${RECEIPT_DIR}/.locks"
 REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
 CALLBACK_CACHE_DIR="${DATA_DIR}/capability/telegram-callbacks"
 ACTION_ADMISSION_DIR="${DATA_DIR}/capability/action-admissions"
+APPROVAL_OUTCOME_DIR="${RECEIPT_DIR}/outcomes"
 OUTCOME_FILE="${DATA_DIR}/capability/last-outcome.json"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
@@ -174,6 +175,21 @@ if [ -d "$ACTION_ADMISSION_DIR" ] && [ ! -L "$ACTION_ADMISSION_DIR" ]; then
         [ -L "$admission" ] && continue
         old_enough "$admission" "$REPLY_CACHE_GRACE_SECONDS" || continue
         rm -f "$admission"
+    done
+fi
+
+# Durable approval outcomes bridge the interval between a successful HA call
+# and Telegram callback delivery. Retain them for replay, and only remove
+# completed receipts after the same bounded recovery horizon.
+if [ -d "$APPROVAL_OUTCOME_DIR" ] && [ ! -L "$APPROVAL_OUTCOME_DIR" ]; then
+    for outcome in "$APPROVAL_OUTCOME_DIR"/*.json; do
+        [ -f "$outcome" ] || [ -L "$outcome" ] || continue
+        [ -L "$outcome" ] && continue
+        short=$(basename "$outcome" .json)
+        valid_short "$short" || continue
+        [ -e "${TICKET_DIR}/${short}.json" ] && continue
+        old_enough "$outcome" "$REPLY_CACHE_GRACE_SECONDS" || continue
+        rm -f "$outcome"
     done
 fi
 

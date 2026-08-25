@@ -133,6 +133,25 @@ jobs:
           test "$candidate_commit_prefix" = "${CANDIDATE_COMMIT:0:12}"
           git cat-file -e "${CANDIDATE_COMMIT}^{commit}"
           git merge-base --is-ancestor "$CANDIDATE_COMMIT" HEAD
+          # A signed image and valid attestations are not sufficient for
+          # production.  Bind the supplied candidate run to the exact
+          # trusted reproducible-builder job; otherwise a hosted/cross/direct
+          # candidate could be promoted if the later environment approvals
+          # were granted.
+          candidate_run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")"
+          printf '%s' "$candidate_run_json" | jq -e \
+            --arg commit "$CANDIDATE_COMMIT" \
+            '(.path == ".github/workflows/release.yml") and
+             (.event == "workflow_dispatch") and
+             (.head_branch == "master") and
+             (.head_sha == $commit) and
+             (.status == "completed") and
+             (.conclusion == "success")' >/dev/null
+          candidate_jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/jobs?per_page=100")"
+          printf '%s' "$candidate_jobs_json" | jq -e \
+            '([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")] | length == 1) and
+             ([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")][0].labels |
+              index("zeroclaw-release-linux-x64") != null)' >/dev/null
           candidate_resolved="$(docker buildx imagetools inspect "${image}:${CANDIDATE_TAG}" --format '{{.Manifest.Digest}}')"
           canary_resolved="$(docker buildx imagetools inspect "${image}:${CANARY_TAG}" --format '{{.Manifest.Digest}}')"
           test "$candidate_resolved" = "$CANDIDATE_DIGEST"

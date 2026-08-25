@@ -9,7 +9,7 @@ set -eu
 cat > /data/options.json <<'JSON'
 {
   "openrouter_api_key": "provider-secret",
-  "provider_key_mode": "direct_temporary",
+  "provider_key_mode": "broker",
   "ha_token": "legacy-secret",
   "telegram_bot_token": "telegram-secret",
   "telegram_allowed_users": "1",
