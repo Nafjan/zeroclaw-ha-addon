@@ -38,6 +38,12 @@ jobs:
       packages: write
       attestations: read
     steps:
+      - name: Check out the exact candidate metadata
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.candidate_commit }}
+          fetch-depth: 1
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
 
@@ -94,8 +100,28 @@ jobs:
           candidate_commit_prefix="${candidate_suffix#*-}"
           target_prefix="${VERSION}-canary."
           target_run_id="${TARGET_TAG#"$target_prefix"}"
+          printf '%s' "$candidate_run_id" | grep -Eq '^[0-9]+$'
           test "$candidate_commit_prefix" = "${CANDIDATE_COMMIT:0:12}"
           test "$candidate_run_id" = "$target_run_id"
+          # A signed image and valid attestations are not sufficient for the
+          # canary alias. Require the exact candidate to have completed on
+          # master using the dedicated reproducible release runner.
+          candidate_run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}")"
+          printf '%s' "$candidate_run_json" | jq -e \
+            --arg commit "$CANDIDATE_COMMIT" \
+            '(.path == ".github/workflows/release.yml") and
+             (.event == "workflow_dispatch") and
+             (.head_branch == "master") and
+             (.head_sha == $commit) and
+             (.status == "completed") and
+             (.conclusion == "success")' >/dev/null
+          candidate_jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}/jobs?per_page=100")"
+          printf '%s' "$candidate_jobs_json" | jq -e \
+            '([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")] | length == 1) and
+             ([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")][0] |
+              (.status == "completed") and
+              (.conclusion == "success") and
+              (.labels | index("zeroclaw-release-linux-x64") != null))' >/dev/null
           candidate_digest="$(docker buildx imagetools inspect "${IMAGE}:${CANDIDATE_TAG}" --format '{{.Manifest.Digest}}')"
           test "$candidate_digest" = "$SOURCE_DIGEST"
           image_ref="${IMAGE}@${SOURCE_DIGEST}"
@@ -103,7 +129,7 @@ jobs:
           image_revision="$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
           test "$image_revision" = "$CANDIDATE_COMMIT"
           cosign verify --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release\\.yml@refs/heads/.+$" \
+            --certificate-identity-regexp="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release\\.yml@refs/heads/master$" \
             "$image_ref"
           gh attestation verify "oci://$image_ref" \
             --repo "$GITHUB_REPOSITORY" \
@@ -126,3 +152,46 @@ jobs:
           resolved="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}')"
           test "${resolved}" = "${SOURCE_DIGEST}"
           printf 'canary_tag=%s:%s\ncanary_digest=%s\n' "${IMAGE}" "${TARGET_TAG}" "${resolved}"
+
+      - name: Render and verify the mandatory side-load descriptor
+        id: descriptor
+        shell: bash
+        env:
+          IMAGE: ghcr.io/nafjan/zeroclaw-ha-addon
+          SOURCE_DIGEST: ${{ inputs.source_digest }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          set -euo pipefail
+          descriptor_dir="$RUNNER_TEMP/zeroclaw-canary-descriptor"
+          test ! -e "$descriptor_dir"
+          bash .github/scripts/render-canary-descriptor.sh \
+            zeroclaw/config.yaml "$IMAGE" "$TARGET_TAG" "$SOURCE_DIGEST" \
+            "$CANDIDATE_COMMIT" "$descriptor_dir"
+          descriptor_sha256="$(sha256sum "$descriptor_dir/config.yaml" | awk '{print $1}')"
+          bash .github/scripts/verify-canary-descriptor.sh \
+            "$descriptor_dir/config.yaml" "$IMAGE" "$TARGET_TAG" "$SOURCE_DIGEST" \
+            "$CANDIDATE_COMMIT" "$descriptor_sha256"
+          jq -e --arg image "$IMAGE:$TARGET_TAG@$SOURCE_DIGEST" \
+            --arg tag "$TARGET_TAG" --arg digest "$SOURCE_DIGEST" \
+            --arg commit "$CANDIDATE_COMMIT" --arg sha "$descriptor_sha256" \
+            '(.schema_version == 1) and
+             (.descriptor_kind == "homeassistant_local_app") and
+             (.app_slug == "zeroclaw_canary") and
+             (.version == ($tag | split("-canary.")[0])) and
+             (.image == $image) and
+             (.candidate_tag == $tag) and
+             (.candidate_digest == $digest) and
+             (.candidate_commit == $commit) and
+             (.config_sha256 == $sha) and
+             (.minimum_supervisor_version == "2026.04.0")' \
+            "$descriptor_dir/canary-identity.json" >/dev/null
+          printf 'descriptor_sha256=%s\n' "$descriptor_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the mandatory side-load descriptor
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeroclaw-canary-descriptor-${{ inputs.target_tag }}
+          path: ${{ runner.temp }}/zeroclaw-canary-descriptor
+          if-no-files-found: error
+          retention-days: 7
