@@ -4,9 +4,14 @@
 # Writes, scheduling, generic HTTP, and the built-in Telegram transport are
 # disabled by default; enabled writes remain broker- and policy-gated.
 
-ADDON_VERSION="${ZEROCLAW_ADDON_VERSION:-3.1.4.0}"
-printf '%s' "${ADDON_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' || {
-    bashio::log.fatal "invalid baked app version; refusing to start"
+ADDON_VERSION="${ZEROCLAW_ADDON_VERSION-}"
+printf '%s' "${ADDON_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
+    bashio::log.fatal "missing or invalid baked app version; refusing to start"
+    exit 1
+}
+STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA-}"
+printf '%s' "${STATE_SCHEMA}" | grep -Eq '^[1-9][0-9]{0,2}$' || {
+    bashio::log.fatal "missing or invalid baked state schema; refusing to start"
     exit 1
 }
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
@@ -557,32 +562,30 @@ chmod 0640 "${POLICY_RUNTIME_TMP}"
 mv -f "${POLICY_RUNTIME_TMP}" "${POLICY_RUNTIME_FILE}"
 
 # Snapshot persistent state before rendering this release's config.toml. The
-# version marker is root-only state; the planner must not be able to rewrite it
-# and suppress or fabricate an upgrade snapshot.
-VF="${CONFIG_DIR}/.state-version"
-LEGACY_VF="${WS}/.last_version"
-if [ ! -e "$VF" ] && [ -f "$LEGACY_VF" ]; then
-    LEGACY_VERSION=$(tr -d '\r\n' < "$LEGACY_VF")
-    case "$LEGACY_VERSION" in
-        ''|*[!A-Za-z0-9._-]*)
-            bashio::log.warning "Ignoring malformed legacy version marker; treating state as fresh."
-            ;;
-        *)
-            printf '%s\n' "$LEGACY_VERSION" > "$VF"
-            ;;
-    esac
-    rm -f "$LEGACY_VF"
-fi
-if [ -e "$VF" ] && [ ! -f "$VF" ]; then
-    bashio::log.fatal "persistent version marker is not a regular file"
-    exit 1
-fi
-if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$VF" "${ADDON_VERSION}"; then
+# integer schema marker is root-only state; the planner must not be able to
+# rewrite it and suppress or fabricate an upgrade snapshot. Legacy semver
+# markers are inspected and preserved inside the migration snapshot by the
+# migration helper, then removed only after the new schema marker is committed.
+SCHEMA_FILE="${CONFIG_DIR}/.state-schema"
+if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$SCHEMA_FILE" "${STATE_SCHEMA}"; then
     bashio::log.fatal "State migration failed; refusing to start without a rollback snapshot."
     exit 1
 fi
-chown root:root "$VF"
-chmod 0600 "$VF"
+chown root:root "$SCHEMA_FILE"
+chmod 0600 "$SCHEMA_FILE"
+# Reserve the old semver marker name with a root-owned tombstone.  /data is
+# deliberately group-writable for the planner's narrow runtime needs, so an
+# absent legacy path could otherwise be recreated by the planner and create
+# ambiguity on the next restart.  state-migrate recognizes only this exact
+# root-owned tombstone as inactive legacy state.
+LEGACY_VERSION_TOMBSTONE="${CONFIG_DIR}/.state-version"
+if [ ! -e "$LEGACY_VERSION_TOMBSTONE" ]; then
+    tombstone_tmp="${LEGACY_VERSION_TOMBSTONE}.tmp.$$"
+    printf 'schema-tombstone-%s\n' "$STATE_SCHEMA" > "$tombstone_tmp"
+    chown root:root "$tombstone_tmp"
+    chmod 0600 "$tombstone_tmp"
+    mv -f "$tombstone_tmp" "$LEGACY_VERSION_TOMBSTONE"
+fi
 
 # ==============================================================
 # Typed capability broker and read-only HA helpers
@@ -1200,7 +1203,7 @@ approval_outcome_text() {
     outcome_file="\$1"
     [ ! -L "\$outcome_file" ] && [ -f "\$outcome_file" ] || return 1
     jq -e --arg actor "\$APPROVAL_USER" --arg chat "\$APPROVAL_CHAT" \
-        '.state == "applied" and .actor_user_id == $actor and .chat_id == $chat and
+        '.state == "applied" and .actor_user_id == \$actor and .chat_id == \$chat and
          (.service | type == "string") and (.payload | type == "object")' \
         "\$outcome_file" >/dev/null 2>&1 || return 1
     outcome_summary=\$(canonical_ticket_summary "\$outcome_file") || return 1
@@ -2981,10 +2984,16 @@ fi
 # Preserve any legacy root-level state as root-owned, read-only-to-planner
 # data.  Correction state is broker-owned under /data/capability.
 find /data -maxdepth 1 -type f \
-    ! -name options.json ! -name config.toml ! -name .state-version \
+    ! -name options.json ! -name config.toml ! -name .state-version ! -name .state-schema \
     -exec chown root:zeroclaw {} \; -exec chmod 0640 {} \; 2>/dev/null || true
-chown root:root /data/.state-version
-chmod 0600 /data/.state-version
+if [ -f /data/.state-schema ]; then
+    chown root:root /data/.state-schema
+    chmod 0600 /data/.state-schema
+fi
+if [ -f /data/.state-version ]; then
+    chown root:root /data/.state-version
+    chmod 0600 /data/.state-version
+fi
 
 CRASH_COUNT=0
 while true; do

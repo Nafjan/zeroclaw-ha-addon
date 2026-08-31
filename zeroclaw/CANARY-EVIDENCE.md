@@ -16,6 +16,13 @@ The evidence must contain:
   "candidate_commit": "<40-character add-on commit used by the candidate build>",
   "tested_at": "2026-08-21T12:00:00Z",
   "ha_version": "2026.8.2",
+  "supervisor_version": "2026.8.2",
+  "descriptor": {
+    "side_loaded": true,
+    "app_slug": "zeroclaw_canary",
+    "artifact_sha256": "<SHA256 of the exact side-load config.yaml>",
+    "minimum_supervisor_version": "2026.04.0"
+  },
   "backup": {
     "app_slug": "zeroclaw",
     "created": true,
@@ -50,11 +57,17 @@ The evidence must contain:
 }
 ```
 
-After the live canary, commit the redacted file to the repository. The
+After the live canary, commit the redacted file and the exact side-load
+descriptor (under a non-`config.yaml` filename, so the repository retains one
+canonical app descriptor) to the repository. The
 evidence commit may be newer than the candidate commit; the JSON itself binds
 the evidence to the candidate workflow run and add-on commit. Use a raw URL
 pinned to the evidence commit and the file SHA256 as `canary_evidence` and
-`canary_evidence_sha256` when dispatching `.github/workflows/promote-existing.yml`.
+`canary_evidence_sha256`, `canary_descriptor`, and
+`canary_descriptor_sha256` when dispatching
+`.github/workflows/promote-existing.yml`. The promotion workflow verifies the
+descriptor content, its SHA256, the isolated `zeroclaw_canary` slug, and the
+`tag@digest` image reference before it accepts the evidence.
 That workflow verifies the signed candidate tag, exact canary alias digest,
 attestations, evidence hash, candidate run/commit binding, and every listed
 gate before creating Supervisor release tags.
@@ -62,8 +75,12 @@ gate before creating Supervisor release tags.
 Create the temporary alias with `.github/workflows/publish-canary-alias.yml`,
 providing the candidate digest, candidate tag, candidate commit, and the
 matching `<version>-canary.<candidate-run-id>` tag. The alias workflow verifies
-the candidate signature and provenance/SBOM attestations before writing the
-alias.
+that the candidate is the successful `workflow_dispatch` run on `master` using
+the `zeroclaw-release-linux-x64` trusted builder, then verifies the candidate
+signature and provenance/SBOM attestations before writing the alias. It uploads
+the mandatory side-load descriptor artifact. Copy its
+`config.yaml` into a local app directory such as `/addons/zeroclaw_canary/`
+before installing the canary; use a separate Telegram bot from production.
 
 ## Telegram canary procedure
 

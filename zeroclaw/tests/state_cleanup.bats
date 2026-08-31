@@ -2,8 +2,9 @@
 
 setup() {
     command -v jq >/dev/null 2>&1 || skip "state cleanup tests require jq"
-    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-        skip "state cleanup tests require root or sudo"
+    if [ "$(id -u)" -ne 0 ]; then
+        command -v sudo >/dev/null 2>&1 || skip "state cleanup tests require root or sudo"
+        sudo -n true 2>/dev/null || skip "state cleanup tests require passwordless sudo"
     fi
     TEST_ROOT="$(mktemp -d)"
     DATA_DIR="$TEST_ROOT/data"

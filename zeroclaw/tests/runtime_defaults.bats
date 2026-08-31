@@ -2,12 +2,29 @@
 
 run_file="$BATS_TEST_DIRNAME/../run.sh"
 
-@test "runtime migration version comes from the baked Supervisor app version" {
-    run grep -F 'ADDON_VERSION="${ZEROCLAW_ADDON_VERSION:-3.1.4.0}"' "$run_file"
+@test "runtime release metadata is explicit and bare" {
+    run grep -F 'ADDON_VERSION="${ZEROCLAW_ADDON_VERSION-}"' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F "invalid baked app version; refusing to start" "$run_file"
+    run grep -F "missing or invalid baked app version; refusing to start" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA-}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "missing or invalid baked state schema; refusing to start" "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'ENV ZEROCLAW_STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA}"' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
+@test "Dockerfile has no permissive release metadata defaults" {
+    for argument in BUILD_VERSION BUILD_ARCH ZEROCLAW_SHA256 ZEROCLAW_SOURCE_COMMIT ADDON_SOURCE_COMMIT ZEROCLAW_SOURCE_DATE_EPOCH ZEROCLAW_LLVM_RNG_SEED REQUIRE_VERIFIED_ARTIFACT ZEROCLAW_STATE_SCHEMA; do
+        run grep -E "^ARG ${argument}=" "$BATS_TEST_DIRNAME/../Dockerfile"
+        [ "$status" -ne 0 ]
+    done
+    run grep -F 'printf '\''%s'\'' "${ZEROCLAW_STATE_SCHEMA}" | grep -Eq '\''^[1-9][0-9]{0,2}$'\''' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'COPY state-schema /usr/share/zeroclaw/state-schema' "$BATS_TEST_DIRNAME/../Dockerfile"
     [ "$status" -eq 0 ]
 }
 agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
@@ -33,6 +50,11 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'blocked internal tool syntax in cached Telegram reply' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'replacing it with a safe status message' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "generated Telegram watcher preserves jq actor bindings" {
+    run grep -F '.actor_user_id == \$actor and .chat_id == \$chat' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -362,7 +384,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'persistent root entry is a symlink' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'VF="${CONFIG_DIR}/.state-version"' "$run_file"
+    run grep -F 'SCHEMA_FILE="${CONFIG_DIR}/.state-schema"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "schema-tombstone-%s\\n" "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -646,6 +670,16 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'predicate-type https://slsa.dev/provenance/v1' "$alias_file"
     [ "$status" -eq 0 ]
     run grep -F 'predicate-type https://spdx.dev/Document/v2.3' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F '(.head_branch == "master")' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zeroclaw-release-linux-x64' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Render and verify the mandatory side-load descriptor' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "$alias_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'app_slug == "zeroclaw_canary"' "$alias_file"
     [ "$status" -eq 0 ]
 }
 

@@ -5,6 +5,7 @@ DIGEST='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 TAG='3.1.4.0-canary.test'
 RUN_ID='123456789'
 COMMIT='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+DESCRIPTOR_SHA256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 
 setup() {
     TMP_DIR=$(mktemp -d)
@@ -22,6 +23,8 @@ setup() {
           candidate_commit: $commit,
           tested_at: "2026-08-21T12:00:00Z",
           ha_version: "2026.8.2",
+          supervisor_version: "2026.8.2",
+          descriptor: {side_loaded:true,app_slug:"zeroclaw_canary",artifact_sha256:"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",minimum_supervisor_version:"2026.04.0"},
           backup: {app_slug:"zeroclaw",created:true,artifact_sha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",restore_verified:true},
           rollback: {snapshot_id:"old-to-new-20260821",verified:true},
           read_only: {loopback_pairing:true,ha_status:true,invalid_entity_fail_closed:true,broker_unavailable_fail_closed:true,planner_no_supervisor_token:true,planner_no_telegram_token:true,telegram_transport_isolated:true,telegram_no_internal_syntax_leak:true},
@@ -36,7 +39,7 @@ teardown() {
 
 @test "canary evidence verifier accepts complete evidence" {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256"
     [ "$status" -eq 0 ]
 }
 
@@ -44,7 +47,7 @@ teardown() {
     jq '.write_canary.writes_disabled_after = false' "$EVIDENCE" > "$EVIDENCE.tmp"
     mv "$EVIDENCE.tmp" "$EVIDENCE"
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256"
     [ "$status" -ne 0 ]
 }
 
@@ -52,13 +55,13 @@ teardown() {
     jq 'del(.read_only.telegram_transport_isolated)' "$EVIDENCE" > "$EVIDENCE.tmp"
     mv "$EVIDENCE.tmp" "$EVIDENCE"
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256"
     [ "$status" -ne 0 ]
 }
 
 @test "canary evidence verifier rejects a digest mismatch" {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
-    run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha"
+    run bash "$VERIFIER" "$EVIDENCE" 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256"
     [ "$status" -ne 0 ]
 }
 
@@ -67,4 +70,12 @@ teardown() {
     [ "$status" -eq 0 ]
     run grep -F '"candidate_commit":' "$BATS_TEST_DIRNAME/../CANARY-EVIDENCE.md"
     [ "$status" -eq 0 ]
+}
+
+@test "canary evidence requires a current Supervisor and side-load descriptor" {
+    jq '.supervisor_version = "2026.03.9"' "$EVIDENCE" > "$EVIDENCE.tmp"
+    mv "$EVIDENCE.tmp" "$EVIDENCE"
+    evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
+    run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256"
+    [ "$status" -ne 0 ]
 }

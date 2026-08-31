@@ -135,7 +135,7 @@ backup. With the app stopped, the installed helper moves the current state to
 a recoverable rollback snapshot before restoring the selected backup:
 
 ```sh
-state-restore /data /data/migrations/<old-version>-to-<new-version>-<timestamp>-<pid>
+state-restore /data /data/migrations/<legacy-or-schema>-to-schema-<new-schema>-<timestamp>-<pid>
 ```
 
 Never use a recursive delete of the data directory as rollback.

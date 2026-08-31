@@ -28,6 +28,14 @@ on:
         description: "SHA256 of the immutable canary evidence JSON"
         required: false
         type: string
+      canary_descriptor:
+        description: "Commit-pinned raw URL to the exact side-load config.yaml"
+        required: false
+        type: string
+      canary_descriptor_sha256:
+        description: "SHA256 of the exact side-load config.yaml"
+        required: false
+        type: string
       builder_mode:
         description: "Reproducible builder implementation to exercise"
         required: false
@@ -71,6 +79,8 @@ jobs:
       canary_tag: ${{ steps.metadata.outputs.canary_tag }}
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.metadata.outputs.version }}
+      build_arch: ${{ steps.metadata.outputs.build_arch }}
+      state_schema: ${{ steps.metadata.outputs.state_schema }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
       candidate_commit: ${{ steps.metadata.outputs.candidate_commit }}
       certificate_identity: ${{ steps.metadata.outputs.certificate_identity }}
@@ -114,6 +124,8 @@ jobs:
           build_command="$(jq -r '.build_command' zeroclaw/binary-manifest.json)"
           binary_sha="$(jq -r '.sha256' zeroclaw/binary-manifest.json)"
           configured_image="$(awk '$1 == "image:" {print $2; exit}' zeroclaw/config.yaml)"
+          build_arch="$(awk '$1 == "-" {print $2; exit}' zeroclaw/config.yaml)"
+          state_schema="$(tr -d '\r\n' < zeroclaw/state-schema)"
           image="$(printf '%s' "$configured_image" | tr '[:upper:]' '[:lower:]')"
           certificate_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           candidate_tag="candidate-${GITHUB_RUN_ID}-${GITHUB_SHA:0:12}"
@@ -136,6 +148,8 @@ jobs:
           test "$build_command" = "cargo build --release --locked --target aarch64-unknown-linux-musl"
           test -n "$binary_sha"
           test -n "$image"
+          test "$build_arch" = "aarch64"
+          printf '%s' "$state_schema" | grep -Eq '^[1-9][0-9]{0,2}$'
           if [ "$builder_mode" = "trusted-aa" ]; then
             if [ "$GITHUB_REF" != "refs/heads/master" ]; then
               echo "trusted-attested builds require refs/heads/master" >&2
@@ -168,6 +182,8 @@ jobs:
             printf 'rustflags=%s\n' "$rustflags"
             printf 'binary_sha=%s\n' "$binary_sha"
             printf 'image=%s\n' "$image"
+            printf 'build_arch=%s\n' "$build_arch"
+            printf 'state_schema=%s\n' "$state_schema"
             printf 'candidate_tag=%s\n' "$candidate_tag"
             printf 'canary_tag=%s\n' "$canary_tag"
             printf 'candidate_commit=%s\n' "$GITHUB_SHA"
@@ -909,13 +925,37 @@ jobs:
           tags: ${{ steps.metadata.outputs.image }}:${{ steps.metadata.outputs.candidate_tag }}
           build-args: |
             BUILD_VERSION=${{ steps.metadata.outputs.version }}
+            BUILD_ARCH=${{ steps.metadata.outputs.build_arch }}
             ZEROCLAW_SHA256=${{ steps.metadata.outputs.binary_sha }}
             ZEROCLAW_SOURCE_COMMIT=${{ steps.metadata.outputs.source_commit }}
             ADDON_SOURCE_COMMIT=${{ github.sha }}
             ZEROCLAW_SOURCE_DATE_EPOCH=${{ steps.metadata.outputs.source_date_epoch }}
             ZEROCLAW_LLVM_RNG_SEED=${{ steps.metadata.outputs.llvm_rng_seed }}
             REQUIRE_VERIFIED_ARTIFACT=true
+            ZEROCLAW_STATE_SCHEMA=${{ steps.metadata.outputs.state_schema }}
           provenance: mode=max
+
+      - name: Assert candidate image identity matches release metadata
+        shell: bash
+        env:
+          IMAGE: ${{ steps.metadata.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_ARCH: ${{ steps.metadata.outputs.build_arch }}
+          STATE_SCHEMA: ${{ steps.metadata.outputs.state_schema }}
+          ADDON_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE}@${DIGEST}"
+          docker pull --platform linux/arm64 "$image_ref"
+          test "$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "io.hass.version" }}')" = "$VERSION"
+          test "$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "io.hass.arch" }}')" = "$BUILD_ARCH"
+          test "$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$VERSION"
+          test "$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$ADDON_SOURCE_COMMIT"
+          env_json="$(docker image inspect "$image_ref" --format '{{json .Config.Env}}')"
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_ADDON_VERSION=${VERSION}" 'index($expected) != null' >/dev/null
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_STATE_SCHEMA=${STATE_SCHEMA}" 'index($expected) != null' >/dev/null
+          test "$(docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image_ref" -c 'tr -d "\r\n" < /usr/share/zeroclaw/state-schema')" = "$STATE_SCHEMA"
 
       - name: Install Syft
         id: syft
@@ -1088,7 +1128,10 @@ jobs:
           CANARY_TAG: ${{ inputs.canary_tag }}
           CANARY_EVIDENCE: ${{ inputs.canary_evidence }}
           CANARY_EVIDENCE_SHA256: ${{ inputs.canary_evidence_sha256 }}
+          CANARY_DESCRIPTOR: ${{ inputs.canary_descriptor }}
+          CANARY_DESCRIPTOR_SHA256: ${{ inputs.canary_descriptor_sha256 }}
           CANDIDATE_DIGEST: ${{ needs.candidate.outputs.digest }}
+          CANDIDATE_COMMIT: ${{ needs.candidate.outputs.candidate_commit }}
         run: |
           set -euo pipefail
           expected_evidence_prefix="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/"
@@ -1108,12 +1151,31 @@ jobs:
             echo "canary evidence SHA256 is required" >&2
             exit 1
           }
+          printf '%s' "$CANARY_DESCRIPTOR" | grep -Eq \
+            "^https://raw\\.githubusercontent\\.com/${GITHUB_REPOSITORY}/[0-9a-f]{40}/[^?]+$" || {
+            echo "canary descriptor must be a commit-pinned raw URL in this repository" >&2
+            exit 1
+          }
+          printf '%s' "$CANARY_DESCRIPTOR_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+            echo "canary descriptor SHA256 is required" >&2
+            exit 1
+          }
+          descriptor_revision="${CANARY_DESCRIPTOR#https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/}"
+          descriptor_revision="${descriptor_revision%%/*}"
+          test "$descriptor_revision" = "$GITHUB_SHA"
           evidence_file="$RUNNER_TEMP/zeroclaw-canary-evidence.json"
           curl --fail --location --retry 2 --silent --show-error --max-time 30 \
             --output "$evidence_file" "$CANARY_EVIDENCE"
+          descriptor_file="$RUNNER_TEMP/zeroclaw-canary-config.yaml"
+          curl --fail --location --retry 2 --silent --show-error --max-time 30 \
+            --output "$descriptor_file" "$CANARY_DESCRIPTOR"
+          bash .github/scripts/verify-canary-descriptor.sh \
+            "$descriptor_file" "$IMAGE" "$CANARY_TAG" "$CANDIDATE_DIGEST" \
+            "$CANDIDATE_COMMIT" "$CANARY_DESCRIPTOR_SHA256"
           bash .github/scripts/verify-canary-evidence.sh \
             "$evidence_file" "$CANDIDATE_DIGEST" "$CANARY_TAG" \
-            "${{ github.run_id }}" "${{ github.sha }}" "$CANARY_EVIDENCE_SHA256"
+            "${{ github.run_id }}" "${{ github.sha }}" "$CANARY_EVIDENCE_SHA256" \
+            "$CANARY_DESCRIPTOR_SHA256"
 
       - name: Re-verify candidate before promotion
         env:

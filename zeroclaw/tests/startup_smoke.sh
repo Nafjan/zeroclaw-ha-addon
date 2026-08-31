@@ -331,7 +331,11 @@ if [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
     grep -F 'Authorization: Bearer provider-secret' /data/provider/roundtrip-upstream-request >/dev/null
     ! grep -F 'provider-secret' /tmp/zeroclaw-real-provider-response >/dev/null 2>&1
 fi
+test -f /data/.state-schema
+test "$(cat /data/.state-schema)" = 1
 test -f /data/.state-version
+test "$(cat /data/.state-version)" = schema-tombstone-1
+test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
 [ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
 /src/tests/approval_transition_smoke.sh
 /src/tests/approval_concurrency_smoke.sh

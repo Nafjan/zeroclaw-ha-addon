@@ -118,12 +118,14 @@ jobs:
         run: |
           docker build --platform linux/arm64 --tag zeroclaw-ci --file zeroclaw/Dockerfile \
             --build-arg BUILD_VERSION="$(yq -r '.version' zeroclaw/config.yaml)" \
+            --build-arg BUILD_ARCH="$(yq -r '.arch[0]' zeroclaw/config.yaml)" \
             --build-arg ZEROCLAW_SHA256="$(yq -r '.sha256' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_SOURCE_COMMIT="$(yq -r '.source_commit' zeroclaw/binary-manifest.json)" \
             --build-arg ADDON_SOURCE_COMMIT="$GITHUB_SHA" \
             --build-arg ZEROCLAW_SOURCE_DATE_EPOCH="$(yq -r '.source_date_epoch' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_LLVM_RNG_SEED="$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)" \
             --build-arg REQUIRE_VERIFIED_ARTIFACT="${{ inputs.require_verified_artifact == true && 'true' || 'false' }}" \
+            --build-arg ZEROCLAW_STATE_SCHEMA="$(tr -d '\r\n' < zeroclaw/state-schema)" \
             zeroclaw
 
       - name: Smoke-test image contents and entrypoint syntax
@@ -137,6 +139,11 @@ jobs:
           expected="$(yq -r '.version' zeroclaw/config.yaml)"
           actual="$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "io.hass.version" }}')"
           test "$expected" = "$actual"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$expected"
+          env_json="$(docker image inspect zeroclaw-ci --format '{{json .Config.Env}}')"
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_ADDON_VERSION=${expected}" 'index($expected) != null' >/dev/null
+          state_schema="$(tr -d '\r\n' < zeroclaw/state-schema)"
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_STATE_SCHEMA=${state_schema}" 'index($expected) != null' >/dev/null
 
       - name: Verify binary provenance manifest and image contents
         shell: bash
@@ -146,6 +153,41 @@ jobs:
           test "$manifest_sha" = "$image_sha"
           test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.upstream.revision" }}')" = "$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+
+      - name: Prove missing and invalid build metadata fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          common_args=(
+            --build-arg "BUILD_VERSION=$(yq -r '.version' zeroclaw/config.yaml)"
+            --build-arg "BUILD_ARCH=$(yq -r '.arch[0]' zeroclaw/config.yaml)"
+            --build-arg "ZEROCLAW_SHA256=$(yq -r '.sha256' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_SOURCE_COMMIT=$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+            --build-arg "ADDON_SOURCE_COMMIT=$GITHUB_SHA"
+            --build-arg "ZEROCLAW_SOURCE_DATE_EPOCH=$(yq -r '.source_date_epoch' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_LLVM_RNG_SEED=$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_STATE_SCHEMA=$(tr -d '\r\n' < zeroclaw/state-schema)"
+          )
+          expect_rejected() {
+            local name="$1"
+            shift
+            local log="$RUNNER_TEMP/zeroclaw-negative-${name}.log"
+            set +e
+            docker build --platform linux/arm64 \
+              --tag "zeroclaw-negative-${name}" \
+              --file zeroclaw/Dockerfile "$@" zeroclaw >"$log" 2>&1
+            local status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              cat "$log"
+              echo "expected ${name} build to be rejected" >&2
+              exit 1
+            fi
+          }
+          expect_rejected missing
+          expect_rejected invalid-verification-flag \
+            "${common_args[@]}" \
+            --build-arg REQUIRE_VERIFIED_ARTIFACT=maybe
 
       - name: Smoke-test startup rendering without external services
         run: >-
