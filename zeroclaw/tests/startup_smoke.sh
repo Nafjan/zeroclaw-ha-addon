@@ -6,6 +6,28 @@
 
 set -eu
 
+smoke_failure_diagnostics() {
+    status=$?
+    [ "$status" -eq 0 ] && return 0
+    echo "startup smoke assertion failed (status ${status})" >&2
+    for diagnostic_file in \
+        /tmp/zeroclaw-startup.log \
+        /tmp/startup-plain.log \
+        /tmp/zeroclaw-raw-debug \
+        /tmp/zeroclaw-ha-debug \
+        /tmp/zeroclaw-broker-test \
+        /tmp/zeroclaw-planner-uid \
+        /data/logs/capability-broker.log \
+        /data/logs/provider-broker.log; do
+        if [ -f "$diagnostic_file" ]; then
+            echo "--- ${diagnostic_file} ---" >&2
+            tail -80 "$diagnostic_file" 2>/dev/null |
+                sed -E 's/(Bearer )[[:graph:]]+/\1[redacted]/g; s/(legacy|supervisor|telegram|provider)-secret/[redacted]/g' >&2 || true
+        fi
+    done
+}
+trap smoke_failure_diagnostics EXIT
+
 # The image test provides a synthetic Supervisor credential so the entrypoint
 # exercises its real fail-closed preflight against the fake Supervisor below.
 : "${SUPERVISOR_TOKEN:=supervisor-secret}"
