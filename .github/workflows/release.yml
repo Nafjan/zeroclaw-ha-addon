@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       promote:
-        description: "Run the protected canary and production promotion gates"
+        description: "Deprecated; must remain false. Promote only via promote-existing.yml after post-canary evidence is committed."
         required: true
         default: false
         type: boolean
@@ -92,6 +92,10 @@ jobs:
             cross|direct|direct-aa|trusted-aa) ;;
             *) echo "unsupported builder_mode=$builder_mode" >&2; exit 1 ;;
           esac
+          if [ "$promote" = "true" ]; then
+            echo "inline promotion is disabled; run release.yml with promote=false, commit post-canary evidence, then use promote-existing.yml" >&2
+            exit 1
+          fi
           # RELEASE_TAG is supplied by the workflow environment above; keep
           # the lowercase local separate from the input name for shellcheck.
           # shellcheck disable=SC2153

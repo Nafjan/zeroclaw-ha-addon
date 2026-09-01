@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Root-owned OpenAI-compatible model gateway.
 #
 # The planner receives only a dummy local credential. This handler owns the
@@ -8,6 +8,15 @@
 # part of this contract: the broker buffers one non-streaming response and
 # rejects stream=true until a separately qualified streaming design exists.
 set -eu
+export LC_ALL=C
+
+if [ -r /opt/zeroclaw/lib/bounded-read.sh ]; then
+    # shellcheck disable=SC1091
+    . /opt/zeroclaw/lib/bounded-read.sh
+else
+    # shellcheck disable=SC1091
+    . "$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)/bounded-read.sh"
+fi
 
 UPSTREAM_URL="${PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
 MAX_BODY=262144
@@ -115,20 +124,50 @@ ${old_models}
 EOF
 fi
 
-request_line=""
-IFS= read -r request_line || respond 400 "Bad Request" '{"error":"missing request line"}'
-request_line=$(printf '%s' "$request_line" | tr -d '\r')
+read_http_line() {
+    line_limit="$1"
+    line_label="$2"
+    if bounded_read_line "$((line_limit + 1))" "$READ_DEADLINE"; then
+        [ "${#BOUNDED_READ_LINE}" -le "$line_limit" ] || \
+            respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}"
+        HTTP_LINE="$BOUNDED_READ_LINE"
+        return 0
+    fi
+    read_status=$?
+    case "$read_status" in
+        2) respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}" ;;
+        *) respond 408 "Request Timeout" "{\"error\":\"${line_label} timed out\"}" ;;
+    esac
+}
+
+READ_DEADLINE=$((SECONDS + 5))
+read_http_line 4096 "request line"
+request_line=$(printf '%s' "$HTTP_LINE" | tr -d '\r')
 [ "$request_line" = "POST /v1/chat/completions HTTP/1.1" ] || \
     respond 404 "Not Found" '{"error":"route is not available"}'
 
 content_length=""
 client_auth_header=""
 client_auth_header_count=0
-while IFS= read -r header; do
-    header=$(printf '%s' "$header" | tr -d '\r')
+content_length_count=0
+header_count=0
+header_bytes=0
+while :; do
+    read_http_line 8192 "header"
+    raw_header="$HTTP_LINE"
+    header=$(printf '%s' "$raw_header" | tr -d '\r')
+    header_bytes=$((header_bytes + ${#raw_header} + 1))
+    [ "$header_bytes" -le 32768 ] || \
+        respond 431 "Request Header Fields Too Large" '{"error":"request headers are too large"}'
     [ -z "$header" ] && break
+    header_count=$((header_count + 1))
+    [ "$header_count" -le 64 ] || \
+        respond 431 "Request Header Fields Too Large" '{"error":"too many request headers"}'
     case "$header" in
         Content-Length:*|content-length:*)
+            content_length_count=$((content_length_count + 1))
+            [ "$content_length_count" -eq 1 ] || \
+                respond 400 "Bad Request" '{"error":"duplicate content length is not supported"}'
             content_length=$(printf '%s' "$header" | cut -d: -f2- | tr -d ' ')
             ;;
         Transfer-Encoding:*|transfer-encoding:*)

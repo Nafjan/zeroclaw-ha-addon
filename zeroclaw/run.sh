@@ -1860,13 +1860,25 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 DATE=$(date -u +%Y-%m-%d)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [ "$KIND" = "planner_event" ]; then
+    # Planner-supplied telemetry is intentionally segregated from the
+    # authoritative broker audit stream.  It is root-owned and not returned by
+    # zc-audit-tail, so it cannot forge or pollute action evidence.
+    AUDIT_DIR=/data/audit/planner
+    AUDIT_OWNER=root:root
+    AUDIT_MODE=0600
+else
+    AUDIT_DIR=/data/audit
+    AUDIT_OWNER=root:zeroclaw
+    AUDIT_MODE=0640
+fi
 ENTITY=$(echo "$BODY" | jq -r '.entity_id // ""' 2>/dev/null)
-mkdir -p /data/audit
+mkdir -p "$AUDIT_DIR"
 ROW=$(jq -nc \
   --arg ts "$TS" --arg kind "$KIND" --arg svc "$SVC" \
   --arg entity "$ENTITY" --arg reason "$REASON" --argjson body "$BODY" \
   '{ts:$ts, kind:$kind, service:$svc, entity:$entity, body:$body, reason:$reason}')
-LOCK="/data/audit/.lock"
+LOCK="${AUDIT_DIR}/.lock"
 ATTEMPTS=0
 while ! mkdir "$LOCK" 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
@@ -1874,10 +1886,10 @@ while ! mkdir "$LOCK" 2>/dev/null; do
     sleep 0.1
 done
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
-AUDIT_FILE="/data/audit/${DATE}.jsonl"
+AUDIT_FILE="${AUDIT_DIR}/${DATE}.jsonl"
 printf '%s\n' "$ROW" >> "$AUDIT_FILE"
-chown root:zeroclaw "$AUDIT_FILE"
-chmod 0640 "$AUDIT_FILE"
+chown "$AUDIT_OWNER" "$AUDIT_FILE"
+chmod "$AUDIT_MODE" "$AUDIT_FILE"
 sync
 [ "$(tail -n 1 "$AUDIT_FILE")" = "$ROW" ] || { echo "audit row verification failed" >&2; exit 1; }
 SCRIPT
@@ -3009,6 +3021,9 @@ mkdir -p /data/audit
 chown root:zeroclaw /data/audit
 chmod 0750 /data/audit
 find /data/audit -type f -exec chown root:zeroclaw {} \; -exec chmod 0640 {} \; 2>/dev/null || true
+mkdir -p /data/audit/planner
+chown root:root /data/audit/planner
+chmod 0700 /data/audit/planner
 mkdir -p /data/migrations
 chown root:root /data/migrations
 chmod 0700 /data/migrations
