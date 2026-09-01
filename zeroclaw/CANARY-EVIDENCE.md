@@ -3,13 +3,15 @@
 Production promotion requires a redacted JSON evidence file committed to an
 immutable commit in this repository. Do not include tokens, passwords, raw
 Telegram IDs, entity names that disclose sensitive information, or backup
-contents. Record hashes and boolean results only.
+contents. Record hashes and boolean results only. The provider contract report
+is a separate machine-generated, redacted JSON file committed beside the
+evidence; it must not contain request headers, provider responses, or secrets.
 
 The evidence must contain:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "candidate_digest": "sha256:<exact candidate digest>",
   "canary_tag": "<exact temporary GHCR canary tag>",
   "candidate_run_id": 123456789,
@@ -17,6 +19,12 @@ The evidence must contain:
   "tested_at": "2026-08-21T12:00:00Z",
   "ha_version": "2026.8.2",
   "supervisor_version": "2026.8.2",
+  "supervisor_preflight": {
+    "api_endpoint": "/supervisor/info",
+    "version": "2026.8.2",
+    "minimum_version": "2026.04.0",
+    "verified_before_install": true
+  },
   "descriptor": {
     "side_loaded": true,
     "app_slug": "zeroclaw_canary",
@@ -53,24 +61,67 @@ The evidence must contain:
     "confirm_class_approved": true,
     "outcome_audited": true,
     "writes_disabled_after": true
+  },
+  "provider_contract": {
+    "report_schema_version": 1,
+    "report_sha256": "<SHA256 of provider-contract-report.json>"
+  },
+  "operator_attestation": {
+    "operator_ref": "<opaque non-secret operator reference>",
+    "attested_at": "2026-08-21T12:00:00Z",
+    "method": "canary-runbook-v2",
+    "automated_reports_verified": true,
+    "gate_groups_attested": [
+      "descriptor",
+      "backup",
+      "rollback",
+      "supervisor",
+      "read_only",
+      "approval",
+      "write_canary",
+      "provider_contract"
+    ]
   }
 }
 ```
 
+The machine-generated `provider-contract-report.json` must be produced by the
+exact `zeroclaw/tests/provider_profile_fallback_smoke.sh` from the evidence
+commit, with `CANARY_CANDIDATE_COMMIT` set to the candidate image's full
+40-character add-on commit. The script must finish successfully and records
+the exact OpenRouter primary, Fusion budget, Auto, DeepSeek Pro, free-model,
+and free-router bindings. It also exercises and records 402 credit exhaustion,
+network timeout, transient 5xx, same-profile 401 rejection, no-tools-only
+free routing, durable reservation/settlement, and pre-upstream budget denial.
+The promotion verifier recomputes the smoke-suite hash and validates every
+field in the report before accepting the evidence.
+
 After the live canary, commit the redacted file and the exact side-load
 descriptor (under a non-`config.yaml` filename, so the repository retains one
-canonical app descriptor) to the repository. The
-evidence commit may be newer than the candidate commit; the JSON itself binds
-the evidence to the candidate workflow run and add-on commit. Use a raw URL
-pinned to the evidence commit and the file SHA256 as `canary_evidence` and
-`canary_evidence_sha256`, `canary_descriptor`, and
-`canary_descriptor_sha256` when dispatching
-`.github/workflows/promote-existing.yml`. The promotion workflow verifies the
+canonical app descriptor), plus `provider-contract-report.json`, to the
+repository. The evidence commit may be newer than the candidate commit; the
+JSON itself binds the evidence to the candidate workflow run and add-on
+commit. Use one `canary_evidence_bundle` JSON input containing raw URLs pinned
+to the evidence commit and the six URL/SHA256 fields, for example:
+
+```json
+{
+  "evidence": "https://raw.githubusercontent.com/Nafjan/zeroclaw-ha-addon/<evidence-commit>/zeroclaw/canary-evidence.json",
+  "evidence_sha256": "<64 hex characters>",
+  "descriptor": "https://raw.githubusercontent.com/Nafjan/zeroclaw-ha-addon/<evidence-commit>/zeroclaw/canary-config.yaml",
+  "descriptor_sha256": "<64 hex characters>",
+  "provider_report": "https://raw.githubusercontent.com/Nafjan/zeroclaw-ha-addon/<evidence-commit>/zeroclaw/provider-contract-report.json",
+  "provider_report_sha256": "<64 hex characters>"
+}
+```
+
+when dispatching `.github/workflows/promote-existing.yml`. The promotion workflow verifies the
 descriptor content, its SHA256, the isolated `zeroclaw_canary` slug, and the
 `tag@digest` image reference before it accepts the evidence.
 That workflow verifies the signed candidate tag, exact canary alias digest,
-attestations, evidence hash, candidate run/commit binding, and every listed
-gate before creating Supervisor release tags.
+attestations, evidence hash, candidate run/commit binding, the provider report
+contract, explicit operator attestation, and every listed gate before creating
+Supervisor release tags.
 
 Create the temporary alias with `.github/workflows/publish-canary-alias.yml`,
 providing the candidate digest, candidate tag, candidate commit, and the

@@ -455,6 +455,45 @@ export HA_URL
 if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -n "${LEGACY_HA_TOKEN}" ]; then
     bashio::log.warning "Using deprecated ha_token option; migrate to the Supervisor token before enabling writes."
 fi
+# Home Assistant app manifests have a supported Core-version field, but no
+# supported Supervisor-version minimum field.  Enforce the release floor at
+# runtime through the documented Supervisor API before scrubbing the token.
+# This is deliberately fail-closed: a legacy Core token, an unavailable API,
+# an invalid response, or an older Supervisor must never start the planner.
+supervisor_api_preflight() {
+    [ -n "${SUPERVISOR_TOKEN:-}" ] || {
+        bashio::log.fatal "SUPERVISOR_TOKEN is required for the Supervisor version preflight; refusing to start"
+        exit 1
+    }
+    supervisor_info_json="$(curl -fsS --connect-timeout 5 --max-time 15 \
+        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        "http://supervisor/supervisor/info")" || {
+        bashio::log.fatal "Supervisor version preflight failed; refusing to start"
+        exit 1
+    }
+    SUPERVISOR_VERSION="$(printf '%s' "${supervisor_info_json}" | jq -er '
+        if ((.result? // "ok") == "ok") then
+            (.data.version // .version)
+        else
+            empty
+        end |
+        select(type == "string" and test("^[0-9]{4}\\.[0-9]{1,2}([.][0-9]+)?$"))
+    ' 2>/dev/null)" || {
+        bashio::log.fatal "Supervisor version response is invalid; refusing to start"
+        exit 1
+    }
+    supervisor_major="${SUPERVISOR_VERSION%%.*}"
+    supervisor_minor="${SUPERVISOR_VERSION#*.}"
+    supervisor_minor="${supervisor_minor%%.*}"
+    if (( 10#${supervisor_major} < 2026 ||
+          (10#${supervisor_major} == 2026 && 10#${supervisor_minor} < 4) )); then
+        bashio::log.fatal "Supervisor ${SUPERVISOR_VERSION} is below the supported floor 2026.04.0; refusing to start"
+        exit 1
+    fi
+    bashio::log.info "Supervisor ${SUPERVISOR_VERSION} satisfies the runtime floor >= 2026.04.0"
+    unset supervisor_info_json supervisor_major supervisor_minor
+}
+supervisor_api_preflight
 # Supervisor exports SUPERVISOR_TOKEN into the app entrypoint environment. The
 # typed HA broker receives a private HA_TOKEN copy below; scrub the inherited
 # name before any unrelated provider, Telegram, or scheduler child is born.

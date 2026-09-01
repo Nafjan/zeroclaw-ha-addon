@@ -44,6 +44,17 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
 }
 
+@test "runtime enforces the Supervisor version floor before scrubbing the token" {
+    run grep -F 'http://supervisor/supervisor/info' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Authorization: Bearer ${SUPERVISOR_TOKEN}' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'below the supported floor 2026.04.0' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'unset SUPERVISOR_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "cached Telegram replies are revalidated before replay" {
     run grep -F 'sanitized_cached=' "$run_file"
     [ "$status" -eq 0 ]
@@ -361,6 +372,13 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'input_chars=$(wc -c < "$body_file"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F '(.n == null or' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "provider ledger flushes reservations before upstream contact" {
+    run grep -F 'sync -f "$ledger_tmp"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'sync -f "$(dirname -- "$LEDGER_FILE")"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -692,5 +710,12 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'Rebuild, attest, and sign candidate digest' "$promote_file"
     [ "$status" -eq 0 ]
     run grep -F 'zeroclaw-release-linux-x64' "$promote_file"
+    [ "$status" -eq 0 ]
+    protection_file="$BATS_TEST_DIRNAME/../../.github/scripts/verify-master-protection.sh"
+    run grep -F 'verify-master-protection.sh' "$BATS_TEST_DIRNAME/../../RELEASE-BUILDER.md"
+    [ "$status" -eq 0 ]
+    run grep -F '.required_status_checks.strict == true' "$protection_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Bats unit tests' "$protection_file"
     [ "$status" -eq 0 ]
 }

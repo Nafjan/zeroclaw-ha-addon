@@ -47,9 +47,6 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
       - name: Reject CRLF in shipped text files
         shell: bash
         run: |
@@ -84,11 +81,16 @@ jobs:
           for script in .github/scripts/*.sh; do bash -n "$script"; done
 
       - name: ShellCheck shipped scripts
+        env:
+          SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
         run: |
-          shellcheck -s bash --severity=error zeroclaw/run.sh
-          shellcheck -s sh --severity=error zeroclaw/lib/*.sh
-          shellcheck -s sh --severity=error zeroclaw/tests/*.sh
-          shellcheck -s bash --severity=error .github/scripts/*.sh
+          set -euo pipefail
+          bash_scripts=(/src/zeroclaw/run.sh /src/.github/scripts/*.sh)
+          sh_scripts=(/src/zeroclaw/lib/*.sh /src/zeroclaw/tests/*.sh)
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
+            -s bash --severity=error "${bash_scripts[@]}"
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
+            -s sh --severity=error "${sh_scripts[@]}"
 
   container:
     name: Build and smoke-test arm64 image
@@ -204,6 +206,16 @@ jobs:
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
 
+      - name: Prove Supervisor floor fails closed before planner startup
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -e SMOKE_SUPERVISOR_VERSION=2026.03.9
+          -e SMOKE_EXPECT_STARTUP_FAILURE=true
+          -e SMOKE_EXPECTED_FAILURE='below the supported floor'
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
       - name: Smoke-test Telegram session ownership boundary
         run: >-
           docker run --rm --network none --platform linux/arm64
@@ -230,6 +242,7 @@ jobs:
       - name: Smoke-test root-owned provider broker mode
         run: >-
           docker run --rm --network none --platform linux/arm64
+          -e CANARY_CANDIDATE_COMMIT="$GITHUB_SHA"
           -e SMOKE_PROVIDER_BROKER=true
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci

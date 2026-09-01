@@ -27,20 +27,8 @@ on:
         description: "Exact temporary canary tag installed during the canary"
         required: true
         type: string
-      canary_evidence:
-        description: "Commit-pinned raw URL to redacted canary evidence JSON"
-        required: true
-        type: string
-      canary_evidence_sha256:
-        description: "SHA256 of the immutable canary evidence JSON"
-        required: true
-        type: string
-      canary_descriptor:
-        description: "Commit-pinned raw URL to the exact side-load config.yaml"
-        required: true
-        type: string
-      canary_descriptor_sha256:
-        description: "SHA256 of the exact side-load config.yaml"
+      canary_evidence_bundle:
+        description: "JSON object containing the pinned evidence, descriptor, provider report URLs and SHA256s"
         required: true
         type: string
 
@@ -111,14 +99,29 @@ jobs:
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CANARY_TAG: ${{ inputs.canary_tag }}
-          CANARY_EVIDENCE: ${{ inputs.canary_evidence }}
-          CANARY_EVIDENCE_SHA256: ${{ inputs.canary_evidence_sha256 }}
-          CANARY_DESCRIPTOR: ${{ inputs.canary_descriptor }}
-          CANARY_DESCRIPTOR_SHA256: ${{ inputs.canary_descriptor_sha256 }}
+          CANARY_EVIDENCE_BUNDLE: ${{ inputs.canary_evidence_bundle }}
           GH_TOKEN: ${{ github.token }}
           COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
+          bundle_json="$(printf '%s' "$CANARY_EVIDENCE_BUNDLE" | jq -e '
+            type == "object" and
+            (.evidence | type == "string" and length > 0) and
+            (.evidence_sha256 | type == "string" and length > 0) and
+            (.descriptor | type == "string" and length > 0) and
+            (.descriptor_sha256 | type == "string" and length > 0) and
+            (.provider_report | type == "string" and length > 0) and
+            (.provider_report_sha256 | type == "string" and length > 0)
+          ' 2>/dev/null)" || {
+            echo "canary evidence bundle must be a JSON object with all six pinned fields" >&2
+            exit 1
+          }
+          CANARY_EVIDENCE="$(printf '%s' "$bundle_json" | jq -er '.evidence')"
+          CANARY_EVIDENCE_SHA256="$(printf '%s' "$bundle_json" | jq -er '.evidence_sha256')"
+          CANARY_DESCRIPTOR="$(printf '%s' "$bundle_json" | jq -er '.descriptor')"
+          CANARY_DESCRIPTOR_SHA256="$(printf '%s' "$bundle_json" | jq -er '.descriptor_sha256')"
+          CANARY_PROVIDER_REPORT="$(printf '%s' "$bundle_json" | jq -er '.provider_report')"
+          CANARY_PROVIDER_REPORT_SHA256="$(printf '%s' "$bundle_json" | jq -er '.provider_report_sha256')"
           test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
           test "$GITHUB_REF" = "refs/heads/master"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
@@ -171,7 +174,7 @@ jobs:
           image_revision="$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
           test "$image_revision" = "$CANDIDATE_COMMIT"
           cosign verify --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp="^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/heads/.+$" \
+            --certificate-identity-regexp="^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/heads/master$" \
             "$image_ref"
           gh attestation verify "oci://$image_ref" \
             --repo "$GITHUB_REPOSITORY" \
@@ -187,24 +190,36 @@ jobs:
           printf '%s' "$CANARY_DESCRIPTOR" | grep -Eq \
             "^https://raw\\.githubusercontent\\.com/${GITHUB_REPOSITORY}/[0-9a-f]{40}/[^?]+$"
           printf '%s' "$CANARY_DESCRIPTOR_SHA256" | grep -Eq '^[0-9a-f]{64}$'
-          evidence_revision="${CANARY_EVIDENCE#https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/}"
+          printf '%s' "$CANARY_PROVIDER_REPORT" | grep -Eq \
+            "^https://raw\\.githubusercontent\\.com/${GITHUB_REPOSITORY}/[0-9a-f]{40}/[^?]+$"
+          printf '%s' "$CANARY_PROVIDER_REPORT_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          raw_prefix="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/"
+          evidence_revision="${CANARY_EVIDENCE#"$raw_prefix"}"
           evidence_revision="${evidence_revision%%/*}"
-          descriptor_revision="${CANARY_DESCRIPTOR#https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/}"
+          descriptor_revision="${CANARY_DESCRIPTOR#"$raw_prefix"}"
           descriptor_revision="${descriptor_revision%%/*}"
+          provider_report_revision="${CANARY_PROVIDER_REPORT#"$raw_prefix"}"
+          provider_report_revision="${provider_report_revision%%/*}"
           test "$descriptor_revision" = "$evidence_revision"
+          test "$provider_report_revision" = "$evidence_revision"
           evidence_file="$RUNNER_TEMP/zeroclaw-canary-evidence.json"
           curl --fail --location --retry 2 --silent --show-error --max-time 30 \
             --output "$evidence_file" "$CANARY_EVIDENCE"
           descriptor_file="$RUNNER_TEMP/zeroclaw-canary-config.yaml"
           curl --fail --location --retry 2 --silent --show-error --max-time 30 \
             --output "$descriptor_file" "$CANARY_DESCRIPTOR"
+          provider_report_file="$RUNNER_TEMP/zeroclaw-provider-contract-report.json"
+          curl --fail --location --retry 2 --silent --show-error --max-time 30 \
+            --output "$provider_report_file" "$CANARY_PROVIDER_REPORT"
           bash .github/scripts/verify-canary-descriptor.sh \
             "$descriptor_file" "$image" "$CANARY_TAG" "$CANDIDATE_DIGEST" \
             "$CANDIDATE_COMMIT" "$CANARY_DESCRIPTOR_SHA256"
+          bash .github/scripts/verify-provider-contract-report.sh \
+            "$provider_report_file" "$CANARY_PROVIDER_REPORT_SHA256" "$CANDIDATE_COMMIT"
           bash .github/scripts/verify-canary-evidence.sh \
             "$evidence_file" "$CANDIDATE_DIGEST" "$CANARY_TAG" \
             "$CANDIDATE_RUN_ID" "$CANDIDATE_COMMIT" "$CANARY_EVIDENCE_SHA256" \
-            "$CANARY_DESCRIPTOR_SHA256"
+            "$CANARY_DESCRIPTOR_SHA256" "$CANARY_PROVIDER_REPORT_SHA256"
           {
             printf 'image=%s\n' "$image"
             printf 'version=%s\n' "$version"
@@ -217,6 +232,12 @@ jobs:
     name: Promote the already-canaryed digest
     needs: verify
     runs-on: ubuntu-latest
+    # This group is shared with release.yml's promote job.  The entire
+    # check/create/tag sequence must be serialized per release tag so two
+    # approved entry points cannot interleave on the same version.
+    concurrency:
+      group: zeroclaw-promotion-${{ inputs.release_tag }}
+      cancel-in-progress: false
     environment:
       name: production
     permissions:
@@ -238,6 +259,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Revalidate immutable names after acquiring promotion lock
+        shell: bash
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+          DIGEST: ${{ needs.verify.outputs.digest }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ needs.verify.outputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          inspect_tag() {
+            tag="$1"
+            error_file="$(mktemp)"
+            if existing_digest="$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{.Manifest.Digest}}' 2>"$error_file")"; then
+              test "$existing_digest" = "$DIGEST" || {
+                cat "$error_file" >&2 || true
+                echo "immutable tag $tag already points at a different digest" >&2
+                rm -f "$error_file"
+                exit 1
+              }
+            elif ! grep -Eiq 'manifest unknown|name unknown|no such manifest|not found' "$error_file"; then
+              cat "$error_file" >&2 || true
+              echo "could not safely determine whether immutable tag $tag exists" >&2
+              rm -f "$error_file"
+              exit 1
+            fi
+            rm -f "$error_file"
+          }
+          inspect_tag "$VERSION"
+          inspect_tag "$RELEASE_TAG"
+          git fetch --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "release Git tag already exists after acquiring promotion lock" >&2
+            exit 1
+          fi
+
       - name: Promote exact digest to immutable Supervisor tags
         shell: bash
         env:
@@ -250,14 +307,23 @@ jobs:
           set -euo pipefail
           ensure_immutable_tag() {
             tag="$1"
-            if existing_digest="$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+            error_file="$(mktemp)"
+            if existing_digest="$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{.Manifest.Digest}}' 2>"$error_file")"; then
               test "$existing_digest" = "$DIGEST" || {
+                cat "$error_file" >&2 || true
+                rm -f "$error_file"
                 echo "refusing to retarget existing release tag $tag" >&2
                 exit 1
               }
-            else
+            elif grep -Eiq 'manifest unknown|name unknown|no such manifest|not found' "$error_file"; then
               docker buildx imagetools create --tag "$IMAGE:$tag" "$IMAGE@$DIGEST"
+            else
+              cat "$error_file" >&2 || true
+              rm -f "$error_file"
+              echo "could not safely determine whether immutable tag $tag exists" >&2
+              exit 1
             fi
+            rm -f "$error_file"
           }
           ensure_immutable_tag "$VERSION"
           ensure_immutable_tag "$RELEASE_TAG"
@@ -280,3 +346,20 @@ jobs:
           fi
           git tag -a "$RELEASE_TAG" "$CANDIDATE_COMMIT" -m "ZeroClaw Home Assistant app $RELEASE_TAG"
           git push origin "refs/tags/$RELEASE_TAG"
+
+      - name: Re-verify OCI tags and Git tag after publication
+        shell: bash
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+          DIGEST: ${{ needs.verify.outputs.digest }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ needs.verify.outputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          for tag in "$VERSION" "$RELEASE_TAG"; do
+            resolved="$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{.Manifest.Digest}}')"
+            test "$resolved" = "$DIGEST"
+          done
+          remote_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 {print $1}')"
+          test "$remote_commit" = "$CANDIDATE_COMMIT"
