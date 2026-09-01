@@ -16,6 +16,7 @@ smoke_failure_diagnostics() {
         /tmp/zeroclaw-raw-debug \
         /tmp/zeroclaw-ha-debug \
         /tmp/zeroclaw-broker-test \
+        /tmp/zeroclaw-helper-token-scan \
         /tmp/zeroclaw-planner-uid \
         /tmp/zeroclaw-real-provider-pid \
         /tmp/zeroclaw-real-provider-response \
@@ -312,6 +313,7 @@ set +e
 PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/bashio-test.sh >/tmp/zeroclaw-startup.log 2>&1
 run_status=$?
 set -e
+printf 'startup smoke run_status=%s\n' "$run_status" >&2
 
 if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
     [ "$run_status" -ne 0 ] && [ "$run_status" -ne 124 ] || {
