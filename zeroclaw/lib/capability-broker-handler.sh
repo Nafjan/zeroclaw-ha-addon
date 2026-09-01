@@ -1,10 +1,19 @@
-#!/bin/sh
+#!/bin/bash
 # ZeroClaw capability broker request handler.
 #
 # This process is the only runtime component that receives HA_TOKEN.  The
 # planner and all agent-callable helpers use the typed client instead of
 # talking to the Home Assistant API directly.
 set -eu
+export LC_ALL=C
+
+if [ -r /opt/zeroclaw/lib/bounded-read.sh ]; then
+    # shellcheck disable=SC1091
+    . /opt/zeroclaw/lib/bounded-read.sh
+else
+    # shellcheck disable=SC1091
+    . "$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)/bounded-read.sh"
+fi
 
 HA_URL="${HA_URL:-http://supervisor/core/api}"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
@@ -33,7 +42,18 @@ json_value() {
 }
 
 request=""
-IFS= read -r request || true
+read_deadline=$((SECONDS + 3))
+if bounded_read_line 32769 "$read_deadline"; then
+    request="$BOUNDED_READ_LINE"
+    read_status=0
+else
+    read_status=$?
+fi
+case "$read_status" in
+    0) ;;
+    2) json_error "broker request too large" "request_too_large" ;;
+    *) json_error "broker request timed out" "request_timeout" ;;
+esac
 [ -n "$request" ] || json_error "empty broker request"
 [ "${#request}" -le 32768 ] || json_error "broker request too large"
 [ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
@@ -466,21 +486,31 @@ run_service() {
 }
 
 run_audit() {
-    kind=$(printf '%s' "$request" | jq -er '.kind | select(type == "string")' 2>/dev/null) || json_error "audit kind must be a string"
-    service=$(printf '%s' "$request" | jq -er '.service | select(type == "string")' 2>/dev/null) || json_error "audit service must be a string"
+    requested_kind=$(printf '%s' "$request" | jq -er '.kind | select(type == "string")' 2>/dev/null) || json_error "audit kind must be a string"
+    requested_service=$(printf '%s' "$request" | jq -er '.service | select(type == "string")' 2>/dev/null) || json_error "audit service must be a string"
     body=$(printf '%s' "$request" | jq -ce '.body | select(type == "object" or type == "array")' 2>/dev/null) || json_error "audit body must be an object or array"
     reason=$(printf '%s' "$request" | jq -er '.reason | select(type == "string")' 2>/dev/null) || json_error "audit reason must be a string"
-    printf '%s' "$kind" | grep -Eq '^[a-z][a-z0-9_]{0,31}$' || json_error "audit kind is invalid"
-    printf '%s' "$service" | grep -Eq '^[a-z0-9_]+/[a-z0-9_]+$' || json_error "audit service is invalid"
-    case "$kind" in
-        # Planner-originated rows describe intent or a policy decision only.
-        # Execution, failure, and undo outcomes are written by root-owned
-        # broker paths and cannot be minted over the local TCP boundary.
+    printf '%s' "$requested_kind" | grep -Eq '^[a-z][a-z0-9_]{0,31}$' || json_error "audit kind is invalid"
+    printf '%s' "$requested_service" | grep -Eq '^[a-z0-9_]+/[a-z0-9_]+$' || json_error "audit service is invalid"
+    case "$requested_kind" in
+        # Planner-originated records are deliberately stored as a separate,
+        # untrusted telemetry kind.  The requested kind/service/body/reason
+        # are retained for diagnosis, but can never be mistaken for a broker
+        # decision, execution outcome, approval, or failure row.
         intent|deny|confirm|confirm_failed) ;;
         *) json_error "audit kind is not planner-writable" ;;
     esac
     [ "${#reason}" -le 1024 ] || json_error "audit reason is too long"
-    /usr/local/bin/zc-audit-write "$kind" "$service" "$body" "$reason" || \
+    planner_event=$(jq -nc \
+        --arg requested_kind "$requested_kind" \
+        --arg requested_service "$requested_service" \
+        --arg requested_reason "$reason" \
+        --argjson requested_body "$body" \
+        '{source:"untrusted_planner",event:"audit_request",requested_kind:$requested_kind,
+          requested_service:$requested_service,requested_body:$requested_body,
+          requested_reason:$requested_reason}') || json_error "audit event could not be prepared"
+    /usr/local/bin/zc-audit-write planner_event "planner/telemetry" "$planner_event" \
+        "source=untrusted_planner" || \
         json_error "audit store unavailable"
     json_value '{"recorded":true}'
 }

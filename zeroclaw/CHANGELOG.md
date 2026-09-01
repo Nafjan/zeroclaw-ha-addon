@@ -48,6 +48,14 @@
   operator-controlled strings into generated shell helpers.
 - Remove the last dynamic shell credential lookup from startup; required
   credentials are now checked through fixed parameter expansions only.
+- Bound every local broker request/header line and idle-read phase before shell
+  parsing, including a strict HTTP header count and duplicate Content-Length
+  rejection, so a compromised planner cannot monopolize a broker with an
+  unbounded or slow frame.
+- Segregate planner-supplied intent/decision telemetry under a root-only
+  `planner_event` stream; authoritative broker decisions, execution outcomes,
+  approval transitions, and failures cannot be forged through the planner audit
+  operation or pollute `zc-audit-tail`.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
