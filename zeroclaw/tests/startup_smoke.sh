@@ -165,7 +165,7 @@ cleanup() {
         wait "$PROVIDER_UPSTREAM_PID" 2>/dev/null || true
     fi
 }
-trap 'status=$?; failed_command="$BASH_COMMAND"; trap - EXIT; if [ "$status" -ne 0 ]; then printf "startup smoke last command: %s\n" "$failed_command" >&2; fi; cleanup; smoke_failure_diagnostics "$status"; exit "$status"' EXIT
+trap 'status=$?; failed_command="${BASH_COMMAND-}"; trap - EXIT; if [ "$status" -ne 0 ]; then printf "startup smoke last command: %s\n" "$failed_command" >&2; fi; cleanup; smoke_failure_diagnostics "$status"; exit "$status"' EXIT
 
 # Minimal local HA endpoint so the smoke test exercises the broker transport
 # without contacting the real Supervisor.
