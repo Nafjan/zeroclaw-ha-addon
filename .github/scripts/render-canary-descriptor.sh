@@ -69,15 +69,21 @@ mkdir -p "$OUTPUT_DIR"
 image_ref="${IMAGE}:${CANARY_TAG}@${CANDIDATE_DIGEST}"
 config_tmp="$OUTPUT_DIR/config.yaml.tmp.$$"
 {
-    printf '# ZeroClaw canary side-load descriptor; use only for the matching immutable digest.\n'
+    printf '# ZeroClaw canary side-load descriptor; Supervisor derives the image tag from version.\n'
     printf '# candidate_commit: %s\n' "$CANDIDATE_COMMIT"
     printf '# candidate_tag: %s\n' "$CANARY_TAG"
     printf '# candidate_digest: %s\n' "$CANDIDATE_DIGEST"
-    awk -v canary_slug="$CANARY_SLUG" -v canary_image="$image_ref" '
-        BEGIN { name_count=0; slug_count=0; image_count=0 }
+    printf '# resolved_image: %s\n' "$image_ref"
+    awk -v canary_slug="$CANARY_SLUG" -v canary_tag="$CANARY_TAG" -v canary_image="$IMAGE" '
+        BEGIN { name_count=0; version_count=0; slug_count=0; image_count=0 }
         $1 == "name:" {
             name_count++
             print "name: ZeroClaw Canary"
+            next
+        }
+        $1 == "version:" {
+            version_count++
+            print "version: " canary_tag
             next
         }
         $1 == "slug:" {
@@ -92,7 +98,7 @@ config_tmp="$OUTPUT_DIR/config.yaml.tmp.$$"
         }
         { print }
         END {
-            if (name_count != 1 || slug_count != 1 || image_count != 1) exit 1
+            if (name_count != 1 || version_count != 1 || slug_count != 1 || image_count != 1) exit 1
         }
     ' "$CANONICAL_CONFIG"
 } > "$config_tmp"
@@ -103,7 +109,7 @@ config_sha256="$(sha256sum "$OUTPUT_DIR/config.yaml" | awk '{print $1}')"
 identity_tmp="$OUTPUT_DIR/canary-identity.json.tmp.$$"
 jq -n \
     --arg image "$image_ref" \
-    --arg version "$config_version" \
+    --arg image_repository "$IMAGE" \
     --arg slug "$CANARY_SLUG" \
     --arg tag "$CANARY_TAG" \
     --arg digest "$CANDIDATE_DIGEST" \
@@ -111,13 +117,15 @@ jq -n \
     --arg config_sha256 "$config_sha256" \
     --arg minimum_supervisor_version "$MIN_SUPERVISOR_VERSION" \
     '{
-      schema_version: 1,
+      schema_version: 2,
       descriptor_kind: "homeassistant_local_app",
       config_filename: "config.yaml",
       app_name: "ZeroClaw Canary",
       app_slug: $slug,
-      version: $version,
-      image: $image,
+      version: $tag,
+      image: $image_repository,
+      image_tag: $tag,
+      resolved_image: $image,
       candidate_tag: $tag,
       candidate_digest: $digest,
       candidate_commit: $commit,
