@@ -7,7 +7,7 @@
 set -eu
 
 smoke_failure_diagnostics() {
-    status=$?
+    status="$1"
     [ "$status" -eq 0 ] && return 0
     echo "startup smoke assertion failed (status ${status})" >&2
     for diagnostic_file in \
@@ -17,8 +17,11 @@ smoke_failure_diagnostics() {
         /tmp/zeroclaw-ha-debug \
         /tmp/zeroclaw-broker-test \
         /tmp/zeroclaw-planner-uid \
+        /tmp/zeroclaw-real-provider-pid \
+        /tmp/zeroclaw-real-provider-response \
         /data/logs/capability-broker.log \
-        /data/logs/provider-broker.log; do
+        /data/logs/provider-broker.log \
+        /data/provider/roundtrip-upstream-request; do
         if [ -f "$diagnostic_file" ]; then
             echo "--- ${diagnostic_file} ---" >&2
             tail -80 "$diagnostic_file" 2>/dev/null |
@@ -26,7 +29,6 @@ smoke_failure_diagnostics() {
         fi
     done
 }
-trap smoke_failure_diagnostics EXIT
 
 # The image test provides a synthetic Supervisor credential so the entrypoint
 # exercises its real fail-closed preflight against the fake Supervisor below.
@@ -162,7 +164,7 @@ cleanup() {
         wait "$PROVIDER_UPSTREAM_PID" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT
+trap 'status=$?; trap - EXIT; cleanup; smoke_failure_diagnostics "$status"; exit "$status"' EXIT
 
 # Minimal local HA endpoint so the smoke test exercises the broker transport
 # without contacting the real Supervisor.
@@ -219,6 +221,7 @@ if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
             /usr/local/bin/zeroclaw --config-dir /data agent -m 'provider round-trip probe' \
                 >/tmp/zeroclaw-real-provider-response 2>&1 || true
         ) &
+        printf '%s\n' "$!" > /tmp/zeroclaw-real-provider-pid
     fi
     exec /usr/local/bin/zeroclaw "$@"
 fi
