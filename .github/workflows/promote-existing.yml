@@ -159,7 +159,7 @@ jobs:
                 exit 1
                 ;;
             esac
-          done < <(git diff --name-only --diff-filter=ACMRTUXB "$CANDIDATE_COMMIT" HEAD)
+          done < <(git diff --name-only --diff-filter=ACDMRTUXB "$CANDIDATE_COMMIT" HEAD)
           # A signed image and valid attestations are not sufficient for
           # production.  Bind the supplied candidate run to the exact
           # trusted reproducible-builder job; otherwise a hosted/cross/direct

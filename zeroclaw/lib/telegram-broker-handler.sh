@@ -17,6 +17,12 @@ APPROVAL_CHAT="${TELEGRAM_APPROVAL_CHAT:-}"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 CLIENT_AUTH_TOKEN="${TELEGRAM_CLIENT_AUTH_TOKEN:-}"
 SYSTEM_AUTH_TOKEN="${TELEGRAM_SYSTEM_AUTH_TOKEN:-}"
+APPROVAL_RATE_FILE="${TELEGRAM_APPROVAL_RATE_FILE:-/data/capability/telegram-approval-rate.json}"
+APPROVAL_RATE_LOCK="${TELEGRAM_APPROVAL_RATE_LOCK:-/data/capability/.telegram-approval-rate.lock}"
+APPROVAL_RATE_LIMIT="${TELEGRAM_APPROVAL_RATE_LIMIT:-12}"
+APPROVAL_RATE_WINDOW_SECONDS="${TELEGRAM_APPROVAL_RATE_WINDOW_SECONDS:-60}"
+MAX_PENDING_TICKETS="${TELEGRAM_MAX_PENDING_TICKETS:-64}"
+MAX_PENDING_TICKET_BYTES="${TELEGRAM_MAX_PENDING_TICKET_BYTES:-2097152}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -30,6 +36,18 @@ json_value() {
 json_text() {
     jq -nc --arg result "$1" '{ok:true,result:$result}'
 }
+
+case "$APPROVAL_RATE_LIMIT:$APPROVAL_RATE_WINDOW_SECONDS:$MAX_PENDING_TICKETS:$MAX_PENDING_TICKET_BYTES" in
+    *[!0-9:]*|:*|*::*|*:::*) json_error "Telegram approval admission limits are invalid" ;;
+esac
+[ "$APPROVAL_RATE_LIMIT" -ge 1 ] && [ "$APPROVAL_RATE_LIMIT" -le 120 ] ||
+    json_error "Telegram approval rate limit is outside the safe range"
+[ "$APPROVAL_RATE_WINDOW_SECONDS" -ge 10 ] && [ "$APPROVAL_RATE_WINDOW_SECONDS" -le 3600 ] ||
+    json_error "Telegram approval rate window is outside the safe range"
+[ "$MAX_PENDING_TICKETS" -ge 1 ] && [ "$MAX_PENDING_TICKETS" -le 1024 ] ||
+    json_error "Telegram pending-ticket limit is outside the safe range"
+[ "$MAX_PENDING_TICKET_BYTES" -ge 4096 ] && [ "$MAX_PENDING_TICKET_BYTES" -le 16777216 ] ||
+    json_error "Telegram pending-ticket byte limit is outside the safe range"
 
 request=""
 read_deadline=$((SECONDS + 5))
@@ -192,6 +210,167 @@ telegram_result() {
     printf '%s' "$result" | jq -c '.result // {}'
 }
 
+approval_rate_lock_is_stale() {
+    [ -d "$APPROVAL_RATE_LOCK" ] && [ ! -L "$APPROVAL_RATE_LOCK" ] || return 1
+    approval_rate_owner_file="${APPROVAL_RATE_LOCK}/owner"
+    if [ -e "$approval_rate_owner_file" ]; then
+        [ -f "$approval_rate_owner_file" ] && [ ! -L "$approval_rate_owner_file" ] || return 1
+        approval_rate_owner_pid=$(cat "$approval_rate_owner_file" 2>/dev/null || true)
+        case "$approval_rate_owner_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "$approval_rate_owner_pid" 2>/dev/null && return 1
+    fi
+    approval_rate_lock_mtime=$(stat -c '%Y' "$APPROVAL_RATE_LOCK" 2>/dev/null || true)
+    approval_rate_lock_now=$(date -u +%s)
+    case "$approval_rate_lock_mtime:$approval_rate_lock_now" in
+        ''|*[!0-9:]*|*:*:*) return 1 ;;
+    esac
+    [ "$approval_rate_lock_now" -ge "$approval_rate_lock_mtime" ] || return 1
+    [ $((approval_rate_lock_now - approval_rate_lock_mtime)) -ge 120 ]
+}
+
+acquire_approval_rate_lock() {
+    approval_rate_attempts=0
+    while ! mkdir "$APPROVAL_RATE_LOCK" 2>/dev/null; do
+        if approval_rate_lock_is_stale; then
+            rm -f -- "${APPROVAL_RATE_LOCK}/owner" 2>/dev/null || true
+            rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+            continue
+        fi
+        approval_rate_attempts=$((approval_rate_attempts + 1))
+        [ "$approval_rate_attempts" -le 10 ] || return 1
+        sleep 1
+    done
+    printf '%s\n' "$$" > "${APPROVAL_RATE_LOCK}/owner" || {
+        rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "${APPROVAL_RATE_LOCK}/owner"
+}
+
+release_approval_rate_lock() {
+    rm -f -- "${APPROVAL_RATE_LOCK}/owner" 2>/dev/null || true
+    rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+}
+
+write_approval_rate() {
+    [ ! -L "$APPROVAL_RATE_FILE" ] || return 1
+    if [ -e "$APPROVAL_RATE_FILE" ] && [ ! -f "$APPROVAL_RATE_FILE" ]; then
+        return 1
+    fi
+    approval_rate_tmp="${APPROVAL_RATE_FILE}.tmp.$$"
+    printf '%s\n' "$1" > "$approval_rate_tmp" || return 1
+    chown root:root "$approval_rate_tmp" 2>/dev/null || true
+    chmod 0600 "$approval_rate_tmp" || {
+        rm -f "$approval_rate_tmp"
+        return 1
+    }
+    sync -f "$approval_rate_tmp" || {
+        rm -f "$approval_rate_tmp"
+        return 1
+    }
+    mv -f "$approval_rate_tmp" "$APPROVAL_RATE_FILE" || return 1
+    sync -f "$(dirname -- "$APPROVAL_RATE_FILE")" || return 1
+}
+
+admit_approval_send() {
+    admission_chat="$1"
+    [ -d "$(dirname -- "$APPROVAL_RATE_FILE")" ] &&
+        [ ! -L "$(dirname -- "$APPROVAL_RATE_FILE")" ] || return 1
+    acquire_approval_rate_lock || return 1
+    if [ -e "$APPROVAL_RATE_FILE" ]; then
+        [ -f "$APPROVAL_RATE_FILE" ] && [ ! -L "$APPROVAL_RATE_FILE" ] || {
+            release_approval_rate_lock
+            return 1
+        }
+        admission_state=$(cat "$APPROVAL_RATE_FILE" 2>/dev/null || true)
+        printf '%s' "$admission_state" | jq -e '
+            type == "object" and .schema == 1 and
+            (.window_start | type == "number" and floor == . and . >= 0) and
+            (.clients | type == "object") and
+            all(.clients[]; type == "number" and floor == . and . >= 0)
+        ' >/dev/null 2>&1 || {
+            release_approval_rate_lock
+            return 1
+        }
+    else
+        admission_state='{"schema":1,"window_start":0,"clients":{}}'
+    fi
+    admission_now=$(date -u +%s)
+    admission_start=$(printf '%s' "$admission_state" | jq -r '.window_start')
+    case "$admission_now:$admission_start" in
+        ''|*[!0-9:]*|*:*:*) release_approval_rate_lock; return 1 ;;
+    esac
+    [ "$admission_start" -le "$admission_now" ] || {
+        release_approval_rate_lock
+        return 1
+    }
+    admission_window_expired=0
+    if [ $((admission_now - admission_start)) -ge "$APPROVAL_RATE_WINDOW_SECONDS" ]; then
+        admission_start="$admission_now"
+        admission_count=0
+        admission_window_expired=1
+    else
+        admission_count=$(printf '%s' "$admission_state" | jq -r --arg chat "$admission_chat" '.clients[$chat] // 0') || {
+            release_approval_rate_lock
+            return 1
+        }
+    fi
+    case "$admission_count" in
+        ''|*[!0-9]*) release_approval_rate_lock; return 1 ;;
+    esac
+    [ "$admission_count" -lt "$APPROVAL_RATE_LIMIT" ] || {
+        release_approval_rate_lock
+        json_error "Telegram approval send rate is temporarily exhausted"
+    }
+    if [ "$admission_window_expired" -eq 1 ]; then
+        admission_next=$(jq -nc --argjson start "$admission_start" --arg chat "$admission_chat" \
+            --argjson count 1 \
+            '{schema:1,window_start:$start,clients:{($chat):$count}}') || {
+            release_approval_rate_lock
+            return 1
+        }
+    else
+        admission_next=$(printf '%s' "$admission_state" | jq --arg chat "$admission_chat" \
+            --argjson count "$((admission_count + 1))" \
+            --argjson start "$admission_start" \
+            '.window_start=$start | .clients[$chat]=$count') || {
+            release_approval_rate_lock
+            return 1
+        }
+    fi
+    write_approval_rate "$admission_next" || {
+        release_approval_rate_lock
+        return 1
+    }
+    release_approval_rate_lock
+}
+
+admit_pending_ticket_capacity() {
+    incoming_bytes="$1"
+    case "$incoming_bytes" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -d "$TICKET_DIR" ] && [ ! -L "$TICKET_DIR" ] || return 1
+    pending_count=0
+    pending_bytes=0
+    for pending_ticket in "$TICKET_DIR"/*.json; do
+        [ -f "$pending_ticket" ] && [ ! -L "$pending_ticket" ] || continue
+        pending_count=$((pending_count + 1))
+        [ "$pending_count" -lt "$MAX_PENDING_TICKETS" ] || return 2
+        pending_size=$(stat -c '%s' "$pending_ticket" 2>/dev/null || true)
+        case "$pending_size" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        pending_bytes=$((pending_bytes + pending_size))
+        [ "$pending_bytes" -le "$MAX_PENDING_TICKET_BYTES" ] || return 2
+    done
+    [ "$pending_count" -lt "$MAX_PENDING_TICKETS" ] || return 2
+    [ $((pending_bytes + incoming_bytes)) -le "$MAX_PENDING_TICKET_BYTES" ] || return 2
+    return 0
+}
+
 send_approval() {
     ticket="$1"
     text="$2"
@@ -231,6 +410,18 @@ send_approval() {
         esac
     fi
     [ "${#ticket_json}" -le 65536 ] || json_error "approval ticket is too large"
+    ticket_bytes=${#ticket_json}
+    if admit_pending_ticket_capacity "$ticket_bytes"; then
+        :
+    else
+        capacity_status=$?
+        case "$capacity_status" in
+            2) json_error "Telegram approval backlog is full" ;;
+            *) json_error "Telegram approval admission state is unavailable" ;;
+        esac
+    fi
+    admit_approval_send "$chat_id" ||
+        json_error "Telegram approval admission state is unavailable"
     staged_ticket=$(mktemp "${TICKET_DIR}/.${ticket}.XXXXXX")
     # The planner sends the bounded ticket as typed request data. Never open a
     # planner-controlled pathname from this root-owned broker: pathname swaps,

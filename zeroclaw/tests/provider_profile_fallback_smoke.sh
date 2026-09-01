@@ -560,6 +560,34 @@ printf '%s' "$response" | grep -F 'usage-floor-ok' >/dev/null
 jq -e '[.records[] | select(.upstream_model == "usage-floor-model" and .usage_floor == true and .settled_input_tokens > 0 and .settled_tokens == 16)] | length == 1' \
     "$LEDGER" >/dev/null
 
+# A provider that exceeds the admitted completion/input reservation is a hard
+# anomaly.  Quarantine the profile durably so a fresh broker connection cannot
+# immediately retry against the same untrusted accounting boundary.
+rm -f "$LEDGER" "$LOCK" /data/provider/overrun.log /data/provider/overrun-second.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="overrun-route|openrouter|overrun-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"overrun"}}],"usage":{"prompt_tokens":1,"completion_tokens":32,"total_tokens":33}}' \
+    /data/provider/overrun.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+overrun_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$overrun_response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
+jq -e '[.records[] | select(.profile_id == "openrouter" and .settlement == "usage_overrun")] | length == 1' \
+    "$LEDGER" >/dev/null
+jq -e '.profile_quarantine | any(.[]; .profile_id == "openrouter" and .reason == "usage_overrun" and .until > now)' \
+    "$LEDGER" >/dev/null
+
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="overrun-route|openrouter|overrun-second-model|paid"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+overrun_second_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"retry"}]}' )
+stop_listeners
+printf '%s' "$overrun_second_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/overrun-second.log ]
+
 # Provider-reported paid cost is untrusted. A syntactically valid understated
 # value must not reduce the conservative cost reservation used by later budget
 # admission decisions.
@@ -621,7 +649,8 @@ jq -n \
         credit_exhausted_402: true,
         network_timeout: true,
         transient_5xx: true,
-        credential_401_blocks_same_profile_fallback: true
+        credential_401_blocks_same_profile_fallback: true,
+        profile_quarantine_after_accounting_overrun: true
       },
       safety: {
         free_route_no_tools_only: true,
@@ -632,6 +661,7 @@ jq -n \
         success_settlement_recorded: true,
         failure_settlement_recorded: true,
         budget_denied_before_upstream: true,
+        encoded_credential_reflection_blocked: true,
         ledger_schema: 1,
         ledger_sha256: $ledger_sha256
       },
