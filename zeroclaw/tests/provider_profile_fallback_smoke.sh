@@ -472,10 +472,10 @@ stop_listeners
 printf '%s' "$n_invalid_response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
 [ ! -f /data/provider/n-invalid.log ]
 
-# The estimate must also leave room for provider tokenizer overhead.  The
-# fake upstream reports more prompt tokens than the old bytes/4 heuristic but
-# less than the conservative reservation above; a valid response must remain
-# successful and settle the prompt usage durably.
+# The byte-for-token reservation must leave room for provider tokenizer
+# overhead. The fake upstream reports more prompt tokens than the old bytes/4
+# heuristic but less than the conservative reservation above; a valid response
+# must remain successful and settle the prompt usage durably.
 rm -f "$LEDGER" "$LOCK" /data/provider/input-overhead.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
@@ -484,7 +484,7 @@ start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"input-overhead-ok"}}],"usage":{"prompt_tokens":260,"completion_tokens":1,"total_tokens":261}}' \
     /data/provider/input-overhead.log
 PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
-overhead_content=$(head -c 800 /dev/zero | tr '\0' x)
+overhead_content=$(head -c 400 /dev/zero | tr '\0' x)
 overhead_body=$(jq -nc --arg content "$overhead_content" \
     '{model:"input-overhead-route",messages:[{role:"user",content:$content}]}' )
 response=$(request_proxy "$overhead_body")
@@ -492,6 +492,24 @@ stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
 jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens == 260)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# Provider-reported paid cost is untrusted. A syntactically valid understated
+# value must not reduce the conservative cost reservation used by later budget
+# admission decisions.
+rm -f "$LEDGER" "$LOCK" /data/provider/cost-floor.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="cost-floor-route|openrouter|cost-floor-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"cost-floor-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0}}' \
+    /data/provider/cost-floor.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"cost-floor-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'cost-floor-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "cost-floor-model" and .settled_cost_micros > 0 and .settlement == "reserved_cost_floor")] | length == 1' \
     "$LEDGER" >/dev/null
 
 # Dollar limits are enforced by the root broker before the upstream call. A

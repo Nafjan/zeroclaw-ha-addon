@@ -40,16 +40,30 @@ manifest_value() {
     sed -n "s/^${key}=//p" "$BACKUP_DIR/manifest" | head -n 1
 }
 
+FORMAT=$(manifest_value format)
 OLD_SCHEMA=$(manifest_value old_schema)
 NEW_SCHEMA=$(manifest_value new_schema)
 OLD_VERSION=$(manifest_value old_version)
 NEW_VERSION=$(manifest_value new_version)
 
+[ "$FORMAT" = "2" ] || die "backup manifest format is unsupported"
 if [ -n "$OLD_SCHEMA" ]; then
     printf '%s' "$OLD_SCHEMA" | grep -Eq '^(0|[1-9][0-9]{0,2})$' || die "backup old_schema is malformed"
     [ "$OLD_SCHEMA" -le 255 ] || die "backup old_schema is out of range"
 fi
 [ -n "$OLD_VERSION" ] || die "backup manifest has no old_version"
+[ -n "$NEW_SCHEMA" ] || die "backup manifest has no new_schema"
+printf '%s' "$NEW_SCHEMA" | grep -Eq '^[1-9][0-9]{0,2}$' || die "backup new_schema is malformed"
+[ "$NEW_SCHEMA" -le 255 ] || die "backup new_schema is out of range"
+[ "$NEW_VERSION" = "schema-${NEW_SCHEMA}" ] || die "backup new_version does not match new_schema"
+case "$OLD_VERSION" in
+    fresh) ;;
+    *.*.*.*|*.*.*.*-canary.*)
+        printf '%s' "$OLD_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' ||
+            die "backup old_version is malformed"
+        ;;
+    *) die "backup old_version is malformed" ;;
+esac
 
 # Verify every file before creating or touching live state.  Generated paths
 # are relative to BACKUP_DIR; reject traversal and symlink-based escapes.
@@ -57,6 +71,10 @@ if ! (
     cd "$BACKUP_DIR"
     while IFS=' ' read -r digest file; do
         [ -n "$digest" ] || continue
+        # GNU sha256sum uses a leading '*' before the pathname in binary mode;
+        # accept that equivalent checksum representation as well as the
+        # ordinary two-space text-mode form.
+        file="${file#\*}"
         case "$file" in
             ./*)
                 case "$file" in
@@ -104,7 +122,7 @@ fi
 rollback_ready=0
 restore_succeeded=0
 runtime_lock_held=0
-RUNTIME_LOCK_DIR="$MIGRATIONS_DIR/.runtime-lock"
+RUNTIME_LOCK_DIR="$DATA_DIR/.state-runtime-lock"
 release_runtime_lock() {
     if [ "$runtime_lock_held" -eq 1 ]; then
         rm -f -- "$RUNTIME_LOCK_DIR/pid"

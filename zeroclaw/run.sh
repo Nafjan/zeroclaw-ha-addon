@@ -485,9 +485,18 @@ supervisor_api_preflight() {
         bashio::log.fatal "SUPERVISOR_TOKEN is required for the Supervisor version preflight; refusing to start"
         exit 1
     }
-    supervisor_info_json="$(curl -fsS --connect-timeout 5 --max-time 15 \
-        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-        "http://supervisor/supervisor/info")" || {
+    # Keep the token out of curl's argv and out of the curl child's inherited
+    # environment. The temporary header is root-only and is removed by the
+    # subshell trap on both success and failure.
+    supervisor_info_json="$({
+        supervisor_auth_file="$(mktemp /tmp/zeroclaw-supervisor-auth.XXXXXX)" || exit 1
+        trap 'rm -f -- "$supervisor_auth_file"' EXIT
+        chmod 0600 "$supervisor_auth_file"
+        printf 'Authorization: Bearer %s\n' "$SUPERVISOR_TOKEN" > "$supervisor_auth_file"
+        env -u SUPERVISOR_TOKEN curl -fsS --connect-timeout 5 --max-time 15 \
+            --header "@${supervisor_auth_file}" \
+            "http://supervisor/supervisor/info"
+    })" || {
         bashio::log.fatal "Supervisor version preflight failed; refusing to start"
         exit 1
     }
@@ -547,8 +556,6 @@ if [ -L "${WS}/sessions" ] ||
     exit 1
 fi
 mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets /data/approval-receipts/outcomes
-chown zeroclaw:zeroclaw "${WS}/sessions"
-chmod 0700 "${WS}/sessions"
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
 # listener opens a log path, then keep the directory unreadable to the planner.
 find /data/logs -type l -exec rm -f {} \; 2>/dev/null || true
@@ -630,7 +637,7 @@ MIGRATIONS_DIR="${CONFIG_DIR}/migrations"
 mkdir -p "${MIGRATIONS_DIR}"
 chown root:root "${MIGRATIONS_DIR}"
 chmod 0700 "${MIGRATIONS_DIR}"
-RUNTIME_LOCK_DIR="${MIGRATIONS_DIR}/.runtime-lock"
+RUNTIME_LOCK_DIR="${CONFIG_DIR}/.state-runtime-lock"
 if [ -e "${RUNTIME_LOCK_DIR}" ]; then
     if [ -L "${RUNTIME_LOCK_DIR}" ] || [ ! -d "${RUNTIME_LOCK_DIR}" ] ||
         [ ! -f "${RUNTIME_LOCK_DIR}/pid" ]; then
@@ -671,7 +678,7 @@ release_runtime_lock() {
 }
 trap release_runtime_lock EXIT
 SCHEMA_FILE="${CONFIG_DIR}/.state-schema"
-if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$SCHEMA_FILE" "${STATE_SCHEMA}"; then
+if ! STATE_MIGRATION_LOCK_HELD=true /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$SCHEMA_FILE" "${STATE_SCHEMA}"; then
     bashio::log.fatal "State migration failed; refusing to start without a rollback snapshot."
     exit 1
 fi
@@ -936,8 +943,8 @@ SCRIPT
 
 cat > /usr/local/bin/ha-errors << 'SCRIPT'
 #!/bin/sh
-RAW=$(/usr/local/bin/ha-capability get_error_log) || { echo "(unavailable)"; exit 1; }
-printf '%s\n' "$RAW" | tail -40
+RESULT=$(/usr/local/bin/ha-capability get_error_log) || { echo "(unavailable)"; exit 1; }
+printf '%s\n' "$RESULT" | jq -r '.result.detail // "Home Assistant logs are unavailable"'
 SCRIPT
 
 # Compatibility name retained for the policy gate. This is no longer a raw
@@ -1480,7 +1487,10 @@ handle_message() {
     fi
 
     if ! is_allowed_user "\$from_id"; then
-        if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Not authorized."; then return 1; fi
+        # Do not persist replies for untrusted senders. A public bot can
+        # receive arbitrarily many unique update IDs, and caching each denial
+        # would turn Telegram traffic into an unbounded disk-write primitive.
+        if ! send_msg "\$chat_id" "Not authorized."; then return 1; fi
         return 0
     fi
     [ -z "\$text" ] && return
@@ -2854,7 +2864,7 @@ STATUS:
 - ha-sensors        — soil/temperature sensors
 - ha-state          — one entity by ID (pass entity_id)
 - ha-logbook        — recent events (optionally entity_id)
-- ha-errors         — HA system error log
+- ha-errors         — bounded HA error-log availability check; details stay in HA UI
 
 ACTIONS (all routed through the policy gate):
 - command: ha-action-guarded <service_path> '<json_body>'
@@ -2918,7 +2928,7 @@ send to the user. Invoke them only inside the structured shell tool.
 - ha-state <entity_id> — state of one entity.
 - ha-action-guarded '<service_path>' '<json_body>' — policy-gated action.
 - ha-logbook [entity_id] — recent activity.
-- ha-errors — Home Assistant error log.
+- ha-errors — bounded Home Assistant error-log availability check; use HA UI for details.
 - Scheduling is disabled; direct the user to a Home Assistant automation.
 - zc-audit-tail [N] — recent audit rows.
 - zc-undo [N] — revert recent actions.
@@ -2973,7 +2983,6 @@ scrub_unrelated_child_credentials() {
 # ==============================================================
 find /data/audit -name '*.jsonl' -mtime +"${AUDIT_RETENTION_DAYS}" -delete 2>/dev/null || true
 find /data/undo  -name '*.json'  -mmin  +60                       -delete 2>/dev/null || true
-find /data/pending -name '*.json' -mmin +60                        -delete 2>/dev/null || true
 /opt/zeroclaw/lib/state-cleanup.sh /data || \
     bashio::log.warning "root approval-state cleanup did not complete; retaining state for recovery"
 
@@ -3057,20 +3066,39 @@ fi
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from
 # unlinking or replacing any root-owned audit/approval/migration/config entry.
-# Only these explicitly listed trees are planner-owned; the broker state
-# remains outside its write boundary.
+# These explicitly listed trees have root-owned, sticky top-level mount points
+# and planner-owned contents; the broker state remains outside the write
+# boundary. Keeping the top-level directory root-owned prevents a planner from
+# replacing a path component while privileged migration/restore code runs.
 chown root:zeroclaw /data
 chmod 1770 /data
 # Undo snapshots are caller-owned, untrusted input. The broker re-evaluates
-# every restore service and records the real HA outcome; keeping the directory
+# every restore service and records the real HA outcome; keeping the contents
 # planner-writable makes the advertised undo tool functional without granting
 # the planner access to trusted audit or approval state.
 for planner_tree in "${WS}" "${WS}/sessions" /data/pending /data/routines /data/tools /data/undo; do
     mkdir -p "$planner_tree"
-    chown -R zeroclaw:zeroclaw "$planner_tree"
+    find "$planner_tree" -type d -exec chown zeroclaw:zeroclaw {} \; 2>/dev/null || true
     find "$planner_tree" -type d -exec chmod 0700 {} \; 2>/dev/null || true
+    find "$planner_tree" -type f -exec chown zeroclaw:zeroclaw {} \; 2>/dev/null || true
     find "$planner_tree" -type f -exec chmod 0600 {} \; 2>/dev/null || true
+    chown root:zeroclaw "$planner_tree"
+    chmod 1770 "$planner_tree"
 done
+# Pending approval drafts are planner-owned and untrusted. Keep their bounded
+# retention cleanup in the same unprivileged account so a planner-controlled
+# directory replacement can never redirect a root delete outside that tree.
+(
+    scrub_unrelated_child_credentials
+    exec su-exec zeroclaw:zeroclaw /bin/sh -c '
+        while true; do
+            sleep 300
+            if [ -d /data/pending ] && [ ! -L /data/pending ]; then
+                find /data/pending -maxdepth 1 -type f -name "*.json" -mmin +60 -delete 2>/dev/null || true
+            fi
+        done
+    '
+) &
 # Older releases stored correction state in planner-writable /data. Remove
 # only that exact legacy path; current correction state is root-owned broker
 # state under /data/capability and is never read from a planner-owned path.

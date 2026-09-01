@@ -791,6 +791,12 @@ case "$operation" in
         run_logbook "$entity"
         ;;
     get_error_log)
+        # Home Assistant's /error_log endpoint is an opaque plaintext body and
+        # may contain paths, usernames, tokens, request data, and exception
+        # payloads. It is not safe to forward that body across the broker to
+        # the untrusted planner/provider. Perform the bounded health check but
+        # return only a fixed, non-sensitive result; detailed diagnostics stay
+        # in the Home Assistant UI/logs.
         if ! bounded_ha_curl "Home Assistant error log request failed" "ha_response_failed" \
             -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
             --header "@${HA_AUTH_FILE}" "${HA_URL}/error_log"; then
@@ -798,10 +804,9 @@ case "$operation" in
                 json_error "Home Assistant error log response is too large" "ha_response_too_large"
             json_error "Home Assistant error log request failed" "ha_response_failed"
         fi
-        result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant error log response could not be read" "ha_response_failed"
         rm -f "$HA_RESPONSE_FILE"
         HA_RESPONSE_FILE=""
-        json_text "$result"
+        json_value '{available:true,detail:"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
         ;;
     pending_count)
         run_pending_count

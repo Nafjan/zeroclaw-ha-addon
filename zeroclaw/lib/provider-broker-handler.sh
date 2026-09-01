@@ -41,6 +41,7 @@ CLIENT_AUTH_TOKEN="${PROVIDER_CLIENT_AUTH_TOKEN:-}"
 LEDGER_FILE="${PROVIDER_LEDGER_FILE:-${PROVIDER_QUOTA_FILE:-/data/provider/ledger.json}}"
 LEDGER_FILE=$(printf '%s' "$LEDGER_FILE" | sed 's/[[:space:]]*$//')
 LEDGER_LOCK="${PROVIDER_LEDGER_LOCK:-${PROVIDER_QUOTA_LOCK:-/data/provider/.ledger.lock}}"
+LEDGER_LOCK_STALE_SECONDS=120
 LOG_FILE="${PROVIDER_LOG_FILE:-/data/logs/provider-broker.log}"
 RESERVATION_TTL="${PROVIDER_RESERVATION_TTL_SECONDS:-180}"
 TOTAL_TIMEOUT="${PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
@@ -85,7 +86,7 @@ COST_BUDGET_ENABLED=0
     respond 503 "Service Unavailable" '{"error":"provider token limits are invalid"}'
 [ "$MAX_INPUT_TOKENS" -ge 1024 ] && [ "$MAX_INPUT_TOKENS" -le 128000 ] || \
     respond 503 "Service Unavailable" '{"error":"provider input token limits are invalid"}'
-[ "$MAX_INPUT_CHARS" -ge 4096 ] && [ "$MAX_INPUT_CHARS" -le 524288 ] || \
+[ "$MAX_INPUT_CHARS" -ge 1 ] && [ "$MAX_INPUT_CHARS" -le 524288 ] || \
     respond 503 "Service Unavailable" '{"error":"provider input size limits are invalid"}'
 [ "$MAX_REQUESTS_PER_HOUR" -ge 1 ] && [ "$MAX_REQUESTS_PER_HOUR" -le 1000 ] || \
     respond 503 "Service Unavailable" '{"error":"provider request limits are invalid"}'
@@ -105,6 +106,15 @@ case "$AUTO_COST_TIER" in
     low|medium|high|xhigh|max) ;;
     *) respond 503 "Service Unavailable" '{"error":"provider Auto cost tier is invalid"}' ;;
 esac
+
+# The broker does not share a tokenizer with every upstream provider. Use a
+# byte-for-token upper bound instead of an optimistic average, and reserve a
+# fixed envelope allowance as well. Clamp the independently configurable byte
+# ceiling to the resulting safe token ceiling before reading the request.
+[ "$MAX_INPUT_TOKENS" -gt 256 ] || \
+    respond 503 "Service Unavailable" '{"error":"provider input token limit is too small"}'
+SAFE_INPUT_CHARS=$((MAX_INPUT_TOKENS - 256))
+[ "$MAX_INPUT_CHARS" -le "$SAFE_INPUT_CHARS" ] || MAX_INPUT_CHARS="$SAFE_INPUT_CHARS"
 
 # Compatibility path for the previous single-OpenRouter broker.
 if [ -z "$PROFILE_SPEC" ]; then
@@ -217,6 +227,8 @@ jq -e '
     type == "object" and
     (.model | type == "string") and
     (.messages | type == "array") and
+    (.max_tokens == null or
+      (.max_tokens | type == "number" and floor == . and . >= 0 and . <= 10000000)) and
     ((.stream // false) == false) and
     (.max_completion_tokens == null) and
     (.n == null or (.n | type == "number" and floor == . and . == 1)) and
@@ -255,11 +267,11 @@ case "$input_chars" in
 esac
 [ "$input_chars" -le "$MAX_INPUT_CHARS" ] || \
     respond 413 "Payload Too Large" '{"error":"provider input is too large"}'
-# Provider usage can include tokenizer overhead and can diverge materially
-# from a four-bytes-per-token estimate for Unicode, code, and structured tool
-# payloads. Reserve a conservative half-byte estimate plus a fixed envelope
-# allowance so a valid response is not misclassified as a budget overrun.
-requested_input_tokens=$(( (input_chars + 1) / 2 + 256 ))
+# Provider usage can diverge materially from a bytes-per-token average for
+# Unicode, code, and structured payloads. The safe byte ceiling above and a
+# one-token-per-byte reservation avoid under-reserving any enabled provider's
+# input budget; the fixed allowance covers the broker envelope.
+requested_input_tokens=$((input_chars + 256))
 [ "$requested_input_tokens" -le "$MAX_INPUT_TOKENS" ] || \
     respond 400 "Bad Request" '{"error":"provider input token estimate exceeds the broker limit"}'
 
@@ -387,18 +399,53 @@ write_ledger() {
 }
 
 acquire_ledger_lock() {
+    ledger_lock_is_stale() {
+        # A lock left by a killed broker must not permanently disable all
+        # provider traffic, but an active or malformed lock must fail closed.
+        [ -d "$LEDGER_LOCK" ] && [ ! -L "$LEDGER_LOCK" ] || return 1
+        ledger_owner_file="$LEDGER_LOCK/owner"
+        if [ -e "$ledger_owner_file" ]; then
+            [ -f "$ledger_owner_file" ] && [ ! -L "$ledger_owner_file" ] || return 1
+            ledger_owner_pid=$(cat "$ledger_owner_file" 2>/dev/null || true)
+            case "$ledger_owner_pid" in
+                ''|*[!0-9]*) return 1 ;;
+            esac
+            kill -0 "$ledger_owner_pid" 2>/dev/null && return 1
+        fi
+        ledger_lock_mtime=$(stat -c '%Y' "$LEDGER_LOCK" 2>/dev/null || true)
+        ledger_lock_now=$(date -u +%s)
+        case "$ledger_lock_mtime:$ledger_lock_now" in
+            ''|*[!0-9:]*|*:*:*) return 1 ;;
+        esac
+        [ "$ledger_lock_now" -ge "$ledger_lock_mtime" ] || return 1
+        [ $((ledger_lock_now - ledger_lock_mtime)) -ge "$LEDGER_LOCK_STALE_SECONDS" ]
+    }
+
     attempts=0
     while ! mkdir "$LEDGER_LOCK" 2>/dev/null; do
+        if ledger_lock_is_stale; then
+            # Only remove the known owner marker and then the empty lock
+            # directory. Never recursively delete a planner-controlled path.
+            rm -f -- "$LEDGER_LOCK/owner" 2>/dev/null || true
+            rmdir "$LEDGER_LOCK" 2>/dev/null || true
+            continue
+        fi
         attempts=$((attempts + 1))
         [ "$attempts" -le 10 ] || return 1
         sleep 1
     done
+    printf '%s\n' "$$" > "$LEDGER_LOCK/owner" || {
+        rmdir "$LEDGER_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "$LEDGER_LOCK/owner"
     quota_lock_held=1
     return 0
 }
 
 release_ledger_lock() {
     if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$LEDGER_LOCK/owner" 2>/dev/null || true
         rmdir "$LEDGER_LOCK" 2>/dev/null || true
         quota_lock_held=0
     fi
@@ -682,8 +729,16 @@ settle_attempt() {
                 [ "$settle_reason" = "actual_usage" ] && settle_reason="reserved_max_missing_cost"
                 ;;
             *)
-                settle_cost_value="$settle_actual_cost"
-                if [ "$settle_cost_value" -gt "$reserve_cost_value" ]; then
+                # Provider-reported cost is untrusted telemetry. It may
+                # increase the reservation only as an anomaly, but it may not
+                # lower the conservative amount admitted before the request.
+                if [ "$settle_actual_cost" -lt "$reserve_cost_value" ]; then
+                    settle_cost_value="$reserve_cost_value"
+                    [ "$settle_reason" = "actual_usage" ] && settle_reason="reserved_cost_floor"
+                else
+                    settle_cost_value="$settle_actual_cost"
+                fi
+                if [ "$settle_actual_cost" -gt "$reserve_cost_value" ]; then
                     settle_reported_cost="$settle_cost_value"
                     settle_cost_value="$reserve_cost_value"
                     settle_reason="cost_overrun"
@@ -767,7 +822,9 @@ validate_response_contract() {
 shape_request() {
     shape_model="$1"
     shape_kind="$2"
+    shape_max_tokens="$3"
     jq -c --arg model "$shape_model" --arg kind "$shape_kind" \
+        --argjson max_tokens "$shape_max_tokens" \
         --arg preset "$FUSION_PRESET" --arg cost_tier "$AUTO_COST_TIER" '
         with_entries(select(.key as $key |
             ["model","messages","max_tokens","stream","temperature","top_p","n",
@@ -776,6 +833,10 @@ shape_request() {
             | index($key))) |
         .stream = false |
         .model = $model |
+        # Always send the broker normalized completion ceiling upstream. A
+        # planner may omit max_tokens, but the provider must never get to pick
+        # a larger default than the amount reserved in the ledger.
+        .max_tokens = $max_tokens |
         if $kind == "free" then
             del(.tools,.tool_choice,.parallel_tool_calls,.functions,.function_call)
         elif $kind == "fusion" then
@@ -937,7 +998,7 @@ ${candidate_key}"
     else
         shape_kind=standard
     fi
-    if ! shape_request "$upstream_model" "$shape_kind"; then
+    if ! shape_request "$upstream_model" "$shape_kind" "$requested_tokens"; then
         non_budget_failure=1
         last_failure="provider route request shaping failed"
         break

@@ -44,7 +44,10 @@ teardown() {
     [ ! -e "$DATA_DIR/approval-receipts/.claims/deadbeef.claim" ]
     [ ! -e "$DATA_DIR/approval-receipts/deadbeef.sha256" ]
     [ ! -e "$DATA_DIR/approved/deadbeef.marker" ]
-    [ ! -e "$DATA_DIR/pending/deadbeef.json" ]
+    # Pending drafts are planner-owned. Root cleanup must not delete through
+    # that attacker-controlled path; the unprivileged planner cleanup handles
+    # its own retention safely.
+    [ -f "$DATA_DIR/pending/deadbeef.json" ]
 }
 
 @test "unexpired tickets are retained" {
