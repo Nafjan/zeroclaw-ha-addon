@@ -403,7 +403,7 @@ test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
 [ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
 /src/tests/approval_transition_smoke.sh
 /src/tests/approval_concurrency_smoke.sh
-/src/tests/telegram_broker_smoke.sh
+/bin/sh -x /src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     /src/tests/provider_broker_smoke.sh
     /src/tests/provider_profile_fallback_smoke.sh
