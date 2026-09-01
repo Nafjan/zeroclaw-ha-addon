@@ -39,6 +39,10 @@ printf '\n' >> "$REQUEST_LOG"
         body='{"choices":[{"message":{"content":"provider-secret"}}]}'
     elif [ "${PROVIDER_ENCODED_LEAK_RESPONSE:-false}" = "true" ]; then
         body='{"choices":[{"message":{"content":"cHJvdmlkZXItc2VjcmV0"}}]}'
+    elif [ "${PROVIDER_PERCENT_LEAK_RESPONSE:-false}" = "true" ]; then
+        body='{"choices":[{"message":{"content":"%70%72%6F%76%69%64%65%72%2D%73%65%63%72%65%74"}}]}'
+    elif [ "${PROVIDER_HEX_LEAK_RESPONSE:-false}" = "true" ]; then
+        body='{"choices":[{"message":{"content":"70726f76696465722d736563726574"}}]}'
     else
         body='{"choices":[{"message":{"content":"broker-ok"}}],"provider_debug":"ignored"}'
 fi
@@ -204,5 +208,26 @@ body_length=$(printf '%s' "$REQUEST_BODY" | wc -c | tr -d ' ')
 stop_listeners
 grep -F 'HTTP/1.1 502 Bad Gateway' /data/provider-encoded-leak-response >/dev/null
 ! grep -F 'provider-secret' /data/provider-encoded-leak-response >/dev/null 2>&1
+
+PROVIDER_PERCENT_LEAK_RESPONSE=true start_upstream
+start_proxy
+body_length=$(printf '%s' "$REQUEST_BODY" | wc -c | tr -d ' ')
+{
+    printf 'POST /v1/chat/completions HTTP/1.1\r\n'
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+} | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-percent-leak-response
+stop_listeners
+grep -F 'HTTP/1.1 502 Bad Gateway' /data/provider-percent-leak-response >/dev/null
+! grep -F 'provider-secret' /data/provider-percent-leak-response >/dev/null 2>&1
+
+PROVIDER_HEX_LEAK_RESPONSE=true start_upstream
+start_proxy
+{
+    printf 'POST /v1/chat/completions HTTP/1.1\r\n'
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+} | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-hex-leak-response
+stop_listeners
+grep -F 'HTTP/1.1 502 Bad Gateway' /data/provider-hex-leak-response >/dev/null
+! grep -F 'provider-secret' /data/provider-hex-leak-response >/dev/null 2>&1
 
 echo 'provider broker smoke passed'

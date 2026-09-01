@@ -39,7 +39,8 @@ printf '%s\n' '{"ok":true,"result":{"message_id":123}}'
 FAKE_CURL
 chmod +x /tmp/fake-curl/curl
 
-mkdir -p /data/pending /data/approval-receipts /data/approval-receipts/.locks
+mkdir -p /data/capability /data/pending /data/approval-receipts /data/approval-receipts/.locks
+rm -f /data/capability/telegram-approval-rate.json /data/capability/.telegram-approval-rate.lock
 jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
     '{uuid:"abcdef12",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > /data/pending/abcdef12.json

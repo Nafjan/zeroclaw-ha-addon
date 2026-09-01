@@ -122,3 +122,8 @@ teardown() {
     run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256" "$provider_report_sha"
     [ "$status" -ne 0 ]
 }
+
+@test "promotion staleness gate includes deleted files" {
+    run grep -F -- '--diff-filter=ACDMRTUXB' "$BATS_TEST_DIRNAME/../../.github/workflows/promote-existing.yml"
+    [ "$status" -eq 0 ]
+}

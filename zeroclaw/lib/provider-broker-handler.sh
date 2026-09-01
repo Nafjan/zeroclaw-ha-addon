@@ -53,6 +53,7 @@ CLIENT_RATE_LOCK_HELD=0
 LOG_FILE="${PROVIDER_LOG_FILE:-/data/logs/provider-broker.log}"
 RESERVATION_TTL="${PROVIDER_RESERVATION_TTL_SECONDS:-180}"
 TOTAL_TIMEOUT="${PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
+PROFILE_QUARANTINE_SECONDS="${PROVIDER_PROFILE_QUARANTINE_SECONDS:-86400}"
 
 respond() {
     status="$1"
@@ -203,6 +204,10 @@ case "$MAX_TOKENS:$MAX_INPUT_TOKENS:$MAX_INPUT_CHARS:$MAX_REQUESTS_PER_HOUR:$CLI
         respond 503 "Service Unavailable" '{"error":"provider broker limits are invalid"}'
         ;;
 esac
+printf '%s' "$PROFILE_QUARANTINE_SECONDS" | grep -Eq '^[0-9]+$' ||
+    respond 503 "Service Unavailable" '{"error":"provider profile quarantine duration is invalid"}'
+[ "$PROFILE_QUARANTINE_SECONDS" -ge 300 ] && [ "$PROFILE_QUARANTINE_SECONDS" -le 604800 ] ||
+    respond 503 "Service Unavailable" '{"error":"provider profile quarantine duration is outside the safe range"}'
 if [ -n "$DAILY_COST_LIMIT_MICROS" ] || [ -n "$MONTHLY_COST_LIMIT_MICROS" ]; then
     [ -n "$DAILY_COST_LIMIT_MICROS" ] && [ -n "$MONTHLY_COST_LIMIT_MICROS" ] || \
         respond 503 "Service Unavailable" '{"error":"provider cost budgets are incomplete"}'
@@ -485,6 +490,61 @@ load_profile() {
     return 0
 }
 
+leak_variant_matches() {
+    leak_variant="$1"
+    [ -n "$leak_variant" ] || return 1
+    grep -F -- "$leak_variant" "$leak_decoded_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_variant" "$leak_compact_file" >/dev/null 2>&1
+}
+
+credential_encoded_leak() {
+    leak_credential="$1"
+    [ -n "$leak_credential" ] || return 1
+    if grep -F -- "$leak_credential" "$response_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_credential" "$leak_decoded_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_credential" "$leak_compact_file" >/dev/null 2>&1; then
+        return 0
+    fi
+    # A provider response must not be able to reflect the active credential in
+    # a common transport encoding.  Scan padded and unpadded standard/url-safe
+    # base64 plus hexadecimal and URL-percent encodings.  The compact stream
+    # also catches an encoding fragmented across several JSON strings.
+    leak_base64=$(printf '%s' "$leak_credential" | base64 | tr -d '\r\n') || return 1
+    leak_base64_unpadded=$(printf '%s' "$leak_base64" | tr -d '=')
+    leak_base64_urlsafe=$(printf '%s' "$leak_base64" | tr '+/' '-_')
+    leak_base64_urlsafe_unpadded=$(printf '%s' "$leak_base64_urlsafe" | tr -d '=')
+    leak_hex=$(printf '%s' "$leak_credential" | od -An -tx1 -v | tr -d ' \r\n') || return 1
+    leak_hex_upper=$(printf '%s' "$leak_hex" | tr 'a-f' 'A-F')
+    leak_percent=$(printf '%s' "$leak_credential" | od -An -tx1 -v |
+        awk '{for (i=1; i<=NF; i++) printf "%%%s", toupper($i)}') || return 1
+    leak_percent_lower=$(printf '%s' "$leak_percent" | tr 'A-F' 'a-f')
+    leak_percent_mixed=$(printf '%s' "$leak_credential" | od -An -tx1 -v |
+        awk 'function hex_value(h, p) {
+                 p = index("0123456789ABCDEF", toupper(h))
+                 return p - 1
+             }
+             {
+                 for (i=1; i<=NF; i++) {
+                     h=toupper($i)
+                     value=hex_value(substr(h,1,1))*16 + hex_value(substr(h,2,1))
+                     if ((value >= 48 && value <= 57) ||
+                         (value >= 65 && value <= 90) ||
+                         (value >= 97 && value <= 122) ||
+                         value == 45 || value == 46 || value == 95 || value == 126) {
+                         printf "%c", value
+                     } else {
+                         printf "%%%s", h
+                     }
+                 }
+             }') || return 1
+    leak_percent_mixed_lower=$(printf '%s' "$leak_percent_mixed" | tr 'A-F' 'a-f')
+    leak_variant_matches "$leak_base64" || leak_variant_matches "$leak_base64_unpadded" ||
+        leak_variant_matches "$leak_base64_urlsafe" || leak_variant_matches "$leak_base64_urlsafe_unpadded" ||
+        leak_variant_matches "$leak_hex" || leak_variant_matches "$leak_hex_upper" ||
+        leak_variant_matches "$leak_percent" || leak_variant_matches "$leak_percent_lower" ||
+        leak_variant_matches "$leak_percent_mixed" || leak_variant_matches "$leak_percent_mixed_lower"
+}
+
 all_credentials_leak() {
     leak_decoded_file=$(mktemp)
     leak_compact_file=$(mktemp)
@@ -501,6 +561,12 @@ all_credentials_leak() {
         leak_cleanup
         return 1
     }
+    # Scan the exact key used for this attempt first.  Provider key rotation
+    # must not create a gap between load_profile and the response check.
+    if credential_encoded_leak "${PROFILE_KEY:-}"; then
+        leak_cleanup
+        return 0
+    fi
     credential=""
     while IFS='|' read -r leak_profile_id leak_profile_url leak_key_file leak_requests leak_budget; do
         [ -n "$leak_profile_id" ] || continue
@@ -512,28 +578,10 @@ all_credentials_leak() {
             credential=""
         fi
         [ -n "$credential" ] || continue
-        if grep -F -- "$credential" "$response_file" >/dev/null 2>&1; then
-            leak_cleanup
-            return 0
+        if [ "$credential" = "${PROFILE_KEY:-}" ]; then
+            continue
         fi
-        if grep -F -- "$credential" "$leak_decoded_file" >/dev/null 2>&1 ||
-            grep -F -- "$credential" "$leak_compact_file" >/dev/null 2>&1; then
-            leak_cleanup
-            return 0
-        fi
-        # A provider can encode a secret as base64, including URL-safe base64,
-        # without putting the literal credential in the response. Scan both the
-        # decoded JSON strings and their compact concatenation so a fragmented
-        # encoding cannot cross the planner boundary either.
-        leak_base64=$(printf '%s' "$credential" | base64 | tr -d '\r\n') || {
-            leak_cleanup
-            return 1
-        }
-        leak_base64_urlsafe=$(printf '%s' "$leak_base64" | tr '+/' '-_' | tr -d '=')
-        if grep -F -- "$leak_base64" "$leak_decoded_file" >/dev/null 2>&1 ||
-            grep -F -- "$leak_base64" "$leak_compact_file" >/dev/null 2>&1 ||
-            grep -F -- "$leak_base64_urlsafe" "$leak_decoded_file" >/dev/null 2>&1 ||
-            grep -F -- "$leak_base64_urlsafe" "$leak_compact_file" >/dev/null 2>&1; then
+        if credential_encoded_leak "$credential"; then
             leak_cleanup
             return 0
         fi
@@ -692,6 +740,12 @@ load_and_reconcile_ledger() {
     fi
     printf '%s' "$ledger" | jq -e '
         type == "object" and .schema == 1 and (.records | type == "array") and
+        ((.profile_quarantine // []) | type == "array") and
+        all((.profile_quarantine // [])[];
+            (.profile_id | type == "string" and length >= 1 and length <= 128) and
+            (.until | type == "number" and floor == . and . >= 0) and
+            (.reason | type == "string" and length >= 1 and length <= 128)
+        ) and
         all(.records[];
             (.id | type == "string") and
             (.profile_id | type == "string") and
@@ -707,6 +761,7 @@ load_and_reconcile_ledger() {
     now=$(date -u +%s)
     day_window=$((now / 86400))
     reconciled=$(printf '%s' "$ledger" | jq --argjson now "$now" --argjson keep_day "$((day_window - 7))" '
+        .profile_quarantine = ((.profile_quarantine // []) | map(select(.until > $now))) |
         .records |= map(
             if .state == "reserved" and (.expires_at | tonumber) <= $now then
                 .state = "expired" |
@@ -743,6 +798,23 @@ reserve_attempt() {
         release_ledger_lock
         return 1
     fi
+    profile_quarantined=$(printf '%s' "$ledger" | jq -r --arg profile "$reserve_profile" --argjson now "$reserve_now" \
+        'any((.profile_quarantine // [])[]; .profile_id == $profile and .until > $now)') || {
+        release_ledger_lock
+        return 1
+    }
+    case "$profile_quarantined" in
+        true)
+            release_ledger_lock
+            log_event "provider profile=${reserve_profile} admission quarantined"
+            return 2
+            ;;
+        false) ;;
+        *)
+            release_ledger_lock
+            return 1
+            ;;
+    esac
     hour_count=$(printf '%s' "$ledger" | jq -r --arg profile "$reserve_profile" --argjson hour "$reserve_hour" \
         '[.records[] | select(.profile_id == $profile and .hour_window == $hour)] | length') || {
         release_ledger_lock
@@ -892,6 +964,15 @@ settle_attempt() {
             return 1
             ;;
     esac
+    settle_profile=$(printf '%s' "$ledger" | jq -r --arg id "$settle_id" \
+        '[.records[] | select(.id == $id and .state == "reserved") | .profile_id] | .[0] // empty') || {
+        release_ledger_lock
+        return 1
+    }
+    [ -n "$settle_profile" ] || {
+        release_ledger_lock
+        return 1
+    }
     reserve_cost_value=$(printf '%s' "$ledger" | jq -r --arg id "$settle_id" \
         '[.records[] | select(.id == $id and .state == "reserved") | (.reserved_cost_micros // 0)] | .[0] // 0') || {
         release_ledger_lock
@@ -971,6 +1052,9 @@ settle_attempt() {
         --argjson reported_input "$settle_reported_input" \
         --argjson reported_cost "$settle_reported_cost" \
         --argjson usage_floor "$settle_usage_floor" \
+        --arg profile "$settle_profile" \
+        --argjson quarantine_until "$((settle_now + PROFILE_QUARANTINE_SECONDS))" \
+        --argjson quarantine_anomaly "$settle_hard_failure" \
         '.records |= map(if .id == $id and .state == "reserved" then
             .state = "settled" | .settled_tokens = $actual | .settled_input_tokens = $actual_prompt |
             .settled_cost_micros = $actual_cost | .settlement = $reason |
@@ -980,7 +1064,11 @@ settle_attempt() {
                     reported_cost_micros:$reported_cost}
               else null end) |
             .http_status = ($status | tonumber? // null) | .updated_at = $now
-         else . end)') || {
+         else . end) |
+         .profile_quarantine = if $quarantine_anomaly == 1 then
+             ((.profile_quarantine // []) | map(select(.profile_id != $profile)) +
+              [{profile_id:$profile,until:$quarantine_until,reason:$reason}])
+           else (.profile_quarantine // []) end') || {
         release_ledger_lock
         return 1
     }

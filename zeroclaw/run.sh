@@ -554,12 +554,47 @@ for entry in /data/* /data/.[!.]* /data/..?*; do
         exit 1
     fi
 done
-if [ -L "${WS}/sessions" ] ||
-    [ -e "${WS}/sessions" ] && [ ! -d "${WS}/sessions" ]; then
-    bashio::log.fatal "Telegram session directory is not a regular directory"
-    exit 1
-fi
-mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets /data/approval-receipts/outcomes
+# Create persistent directory components one at a time.  mkdir -p would
+# follow a planner-controlled intermediate symlink (for example
+# workspace/skills) before the recursive inventory below could reject it.
+ensure_dir_chain() {
+    chain_path="$1"
+    shift
+    [ -d "$chain_path" ] && [ ! -L "$chain_path" ] || {
+        bashio::log.fatal "persistent directory root is not a regular directory: ${chain_path}"
+        exit 1
+    }
+    for chain_component in "$@"; do
+        chain_path="${chain_path}/${chain_component}"
+        if [ -L "$chain_path" ] ||
+            [ -e "$chain_path" ] && [ ! -d "$chain_path" ]; then
+            bashio::log.fatal "persistent directory component is unsafe: ${chain_path}"
+            exit 1
+        fi
+        if [ ! -e "$chain_path" ]; then
+            mkdir "$chain_path" || {
+                bashio::log.fatal "could not create persistent directory component: ${chain_path}"
+                exit 1
+            }
+        fi
+    done
+}
+ensure_dir_chain /data workspace
+ensure_dir_chain "${WS}" skills
+ensure_dir_chain "${WS}/skills" ha
+ensure_dir_chain "${WS}" sessions
+ensure_dir_chain /data logs
+ensure_dir_chain /data pending
+ensure_dir_chain /data approved
+ensure_dir_chain /data audit
+ensure_dir_chain /data undo
+ensure_dir_chain /data tools
+ensure_dir_chain /data routines
+ensure_dir_chain /data provider
+ensure_dir_chain /data capability
+ensure_dir_chain /data approval-receipts
+ensure_dir_chain /data/approval-receipts tickets
+ensure_dir_chain /data/approval-receipts outcomes
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
 # listener opens a log path, then keep the directory unreadable to the planner.
 find /data/logs -type l -exec rm -f {} \; 2>/dev/null || true
