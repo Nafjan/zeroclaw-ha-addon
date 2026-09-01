@@ -244,7 +244,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'OPTIONS_READABLE\n' > /tmp/zeroclaw-broker-test
     elif [ -r /run/zeroclaw/telegram-token ]; then
         printf 'TELEGRAM_TOKEN_READABLE\n' > /tmp/zeroclaw-broker-test
-    elif printf 'forged\n' > /data/.state-version 2>/dev/null; then
+    elif (printf 'forged\n' > /data/.state-version) 2>/dev/null; then
         printf 'VERSION_MARKER_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
     elif touch /data/audit/.planner-write-test 2>/dev/null; then
         rm -f /data/audit/.planner-write-test
