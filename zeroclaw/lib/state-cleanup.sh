@@ -149,7 +149,7 @@ fi
 # retry idempotent across a watcher restart.  It is not an approval record and
 # must not grow without bound; cleanup never follows a cache symlink.
 if [ -d "$REPLY_CACHE_DIR" ] && [ ! -L "$REPLY_CACHE_DIR" ]; then
-    for reply in "$REPLY_CACHE_DIR"/*.txt; do
+    for reply in "$REPLY_CACHE_DIR"/*.json "$REPLY_CACHE_DIR"/*.txt; do
         [ -f "$reply" ] || [ -L "$reply" ] || continue
         [ -L "$reply" ] && continue
         old_enough "$reply" "$REPLY_CACHE_GRACE_SECONDS" || continue
