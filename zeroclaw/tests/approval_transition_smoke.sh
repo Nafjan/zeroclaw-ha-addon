@@ -21,6 +21,7 @@ if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve
     exit 1
 fi
 jq -e '.actor_user_id == "42" and .chat_id == "42"' /data/approved/deadbeef.marker >/dev/null
+grep -R -F '"kind":"approve"' /data/audit >/dev/null
 echo 'tampered' > /data/approval-receipts/tickets/deadbeef.json
 if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh verify deadbeef >/dev/null 2>&1; then
     echo "ticket tampering was not detected" >&2

@@ -6,10 +6,15 @@
 
 set -eu
 
+# The image test provides a synthetic Supervisor credential so the entrypoint
+# exercises its real fail-closed preflight against the fake Supervisor below.
+: "${SUPERVISOR_TOKEN:=supervisor-secret}"
+export SUPERVISOR_TOKEN
+
 cat > /data/options.json <<'JSON'
 {
   "openrouter_api_key": "provider-secret",
-  "provider_key_mode": "direct_temporary",
+  "provider_key_mode": "broker",
   "ha_token": "legacy-secret",
   "telegram_bot_token": "telegram-secret",
   "telegram_allowed_users": "1",
@@ -36,6 +41,7 @@ cat > /data/options.json <<'JSON'
   "max_history_messages": 30,
   "max_context_tokens": 16000,
   "provider_max_tokens": 2048,
+  "provider_max_input_tokens": 32768,
   "response_cache_ttl_minutes": 2,
   "conversation_retention_days": 30,
   "home_location": "Test Home",
@@ -74,6 +80,10 @@ if [ "${SMOKE_EXTRA_DENY:-false}" = "true" ]; then
 fi
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     sed -i 's/"provider_key_mode": "direct_temporary"/"provider_key_mode": "broker"/' /data/options.json
+fi
+if [ "${SMOKE_NO_TELEGRAM:-false}" = "true" ]; then
+    sed -i 's/"telegram_bot_token": "telegram-secret"/"telegram_bot_token": ""/' /data/options.json
+    sed -i 's/"telegram_allowed_users": "1"/"telegram_allowed_users": ""/' /data/options.json
 fi
 
 mkdir -p /tmp/zeroclaw-test-bin /config
@@ -134,12 +144,15 @@ trap cleanup EXIT
 
 # Minimal local HA endpoint so the smoke test exercises the broker transport
 # without contacting the real Supervisor.
+SMOKE_SUPERVISOR_VERSION="${SMOKE_SUPERVISOR_VERSION:-2026.8.2}"
+export SMOKE_SUPERVISOR_VERSION
 printf '%s\n' '127.0.0.1 supervisor' >> /etc/hosts
 cat > /tmp/fake-ha-handler <<'FAKE_HA'
 #!/bin/sh
 IFS= read -r request_line || exit 0
 printf '%s\n' "$request_line" >> /tmp/zeroclaw-ha-debug
 case "$request_line" in
+    *" /supervisor/info "*) body=$(printf '{"result":"ok","data":{"version":"%s"}}' "$SMOKE_SUPERVISOR_VERSION") ;;
     *" /core/api/states/"*)
         body='{"entity_id":"light.kitchen","state":"on","attributes":{"friendly_name":"Kitchen","current_temperature":24}'
         body="${body}}"
@@ -199,7 +212,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'CREDENTIAL_ARG_VISIBLE\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && env | grep -F 'ZEROCLAW_API_KEY=provider-secret' >/dev/null 2>&1; then
         printf 'PROVIDER_KEY_ENV_VISIBLE\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && ! env | grep -F 'ZEROCLAW_API_KEY=local-provider-broker' >/dev/null 2>&1; then
+    elif [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] && ! env | grep -Eq '^ZEROCLAW_API_KEY=[a-f0-9]{64}$' >/dev/null 2>&1; then
         printf 'PROVIDER_BROKER_CREDENTIAL_MISSING\n' > /tmp/zeroclaw-broker-test
     elif [ -r /data/options.json ]; then
         printf 'OPTIONS_READABLE\n' > /tmp/zeroclaw-broker-test
@@ -219,9 +232,9 @@ if [ "${1:-}" = daemon ]; then
     elif touch /data/capability/.planner-write-test 2>/dev/null; then
         rm -f /data/capability/.planner-write-test
         printf 'CAPABILITY_QUOTA_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
-    elif touch /run/zeroclaw/telegram-offset.planner-write-test 2>/dev/null; then
-        rm -f /run/zeroclaw/telegram-offset.planner-write-test
-        printf 'TELEGRAM_RUNTIME_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
+    elif touch /data/capability/telegram-offset.planner-write-test 2>/dev/null; then
+        rm -f /data/capability/telegram-offset.planner-write-test
+        printf 'TELEGRAM_CURSOR_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
     elif rm -rf /data/approval-receipts 2>/dev/null; then
         printf 'ROOT_APPROVAL_STORE_REPLACED\n' > /tmp/zeroclaw-broker-test
     elif ! /usr/local/bin/ha-capability get_state light.kitchen | jq -e '.entity_id == "light.kitchen"' >/dev/null 2>&1; then
@@ -236,7 +249,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'BROKER_WRITE_CONTEXT_BYPASS\n' > /tmp/zeroclaw-broker-test
     elif ZEROCLAW_INTERNAL_ACTION=1 /usr/local/bin/ha-action-raw light/turn_on '{"entity_id":"light.kitchen"}' >/dev/null 2>&1; then
         printf 'BROKER_TICKET_GATE_BYPASS\n' > /tmp/zeroclaw-broker-test
-    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! POLICY_REQUIRE_APPROVAL=true /usr/local/bin/policy-decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}' | grep -E '^confirm:approval_required:' >/dev/null 2>&1; then
+    elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && ! POLICY_REQUIRE_APPROVAL=true POLICY_QUIET_CONFIRM=false POLICY_NOW_HOUR=12 /usr/local/bin/policy-decide light turn_on light.kitchen '{"entity_id":"light.kitchen"}' | grep -E '^confirm:approval_required:' >/dev/null 2>&1; then
         printf 'BROKER_APPROVAL_POLICY_MISSING\n' > /tmp/zeroclaw-broker-test
     elif [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ] && /usr/local/bin/zc-audit-write broker_allow light/turn_on '{"entity_id":"light.kitchen"}' forged >/dev/null 2>&1; then
         printf 'AUDIT_OUTCOME_CLIENT_BYPASS\n' > /tmp/zeroclaw-broker-test
@@ -246,7 +259,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'BROKER_OK\n' > /tmp/zeroclaw-broker-test
     fi
     printf '%s\n' "$(id -u)" > /tmp/zeroclaw-planner-uid
-    sleep 120
+    [ "${SMOKE_NO_SLEEP:-false}" = "true" ] || sleep 120
 fi
 exit 0
 FAKE
@@ -254,6 +267,7 @@ chmod +x /tmp/zeroclaw-test-bin/zeroclaw
 
 cat > /tmp/bashio-test.sh <<'FAKE_BASHIO'
 #!/bin/bash
+set -u
 bashio::config() {
     jq -r --arg key "$1" 'if .[$key] == null then "" elif (.[$key] | type) == "array" then (.[$key] | join("\n")) else (.[$key] | tostring) end' /data/options.json
 }
@@ -273,6 +287,20 @@ PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/ba
 run_status=$?
 set -e
 
+if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
+    [ "$run_status" -ne 0 ] && [ "$run_status" -ne 124 ] || {
+        echo "startup unexpectedly succeeded while testing a fail-closed preflight" >&2
+        cat /tmp/zeroclaw-startup.log >&2
+        exit 1
+    }
+    grep -F "${SMOKE_EXPECTED_FAILURE:-Supervisor version preflight}" /tmp/zeroclaw-startup.log >/dev/null || {
+        echo "startup failed for an unexpected reason" >&2
+        cat /tmp/zeroclaw-startup.log >&2
+        exit 1
+    }
+    exit 0
+fi
+
 [ "$run_status" -eq 124 ]
 [ "$(cat /tmp/zeroclaw-helper-token-scan)" = CLEAN ]
 if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
@@ -291,11 +319,14 @@ test "$(stat -c '%u:%a' /data/audit)" = "0:750"
 test "$(stat -c '%u:%a' /data/logs)" = "0:750"
 test "$(stat -c '%u:%a' /data/provider)" = "0:700"
 test "$(stat -c '%u:%a' /data/capability)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw/telegram-offset)" = "0:600"
+test "$(stat -c '%u:%a' /data/capability/telegram-replies)" = "0:700"
+test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:710"
+test "$(stat -c '%u:%a' /data/capability/telegram-offset)" = "0:600"
 test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
 test -x /usr/local/bin/ha-broker-entrypoint
 test -x /usr/local/bin/tg-broker-entrypoint
+test -x /usr/local/bin/telegram-render
+test -x /usr/local/bin/telegram-legacy-action
 if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
     ansi_escape=$(printf '\033')
     sed -E "s/${ansi_escape}\\[[0-9;]*m//g" /tmp/zeroclaw-startup.log > /tmp/startup-plain.log
@@ -322,7 +353,11 @@ if [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
     grep -F 'Authorization: Bearer provider-secret' /data/provider/roundtrip-upstream-request >/dev/null
     ! grep -F 'provider-secret' /tmp/zeroclaw-real-provider-response >/dev/null 2>&1
 fi
+test -f /data/.state-schema
+test "$(cat /data/.state-schema)" = 1
 test -f /data/.state-version
+test "$(cat /data/.state-version)" = schema-tombstone-1
+test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
 [ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
 /src/tests/approval_transition_smoke.sh
 /src/tests/approval_concurrency_smoke.sh
@@ -330,4 +365,7 @@ test -f /data/.state-version
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     /src/tests/provider_broker_smoke.sh
     /src/tests/provider_profile_fallback_smoke.sh
+    test -s /data/provider/provider-contract-report.json
+    jq -e '.schema_version == 1 and .status == "passed" and (.routes | length) >= 6 and (.classification | type) == "object" and (.safety | type) == "object" and (.accounting | type) == "object"' /data/provider/provider-contract-report.json >/dev/null
+    ! grep -E -i 'provider-secret|telegram-secret|supervisor-secret|legacy-secret' /data/provider/provider-contract-report.json >/dev/null 2>&1
 fi

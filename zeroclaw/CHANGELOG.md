@@ -2,6 +2,10 @@
 
 ## 3.1.4.0 (August 2026) — Root provider profile broker
 
+- Authenticate all three loopback brokers with fresh per-start client
+  credentials; the provider broker validates the planner bearer and the HA/
+  Telegram clients use typed authenticated requests before any privileged
+  operation is considered.
 - Replace the single-provider allowlist with root-owned profile/model bindings
   for OpenRouter plus opt-in NVIDIA and BytePlus ModelArk fallback profiles.
 - Classify timeout, 429, 5xx, 401, 402/credit, and model-unavailable failures;
@@ -32,6 +36,18 @@
 - Require a root-sealed, actor-bound Telegram approval for every write in the
   production runtime, and enforce the ticket requirement again at the broker
   boundary so a planner cannot turn `internal:true` into a write over raw TCP.
+- Add an explicit structured tool-call protocol to the gateway's generated
+  planner prompt, and block malformed internal tool syntax at the Telegram
+  boundary instead of relaying it as a user-visible reply.
+- Align that protocol with the pinned ZeroClaw runtime's actual `shell` tool;
+  the previous prompt used the human-facing `ha.action_guarded` alias as if it
+  were a callable tool, causing valid-looking actions to be returned as text
+  and then safely suppressed by Telegram.
+- Validate report/quiet-hours clocks at startup and load policy plus world-state
+  configuration from a root-owned runtime file instead of interpolating
+  operator-controlled strings into generated shell helpers.
+- Remove the last dynamic shell credential lookup from startup; required
+  credentials are now checked through fixed parameter expansions only.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 

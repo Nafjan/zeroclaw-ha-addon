@@ -11,9 +11,16 @@ TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 ACTION_LIMIT="${CAPABILITY_MAX_ACTIONS_PER_HOUR:-200}"
 ACTION_QUOTA_FILE="${CAPABILITY_QUOTA_FILE:-/data/capability/quota.json}"
 ACTION_QUOTA_LOCK="${CAPABILITY_QUOTA_LOCK:-/data/capability/.quota.lock}"
+ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
+OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
+APPROVAL_OUTCOME_DIR="${ZEROCLAW_APPROVAL_OUTCOME_DIR:-/data/approval-receipts/outcomes}"
+CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
 
 json_error() {
-    jq -nc --arg error "$1" '{ok:false,error:$error}'
+    error="$1"
+    error_code="${2:-capability_error}"
+    jq -nc --arg error "$error" --arg error_code "$error_code" \
+        '{ok:false,error:$error,error_code:$error_code}'
     exit 0
 }
 
@@ -29,6 +36,13 @@ request=""
 IFS= read -r request || true
 [ -n "$request" ] || json_error "empty broker request"
 [ "${#request}" -le 32768 ] || json_error "broker request too large"
+[ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
+provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
+    json_error "broker request is not valid JSON" "invalid_request"
 [ -n "${HA_TOKEN:-}" ] || json_error "broker is not configured"
 
 # curl supports @file header sources. Keep the credential in a root-owned
@@ -100,7 +114,9 @@ run_logbook() {
         fi
     else
         if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
-            --header "@${HA_AUTH_FILE}" "${HA_URL}/logbook/${now}"); then
+            --header "@${HA_AUTH_FILE}" -G \
+            --data-urlencode "end_time=${now}" \
+            "${HA_URL}/logbook/${ago}"); then
             json_error "Home Assistant logbook request failed"
         fi
     fi
@@ -114,6 +130,30 @@ run_pending_count() {
     json_value "$count"
 }
 
+run_set_outcome() {
+    text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || \
+        json_error "outcome text must be a string"
+    [ "${#text}" -le 512 ] || json_error "outcome text is too long"
+    [ "$(printf '%s' "$text" | tr -d '\r\n')" = "$text" ] || \
+        json_error "outcome text must be one line"
+    [ ! -L "$OUTCOME_FILE" ] || json_error "outcome store is not a regular file"
+    outcome_dir=$(dirname "$OUTCOME_FILE")
+    mkdir -p "$outcome_dir"
+    outcome_tmp="${OUTCOME_FILE}.tmp.$$"
+    created_at="$(date -u +%s)"
+    jq -nc --arg text "$text" --argjson created_at "$created_at" \
+        --argjson expires_at "$((created_at + 300))" \
+        '{text:$text,created_at:$created_at,expires_at:$expires_at}' > "$outcome_tmp" || {
+        rm -f "$outcome_tmp"
+        json_error "outcome store could not be prepared"
+    }
+    chown root:root "$outcome_tmp"
+    chmod 0600 "$outcome_tmp"
+    mv -f "$outcome_tmp" "$OUTCOME_FILE"
+    sync
+    json_value '{"recorded":true}'
+}
+
 audit_capability_outcome() {
     kind="$1"
     service="$2"
@@ -121,6 +161,51 @@ audit_capability_outcome() {
     reason="$4"
     [ -x /usr/local/bin/zc-audit-write ] || return 1
     /usr/local/bin/zc-audit-write "$kind" "$service" "$payload" "$reason"
+}
+
+write_approval_outcome() {
+    outcome_ticket="$1"
+    outcome_service="$2"
+    outcome_payload="$3"
+    outcome_result="$4"
+    printf '%s' "$outcome_ticket" | grep -Eq '^[a-f0-9]{8}$' || return 1
+    [ ! -L "$APPROVAL_OUTCOME_DIR" ] || return 1
+    if [ -e "$APPROVAL_OUTCOME_DIR" ] && [ ! -d "$APPROVAL_OUTCOME_DIR" ]; then
+        return 1
+    fi
+    mkdir -p "$APPROVAL_OUTCOME_DIR" || return 1
+    chmod 0700 "$APPROVAL_OUTCOME_DIR" 2>/dev/null || true
+    outcome_file="${APPROVAL_OUTCOME_DIR}/${outcome_ticket}.json"
+    [ ! -L "$outcome_file" ] || return 1
+    if [ -e "$outcome_file" ]; then
+        jq -e --arg service "$outcome_service" --argjson payload "$outcome_payload" \
+            '.state == "applied" and .service == $service and .payload == $payload' \
+            "$outcome_file" >/dev/null 2>&1
+        return $?
+    fi
+    outcome_ticket_file="${TICKET_DIR}/${outcome_ticket}.json"
+    [ -f "$outcome_ticket_file" ] && [ ! -L "$outcome_ticket_file" ] || return 1
+    outcome_actor=$(jq -er '.approval.actor_user_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_chat=$(jq -er '.approval.chat_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_summary=$(printf '%s' "$outcome_payload" | jq -rS -c --arg service "$outcome_service" \
+        '($service + " | " + (tojson))') || return 1
+    outcome_now=$(date -u +%s)
+    outcome_tmp=$(mktemp "${APPROVAL_OUTCOME_DIR}/.${outcome_ticket}.XXXXXX") || return 1
+    if ! jq -nc --arg ticket "$outcome_ticket" --arg service "$outcome_service" \
+        --arg actor "$outcome_actor" --arg chat "$outcome_chat" \
+        --arg summary "$outcome_summary" --argjson payload "$outcome_payload" \
+        --argjson result "$outcome_result" --argjson now "$outcome_now" \
+        '{version:1,state:"applied",ticket:$ticket,service:$service,payload:$payload,
+          summary:$summary,result:$result,actor_user_id:$actor,chat_id:$chat,
+          applied_at:$now}' > "$outcome_tmp"; then
+        rm -f "$outcome_tmp"
+        return 1
+    fi
+    chown root:root "$outcome_tmp"
+    chmod 0600 "$outcome_tmp"
+    sync
+    mv -f "$outcome_tmp" "$outcome_file"
+    sync
 }
 
 validate_service_payload() {
@@ -170,7 +255,8 @@ verify_approval_context() {
     payload="$3"
     printf '%s' "$ticket" | grep -Eq '^[a-f0-9]{8}$' || json_error "approval ticket id is invalid"
     ticket_file="${TICKET_DIR}/${ticket}.json"
-    [ -f "$ticket_file" ] || json_error "approval ticket is not valid, sealed, or actor-bound"
+    [ -f "$ticket_file" ] && [ ! -L "$ticket_file" ] || \
+        json_error "approval ticket is not valid, sealed, or actor-bound"
     ticket_service=$(jq -er '.service | select(type == "string")' "$ticket_file" 2>/dev/null) || \
         json_error "approval ticket is not valid, sealed, or actor-bound"
     ticket_payload=$(jq -ce '.payload | select(type == "object")' "$ticket_file" 2>/dev/null) || \
@@ -193,12 +279,20 @@ verify_approval_context() {
         esac
     fi
 
-    # Claim is the broker-side consume operation.  The planner cannot reserve
-    # a ticket in a separate process and then smuggle a claimed flag across the
-    # TCP boundary; the root broker verifies the sealed canonical payload and
-    # atomically claims it before any HA write.
-    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$ticket" >/dev/null 2>&1 || \
-        json_error "approval ticket is not valid, sealed, actor-bound, or already claimed"
+}
+
+claim_approval_context() {
+    ticket="$1"
+    # Approval claim and action admission share one fixed lock order inside the
+    # root transition helper (approval lock, then quota lock). An unapproved or
+    # replayed ticket therefore cannot burn the action budget.
+    ZEROCLAW_APPROVAL_INTERNAL=1 \
+        ZEROCLAW_ACTION_QUOTA_FILE="$ACTION_QUOTA_FILE" \
+        ZEROCLAW_ACTION_QUOTA_LOCK="$ACTION_QUOTA_LOCK" \
+        ZEROCLAW_ACTION_ADMISSION_DIR="$ACTION_ADMISSION_DIR" \
+        CAPABILITY_MAX_ACTIONS_PER_HOUR="$ACTION_LIMIT" \
+        /opt/zeroclaw/lib/approval-transition.sh claim_admit "$ticket" >/dev/null 2>&1 || \
+        json_error "approval ticket is not valid, sealed, actor-bound, admitted, or already claimed"
 }
 
 acquire_action_quota_lock() {
@@ -286,8 +380,8 @@ authorize_service() {
             if [ -n "$approval_ticket" ]; then
                 printf '%s' "$approval_ticket" | grep -Eq '^[a-f0-9]{8}$' || \
                     json_error "approval ticket id is invalid"
-                reserve_action_quota
                 verify_approval_context "$approval_ticket" "$service" "$payload"
+                claim_approval_context "$approval_ticket"
             fi
             audit_capability_outcome intent "$service" "$payload" "source=capability_broker;${verdict}" || \
                 json_error "audit store unavailable; action not attempted"
@@ -301,8 +395,8 @@ authorize_service() {
             fi
             printf '%s' "$approval_ticket" | grep -Eq '^[a-f0-9]{8}$' || \
                 json_error "approval ticket id is invalid"
-            reserve_action_quota
             verify_approval_context "$approval_ticket" "$service" "$payload"
+            claim_approval_context "$approval_ticket"
             audit_capability_outcome intent "$service" "$payload" "source=capability_broker;ticket=${approval_ticket};${verdict}" || \
                 json_error "audit store unavailable; action not attempted"
             ;;
@@ -329,25 +423,43 @@ run_service() {
         --header "@${HA_AUTH_FILE}" \
         -H 'Content-Type: application/json' \
         "${HA_URL}/services/${service}" -d "$payload"); then
-        audit_capability_outcome broker_failed "$service" "$payload" "source=capability_broker" || true
-        json_error "Home Assistant service request failed"
+        audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;dispatch_outcome_unknown" || true
+        json_error "execution outcome could not be confirmed; claim retained for recovery" \
+            execution_outcome_unknown
     fi
     if [ -z "$result" ]; then
         result='[]'
     fi
     if ! printf '%s' "$result" | jq -e . >/dev/null 2>&1; then
-        json_error "Home Assistant returned invalid service JSON"
+        audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;invalid_service_response" || true
+        json_error "execution outcome could not be confirmed; claim retained for recovery" \
+            execution_outcome_unknown
     fi
     if ! audit_capability_outcome broker_allow "$service" "$payload" "source=capability_broker"; then
-        json_error "service executed but broker outcome audit could not be persisted"
+        # HA has already accepted the service call. Do not manufacture a
+        # failed outcome when the durable audit write is unavailable.
+        audit_capability_outcome outcome_unknown "$service" "$payload" \
+            "source=capability_broker;service_executed_audit_unavailable" || true
+        json_error "service executed but broker outcome audit could not be persisted; claim retained for recovery" \
+            executed_audit_unknown
     fi
     if [ -n "$approval_ticket" ]; then
         if ! audit_capability_outcome apply "$service" "$payload" "source=capability_broker;ticket=${approval_ticket}"; then
-            json_error "service executed but approval outcome audit could not be persisted; claim retained"
+            audit_capability_outcome outcome_unknown "$service" "$payload" \
+                "source=capability_broker;approval_outcome_audit_unavailable;ticket=${approval_ticket}" || true
+            json_error "service executed but approval outcome audit could not be persisted; claim retained for recovery" \
+                executed_approval_audit_unknown
+        fi
+        if ! write_approval_outcome "$approval_ticket" "$service" "$payload" "$result"; then
+            audit_capability_outcome outcome_unknown "$service" "$payload" \
+                "source=capability_broker;approval_outcome_receipt_unavailable;ticket=${approval_ticket}" || true
+            json_error "service executed but its durable approval outcome receipt could not be persisted; claim retained for recovery" \
+                executed_approval_outcome_unknown
         fi
         if ! ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh complete "$approval_ticket" >/dev/null 2>&1; then
             audit_capability_outcome broker_finalize_failed "$service" "$payload" "source=capability_broker;ticket=${approval_ticket}" || true
-            json_error "service executed but approval ticket could not be finalized; claim retained"
+            json_error "service executed but approval ticket could not be finalized; claim retained for recovery" \
+                executed_finalize_unknown
         fi
     fi
     json_value "$result"
@@ -407,6 +519,9 @@ case "$operation" in
         ;;
     pending_count)
         run_pending_count
+        ;;
+    set_outcome)
+        run_set_outcome
         ;;
     call_service)
         [ "${ENABLE_WRITE_ACTIONS:-false}" = "true" ] || json_error "write capability is disabled"

@@ -1,21 +1,41 @@
 # Pin the multi-arch manifest; update deliberately with a digest review.
 FROM ghcr.io/home-assistant/base:3.24@sha256:94ff231402a5e7ad2a82e261ad5fa4ffae7d7bb095c3febb2edbdf309c9b6aca
 
-ARG BUILD_VERSION=3.1.4.0
-ARG BUILD_ARCH=aarch64
+ARG BUILD_VERSION
+ARG BUILD_ARCH
 ARG ZEROCLAW_SHA256
 ARG ZEROCLAW_SOURCE_COMMIT
+ARG ADDON_SOURCE_COMMIT
 ARG ZEROCLAW_SOURCE_DATE_EPOCH
 ARG ZEROCLAW_LLVM_RNG_SEED
-ARG REQUIRE_VERIFIED_ARTIFACT=false
+ARG REQUIRE_VERIFIED_ARTIFACT
+ARG ZEROCLAW_STATE_SCHEMA
+
+# Every value that influences release identity or provenance is mandatory.  An
+# out-of-band build must fail before it can produce an installable image.
+RUN set -eu; \
+    printf '%s' "${BUILD_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; \
+    printf '%s' "${BUILD_ARCH}" | grep -Eq '^aarch64$'; \
+    printf '%s' "${ZEROCLAW_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; \
+    printf '%s' "${ZEROCLAW_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; \
+    printf '%s' "${ADDON_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; \
+    printf '%s' "${ZEROCLAW_SOURCE_DATE_EPOCH}" | grep -Eq '^[1-9][0-9]+$'; \
+    printf '%s' "${ZEROCLAW_LLVM_RNG_SEED}" | grep -Eq '^[0-9]+$'; \
+    printf '%s' "${ZEROCLAW_STATE_SCHEMA}" | grep -Eq '^[1-9][0-9]{0,2}$'; \
+    case "${REQUIRE_VERIFIED_ARTIFACT}" in true|false) : ;; *) exit 1 ;; esac
+
+ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"
+ENV ZEROCLAW_STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA}"
 
 LABEL \
     io.hass.version="${BUILD_VERSION}" \
     io.hass.type="app" \
     io.hass.arch="${BUILD_ARCH}" \
     org.opencontainers.image.title="ZeroClaw Home Assistant app" \
+    org.opencontainers.image.version="${BUILD_VERSION}" \
     org.opencontainers.image.source="https://github.com/Nafjan/zeroclaw-ha-addon" \
-    org.opencontainers.image.revision="${ZEROCLAW_SOURCE_COMMIT}" \
+    org.opencontainers.image.revision="${ADDON_SOURCE_COMMIT}" \
+    org.opencontainers.image.upstream.revision="${ZEROCLAW_SOURCE_COMMIT}" \
     org.opencontainers.image.build.source-date-epoch="${ZEROCLAW_SOURCE_DATE_EPOCH}" \
     org.opencontainers.image.build.llvm-rng-seed="${ZEROCLAW_LLVM_RNG_SEED}"
 
@@ -33,12 +53,14 @@ RUN apk add --no-cache \
 
 COPY zeroclaw-bin /usr/local/bin/zeroclaw
 COPY binary-manifest.json /usr/share/zeroclaw/binary-manifest.json
+COPY state-schema /usr/share/zeroclaw/state-schema
 RUN echo "${ZEROCLAW_SHA256}  /usr/local/bin/zeroclaw" | sha256sum -c - \
     && test "$(jq -r '.sha256' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SHA256}" \
     && test "$(jq -r '.source_commit' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SOURCE_COMMIT}" \
     && test "$(jq -r '.source_date_epoch' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SOURCE_DATE_EPOCH}" \
     && test "$(jq -r '.llvm_rng_seed' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_LLVM_RNG_SEED}" \
-    && if [ "${REQUIRE_VERIFIED_ARTIFACT}" = "true" ]; then test "$(jq -r '.artifact_status' /usr/share/zeroclaw/binary-manifest.json)" = "verified"; fi \
+    && test "$(tr -d '\\r\\n' < /usr/share/zeroclaw/state-schema)" = "${ZEROCLAW_STATE_SCHEMA}" \
+    && case "${REQUIRE_VERIFIED_ARTIFACT}" in true) test "$(jq -r '.artifact_status' /usr/share/zeroclaw/binary-manifest.json)" = "verified" ;; false) : ;; esac \
     && chmod +x /usr/local/bin/zeroclaw
 
 # Policy library — pure-shell verdict decider, covered by bats tests
@@ -51,6 +73,7 @@ RUN chmod +x /run.sh
 RUN mkdir -p /data/memory /data/logs /data/tools
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
+    CMD test ! -e /data/capability/telegram-conflict && \
+        curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
 
 CMD ["/run.sh"]

@@ -54,6 +54,10 @@ logs are sanitized for symlinks before listeners start and remain root-owned.
 The persistent `/data` mount is root-owned with a sticky group boundary: the
 planner can create only its own runtime entries and cannot unlink or replace
 root-owned audit, approval, migration, or configuration state.
+Each boot also rotates ephemeral, root-created client credentials for the
+loopback provider, HA, and Telegram brokers; `/run/zeroclaw` is not included in
+backups and the planner receives no Supervisor, Telegram-bot, or provider
+secret.
 The CI backup gate archives the persistent `/data` volume, restores it
 byte-for-byte, preserves secret-file mode, and excludes ephemeral `/run` state.
 The app deliberately does not map `addon_config`: its state and Supervisor
@@ -131,10 +135,16 @@ backup. With the app stopped, the installed helper moves the current state to
 a recoverable rollback snapshot before restoring the selected backup:
 
 ```sh
-state-restore /data /data/migrations/<old-version>-to-<new-version>-<timestamp>-<pid>
+state-restore /data /data/migrations/<legacy-or-schema>-to-schema-<new-schema>-<timestamp>-<pid>
 ```
 
 Never use a recursive delete of the data directory as rollback.
+
+The app performs a fail-closed Supervisor API preflight at startup. It queries
+`http://supervisor/supervisor/info` with the Supervisor-provided bearer token
+and refuses to start below Supervisor `2026.04.0` or when the response is
+unavailable/invalid. This is a runtime floor; Home Assistant app manifests do
+not provide a supported minimum-Supervisor field.
 
 The local two-pass source rebuild/hash gate (including the pinned source epoch
 and LLVM seed), shell checks, and
@@ -143,12 +153,42 @@ the signed CI arm64 image build, real-binary provider round-trip, startup,
 broker write, backup/restore, and real HA canary all pass. The signed release
 workflow calls the full acceptance workflow as a prerequisite, publishes only
 a signed candidate digest, and requires a protected `canary` environment plus
-a commit-pinned, SHA256-checked redacted JSON evidence file bound to the exact
+a commit-pinned, SHA256-checked redacted JSON evidence file plus a separately
+verified machine-generated provider contract report, both bound to the exact
 canary tag and digest before the protected `production` environment can create
 Supervisor version tags. The evidence must prove the backup/restore, rollback,
 read-only, approval, audit, and write-canary gates; see `CANARY-EVIDENCE.md`.
+The provider report must prove the configured model/profile bindings, 402,
+timeout, 5xx, and 401 classification, free-route containment, durable
+reservation/settlement, and budget enforcement. Any remaining human-supplied
+gate result must carry the verifier-enforced `canary-runbook-v2` operator
+attestation.
 Configure both environments with required reviewers who verify the
-authenticated canary and backup evidence. The promotion job creates the Git
+authenticated canary and backup evidence, protect `master`, and make that
+branch protection a promotion precondition. The promotion job creates the Git
 tag only after the arm64 OCI image has BuildKit provenance/SBOM attestations
 and a keyless Cosign signature. Verify the exact digest and signature before
 allowing Supervisor to deploy it.
+
+The protected `master` rule must require the `Bats unit tests`, `Shell parsing
+and ShellCheck`, and `Build and smoke-test arm64 image` checks with strict
+status checks, admin enforcement, linear history, conversation resolution, and
+force-push/deletion disabled. Before dispatching promotion, run
+`.github/scripts/verify-master-protection.sh` with an authenticated GitHub CLI.
+The branch-protection setting is enforced externally by GitHub; the workflow
+only requires the `master` ref because Actions' `GITHUB_TOKEN` cannot read
+repository Administration settings.
+
+Use the workflows in two phases so the evidence can be created after the
+candidate has actually run: dispatch `release.yml` with `promote: false`, then
+publish the exact signed candidate through `publish-canary-alias.yml`, install
+only that immutable canary tag, and perform the live canary. Commit the
+redacted evidence JSON and provider contract report, then dispatch
+`promote-existing.yml` with the original
+candidate digest, candidate tag/run/commit, canary tag, and the
+`canary_evidence_bundle` JSON input containing the evidence, descriptor, and
+provider-report URLs plus their SHA256s. This final
+workflow verifies the existing artifact and attestations without rebuilding it,
+then promotes only that digest. Any remediation after a candidate build
+supersedes that candidate: do not carry its image, canary, or evidence forward
+to the next commit.

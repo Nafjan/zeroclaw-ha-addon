@@ -5,6 +5,9 @@ set -eu
 NOW=$(date -u +%s)
 SHORT=feedcafe
 mkdir -p /data/pending /data/approved /data/approval-receipts /data/approval-receipts/.locks /data/approval-receipts/tickets /tmp/zc-approval-race
+mkdir -p /run/zeroclaw
+printf '%s\n' capability-client-secret > /run/zeroclaw/capability-client-auth
+chmod 0600 /run/zeroclaw/capability-client-auth
 jq -nc --argjson exp "$((NOW + 300))" \
     '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${SHORT}.json"
@@ -66,9 +69,7 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
         '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
         > "/data/approval-receipts/tickets/${APPLY_SHORT}.json"
     sha256sum "/data/approval-receipts/tickets/${APPLY_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${APPLY_SHORT}.sha256"
-    jq -nc --arg ticket "$APPLY_SHORT" \
-        '{ticket:$ticket,actor_user_id:"42",chat_id:"42",approved_at:now}' \
-        > "/data/approved/${APPLY_SHORT}.marker"
+    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 >/dev/null
 
     cat > /tmp/approval-fake-ha <<'FAKE_HA'
 #!/bin/sh
@@ -87,6 +88,7 @@ FAKE_HA
     sleep 1
     (
         export HA_TOKEN=apply-test-token
+        export CAPABILITY_CLIENT_AUTH_TOKEN=capability-client-secret
         export HA_URL="http://127.0.0.1:${HA_PORT}/core/api"
         export ENABLE_WRITE_ACTIONS=true
         export POLICY_MODE=balanced POLICY_QUIET_CONFIRM=true POLICY_BULK_THRESHOLD=3 POLICY_CLIMATE_DELTA=3

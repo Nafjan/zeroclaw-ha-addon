@@ -141,6 +141,20 @@ decide() {
     [[ "$output" == "deny:extra_deny:switch.water_heater" ]]
 }
 
+@test "extra_deny matches every entity in an array" {
+    export EXTRA_DENY="light.kids_*"
+    body='{"entity_id":["light.kitchen","light.kids_room"]}'
+    run decide light turn_on '["light.kitchen","light.kids_room"]' "$body"
+    [[ "$output" == "deny:extra_deny:light.kids_*" ]]
+}
+
+@test "extra_allow does not upgrade a mixed entity array" {
+    export EXTRA_ALLOW="light.kitchen"
+    body='{"entity_id":["light.kitchen","light.hall"]}'
+    run decide light turn_on '["light.kitchen","light.hall"]' "$body"
+    [[ "$output" != allow:extra_allow:* ]]
+}
+
 @test "extra_deny does NOT bypass hard block (deny still wins; reason differs)" {
     export EXTRA_DENY="lock.*"
     run decide lock unlock lock.front_door

@@ -53,9 +53,13 @@ start_upstream() {
 
 start_proxy() {
     PROVIDER_UPSTREAM_URL="$UPSTREAM_URL" OPENROUTER_KEY=provider-secret \
+        PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
         PROVIDER_ALLOWED_MODELS='deepseek/deepseek-v4-flash' \
-        PROVIDER_MAX_TOKENS=2048 PROVIDER_MAX_REQUESTS_PER_HOUR=10 \
-        PROVIDER_DAILY_TOKEN_BUDGET=10000 PROVIDER_QUOTA_FILE=/data/provider/quota.json \
+        PROVIDER_MAX_TOKENS=2048 PROVIDER_MAX_INPUT_TOKENS=16384 \
+        PROVIDER_MAX_REQUESTS_PER_HOUR=10 \
+        PROVIDER_DAILY_TOKEN_BUDGET=32768 \
+        PROVIDER_DAILY_COST_LIMIT_MICROS=100000000 PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
+        PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 PROVIDER_QUOTA_FILE=/data/provider/quota.json \
         PROVIDER_QUOTA_LOCK=/data/provider/.quota.lock \
         /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 -e /usr/local/bin/provider-broker-entrypoint &
     PROXY_PID=$!
@@ -86,7 +90,7 @@ start_proxy
 body_length=$(printf '%s' "$REQUEST_BODY" | wc -c | tr -d ' ')
 {
     printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-    printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
 } | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-response
 stop_listeners
 
@@ -95,6 +99,25 @@ grep -F '"broker-ok"' /data/provider-response >/dev/null
 grep -F 'Authorization: Bearer provider-secret' /data/provider-upstream-request >/dev/null
 grep -F '"model":"deepseek/deepseek-v4-flash"' /data/provider-upstream-request >/dev/null
 ! grep -F 'provider-secret' /data/provider-response >/dev/null 2>&1
+
+# A process that only discovers the loopback port must not be able to invoke
+# the root broker without the fresh client credential.
+start_proxy
+body_length=$(printf '%s' "$REQUEST_BODY" | wc -c | tr -d ' ')
+{
+    printf 'POST /v1/chat/completions HTTP/1.1\r\n'
+    printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+} | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-missing-auth-response
+stop_listeners
+grep -F 'HTTP/1.1 401 Unauthorized' /data/provider-missing-auth-response >/dev/null
+
+start_proxy
+{
+    printf 'POST /v1/chat/completions HTTP/1.1\r\n'
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer wrong-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+} | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-wrong-auth-response
+stop_listeners
+grep -F 'HTTP/1.1 401 Unauthorized' /data/provider-wrong-auth-response >/dev/null
 
 # The route and envelope checks must fail closed before any upstream call.
 start_proxy
@@ -108,7 +131,7 @@ UNALLOWED_BODY='{"model":"unapproved/model","messages":[]}'
 body_length=$(printf '%s' "$UNALLOWED_BODY" | wc -c | tr -d ' ')
 {
     printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-    printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$UNALLOWED_BODY"
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$UNALLOWED_BODY"
 } | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-model-response
 stop_listeners
 grep -F 'HTTP/1.1 403 Forbidden' /data/provider-model-response >/dev/null
@@ -118,13 +141,13 @@ TOO_MANY_TOKENS='{"model":"deepseek/deepseek-v4-flash","messages":[],"max_tokens
 body_length=$(printf '%s' "$TOO_MANY_TOKENS" | wc -c | tr -d ' ')
 {
     printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-    printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$TOO_MANY_TOKENS"
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$TOO_MANY_TOKENS"
 } | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-token-response
 stop_listeners
 grep -F 'HTTP/1.1 400 Bad Request' /data/provider-token-response >/dev/null
 
 start_proxy
-printf 'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}' |
+printf 'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Length: 2\r\n\r\n{}' |
     /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-envelope-response
 stop_listeners
 grep -F 'HTTP/1.1 400 Bad Request' /data/provider-envelope-response >/dev/null
@@ -136,7 +159,7 @@ start_proxy
 body_length=$(printf '%s' "$REQUEST_BODY" | wc -c | tr -d ' ')
 {
     printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-    printf 'Host: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
+    printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$body_length" "$REQUEST_BODY"
 } | /bin/busybox nc -w 10 127.0.0.1 "$PROXY_PORT" > /data/provider-leak-response
 stop_listeners
 grep -F 'HTTP/1.1 502 Bad Gateway' /data/provider-leak-response >/dev/null

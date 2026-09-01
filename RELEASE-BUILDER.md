@@ -25,6 +25,15 @@ not attach it to pull-request workflows or run arbitrary branches on it. Configu
 a `release-builder` environment with required reviewers before using the trusted
 mode. The workflow itself additionally requires `refs/heads/master` for that mode.
 
+Protect `master` with strict required checks named `Bats unit tests`, `Shell
+parsing and ShellCheck`, and `Build and smoke-test arm64 image`; also enable
+admin enforcement, linear history, and conversation resolution, and disable
+force-pushes and branch deletion. Before dispatching a promotion, run
+`.github/scripts/verify-master-protection.sh` with an authenticated GitHub CLI.
+The branch-protection setting is the external hard control; Actions'
+`GITHUB_TOKEN` does not have repository Administration permission and is not
+used to self-attest that setting.
+
 ## Qualification gate
 
 After the runner is online, dispatch the exact release workflow twice, recreating

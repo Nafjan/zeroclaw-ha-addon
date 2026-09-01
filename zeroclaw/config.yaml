@@ -12,6 +12,11 @@ init: false
 startup: application
 boot: auto
 homeassistant_api: true
+hassio_api: true
+# The typed capability broker uses the least-privileged Supervisor role.
+# Do not widen this to admin/manager/homeassistant: the broker is the only
+# component that consumes SUPERVISOR_TOKEN and still enforces typed policy.
+hassio_role: default
 options:
   # --- Provider credentials (OpenRouter required; other providers optional) ---
   openrouter_api_key: ""
@@ -19,8 +24,9 @@ options:
   # and never receive a request.
   nvidia_api_key: ""
   ark_api_key: ""
-  # broker keeps the provider key in the root-owned local model gateway.
-  # direct_temporary is retained only for migration/compatibility testing.
+  # The broker keeps provider keys in the root-owned local model gateway.
+  # direct_temporary remains schema-compatible only so an upgrade can migrate
+  # an older saved options object; run.sh forces it into broker mode in memory.
   provider_key_mode: broker
   # Deprecated compatibility option. Prefer the Supervisor-provided token.
   ha_token: ""
@@ -75,6 +81,7 @@ options:
   max_history_messages: 30
   max_context_tokens: 16000
   provider_max_tokens: 2048
+  provider_max_input_tokens: 32768
   response_cache_ttl_minutes: 2
   conversation_retention_days: 30
 
@@ -157,6 +164,7 @@ schema:
   max_history_messages: int(5,100)
   max_context_tokens: int(2000,128000)
   provider_max_tokens: int(512,8192)
+  provider_max_input_tokens: int(1024,128000)
   response_cache_ttl_minutes: int(0,60)
   conversation_retention_days: int(1,365)
 

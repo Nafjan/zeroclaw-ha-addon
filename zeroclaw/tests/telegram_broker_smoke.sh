@@ -3,6 +3,27 @@
 # without contacting Telegram.
 set -eu
 
+install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-broker-handler
+install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
+mkdir -p /run/zeroclaw
+printf '%s\n' telegram-secret > /run/zeroclaw/telegram-token
+chown root:root /run/zeroclaw/telegram-token
+chmod 0600 /run/zeroclaw/telegram-token
+printf '%s\n' telegram-client-secret > /run/zeroclaw/telegram-client-auth
+chown root:root /run/zeroclaw/telegram-client-auth
+chmod 0600 /run/zeroclaw/telegram-client-auth
+mkdir -p /data/audit
+cat > /usr/local/bin/zc-audit-write <<'AUDIT'
+#!/bin/sh
+set -eu
+KIND="$1"; SERVICE="$2"; BODY="$3"; REASON="$4"
+DATE=$(date -u +%Y-%m-%d)
+ROW=$(jq -nc --arg kind "$KIND" --arg service "$SERVICE" --arg reason "$REASON" \
+    --argjson body "$BODY" '{kind:$kind,service:$service,reason:$reason,body:$body}')
+printf '%s\n' "$ROW" >> "/data/audit/${DATE}.jsonl"
+AUDIT
+chmod 0755 /usr/local/bin/zc-audit-write
+
 mkdir -p /tmp/fake-curl
 cat > /tmp/fake-curl/curl <<'FAKE_CURL'
 #!/bin/sh
@@ -26,6 +47,7 @@ jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
 (
     export PATH="/tmp/fake-curl:$PATH"
     export TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
+    export TELEGRAM_CLIENT_AUTH_TOKEN=telegram-client-secret
     export TELEGRAM_APPROVAL_CHAT=42
     export ZEROCLAW_TELEGRAM_PORT=42629
     while true; do
