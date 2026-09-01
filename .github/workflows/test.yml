@@ -85,8 +85,17 @@ jobs:
           SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
         run: |
           set -euo pipefail
-          bash_scripts=(/src/zeroclaw/run.sh /src/.github/scripts/*.sh)
-          sh_scripts=(/src/zeroclaw/lib/*.sh /src/zeroclaw/tests/*.sh)
+          bash_scripts=(/src/zeroclaw/run.sh)
+          for script in "$GITHUB_WORKSPACE"/.github/scripts/*.sh; do
+            bash_scripts+=("/src/.github/scripts/$(basename "$script")")
+          done
+          sh_scripts=()
+          for script in "$GITHUB_WORKSPACE"/zeroclaw/lib/*.sh; do
+            sh_scripts+=("/src/zeroclaw/lib/$(basename "$script")")
+          done
+          for script in "$GITHUB_WORKSPACE"/zeroclaw/tests/*.sh; do
+            sh_scripts+=("/src/zeroclaw/tests/$(basename "$script")")
+          done
           docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
             -s bash --severity=error "${bash_scripts[@]}"
           docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
