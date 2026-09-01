@@ -438,8 +438,9 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'pro-model-shaped' >/dev/null
 grep -F '"model":"deepseek/deepseek-v4-pro"' /data/provider/pro-model-success.log >/dev/null
 
-# The root broker must reject an oversized input estimate before contacting an
-# upstream.  This protects both provider spend and the durable token budget.
+# The root broker must reject an input whose raw byte size cannot fit within the
+# conservative byte-for-token reservation before contacting an upstream. This
+# protects both provider spend and the durable token budget.
 rm -f "$LEDGER" "$LOCK" /data/provider/input-limit.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -453,8 +454,8 @@ large_body=$(jq -nc --arg content "$large_content" \
     '{model:"input-limit-route",messages:[{role:"user",content:$content}]}' )
 response=$(request_proxy "$large_body")
 stop_listeners
-printf '%s' "$response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
-printf '%s' "$response" | grep -F 'provider input token estimate exceeds the broker limit' >/dev/null
+printf '%s' "$response" | grep -F 'HTTP/1.1 413 Payload Too Large' >/dev/null
+printf '%s' "$response" | grep -F 'provider input is too large' >/dev/null
 [ ! -f /data/provider/input-limit.log ]
 
 # The root broker must reject fan-out requests instead of forwarding n>1 while
