@@ -47,7 +47,11 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "runtime enforces the Supervisor version floor before scrubbing the token" {
     run grep -F 'http://supervisor/supervisor/info' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Authorization: Bearer ${SUPERVISOR_TOKEN}' "$run_file"
+    # The token must be written to a short-lived 0600 header file rather than
+    # appearing in the curl argv or command text.
+    run grep -F 'Authorization: Bearer %s' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--header "@${supervisor_auth_file}"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'below the supported floor 2026.04.0' "$run_file"
     [ "$status" -eq 0 ]
@@ -405,7 +409,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'input token estimate exceeds the broker limit' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
-    run grep -F 'conservative half-byte estimate' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    run grep -F 'byte-for-token upper bound' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'input_chars=$(wc -c < "$body_file"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
