@@ -72,16 +72,16 @@ options:
   provider_openrouter_max_requests_per_hour: 120
   provider_openrouter_daily_token_budget: 100000
   provider_nvidia_max_requests_per_hour: 60
-  provider_nvidia_daily_token_budget: 50000
+  provider_nvidia_daily_token_budget: 100000
   provider_ark_max_requests_per_hour: 60
-  provider_ark_daily_token_budget: 50000
+  provider_ark_daily_token_budget: 100000
 
   # --- Agent runtime budgets ---
   max_tool_iterations: 8
   max_history_messages: 30
   max_context_tokens: 16000
   provider_max_tokens: 2048
-  provider_max_input_tokens: 32768
+  provider_max_input_tokens: 65536
   response_cache_ttl_minutes: 2
   conversation_retention_days: 30
 

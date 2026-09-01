@@ -201,6 +201,12 @@ configuration:
     description: >-
       Cap on the model's response length. Tool-call-heavy turns need more —
       2048 is a good default; raise if you see truncated tool calls.
+  provider_max_input_tokens:
+    name: "Provider max input tokens"
+    description: >-
+      Hard root-broker ceiling for the complete JSON request, including the
+      system prompt and tools. The broker reserves this budget conservatively
+      and rejects oversized requests before contacting any provider.
   response_cache_ttl_minutes:
     name: "Response cache TTL (minutes)"
     description: "Identical user messages within this window return the cached reply."

@@ -375,7 +375,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_free_fallback_enabled: true' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
-    run grep -F 'provider_max_input_tokens: 32768' "$BATS_TEST_DIRNAME/../config.yaml"
+    run grep -F 'provider_max_input_tokens: 65536' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]

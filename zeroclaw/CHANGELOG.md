@@ -56,6 +56,10 @@
   `planner_event` stream; authoritative broker decisions, execution outcomes,
   approval transitions, and failures cannot be forged through the planner audit
   operation or pollute `zc-audit-tail`.
+- Raise the default root provider input budget to 65,536 tokens so the complete
+  generated 16k-token planner context can reach the broker under its
+  conservative byte-for-token reservation; oversized requests remain rejected
+  before any provider contact.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
