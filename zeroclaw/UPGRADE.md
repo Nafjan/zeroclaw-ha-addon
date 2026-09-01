@@ -54,6 +54,9 @@ logs are sanitized for symlinks before listeners start and remain root-owned.
 The persistent `/data` mount is root-owned with a sticky group boundary: the
 planner can create only its own runtime entries and cannot unlink or replace
 root-owned audit, approval, migration, or configuration state.
+Planner-requested audit notes are retained only as untrusted telemetry in
+`/data/audit/planner/`; `zc-audit-tail` reads the authoritative broker stream
+and never treats those notes as action evidence.
 Each boot also rotates ephemeral, root-created client credentials for the
 loopback provider, HA, and Telegram brokers; `/run/zeroclaw` is not included in
 backups and the planner receives no Supervisor, Telegram-bot, or provider
@@ -192,3 +195,8 @@ workflow verifies the existing artifact and attestations without rebuilding it,
 then promotes only that digest. Any remediation after a candidate build
 supersedes that candidate: do not carry its image, canary, or evidence forward
 to the next commit.
+
+The `promote` input on `release.yml` is intentionally deprecated and must stay
+`false`. Its former inline promotion path required evidence from a commit that
+could only be created after the same workflow run, so it is rejected before
+the candidate build. `promote-existing.yml` is the sole promotion entry point.
