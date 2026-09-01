@@ -224,6 +224,12 @@ planner_audit_quota_release() {
 }
 
 planner_audit_quota_acquire() {
+    # The quota lock lives below the audit state directory, which may not
+    # exist on first use in a fresh data volume.  Create that directory before
+    # attempting the atomic mkdir lock; otherwise every first audit request is
+    # misreported as a busy quota.
+    mkdir -p "$(dirname "$PLANNER_AUDIT_QUOTA_LOCK")" ||
+        json_error "planner audit quota state is unavailable" "audit_quota_unavailable"
     attempts=0
     while ! mkdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null; do
         attempts=$((attempts + 1))
