@@ -15,13 +15,29 @@ install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/t
 mkdir -p /data/provider /data/logs /data/audit /run/zeroclaw
 printf '%s\n' telegram-test-token > /run/zeroclaw/telegram-token
 
+expect_response() {
+    stage="$1"
+    response_file="$2"
+    pattern="$3"
+    if grep -Eq "$pattern" "$response_file" >/dev/null; then
+        return 0
+    fi
+    printf 'BROKER_FRAMING_FAIL stage=%s bytes=' "$stage" >&2
+    wc -c < "$response_file" | tr -d ' ' >&2
+    printf ' sha256=' >&2
+    sha256sum "$response_file" | cut -d' ' -f1 >&2
+    od -An -tx1 -N 256 "$response_file" >&2
+    return 1
+}
+
 {
     printf '%s' '{"auth":"cap-client","operation":"'
     head -c 33000 /dev/zero | tr '\000' a
     printf '%s\n' '"}'
 } | HA_TOKEN=test-token CAPABILITY_CLIENT_AUTH_TOKEN=cap-client \
     /usr/local/bin/ha-broker-entrypoint > /data/framing-capability-response
-grep -Eq '"error_code":"request_(too_large|timeout)"' /data/framing-capability-response >/dev/null
+expect_response capability_oversized /data/framing-capability-response \
+    '"error_code":"request_(too_large|timeout)"'
 
 # A planner may describe an intent/deny/confirmation event for diagnostics,
 # but the broker must rewrite it into a segregated telemetry record rather
@@ -36,7 +52,7 @@ chmod 0755 /usr/local/bin/zc-audit-write
 printf '%s\n' '{"auth":"cap-client","operation":"audit","kind":"deny","service":"light/turn_on","body":{"entity_id":"light.kitchen"},"reason":"test"}' |
     HA_TOKEN=test-token CAPABILITY_CLIENT_AUTH_TOKEN=cap-client \
     /usr/local/bin/ha-broker-entrypoint > /data/planner-audit-response
-grep -F '"recorded":true' /data/planner-audit-response >/dev/null
+expect_response planner_audit /data/planner-audit-response '"recorded":true'
 sed -n '1p' /data/planner-audit-kind | grep -Fx 'planner_event' >/dev/null
 sed -n '2p' /data/planner-audit-kind | grep -Fx 'planner/telemetry' >/dev/null
 sed -n '3p' /data/planner-audit-kind | grep -F '"source":"untrusted_planner"' >/dev/null
@@ -50,7 +66,8 @@ sed -n '3p' /data/planner-audit-kind | grep -F '"source":"untrusted_planner"' >/
     PROVIDER_MAX_INPUT_TOKENS=1024 PROVIDER_MAX_REQUESTS_PER_HOUR=10 \
     PROVIDER_DAILY_TOKEN_BUDGET=2048 PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=1 \
     /usr/local/bin/provider-broker-entrypoint > /data/framing-provider-line-response
-grep -Eq 'request line (is too large|timed out)' /data/framing-provider-line-response >/dev/null
+expect_response provider_request_line /data/framing-provider-line-response \
+    'request line (is too large|timed out)'
 
 {
     printf '%s\r\n' 'POST /v1/chat/completions HTTP/1.1'
@@ -62,13 +79,15 @@ grep -Eq 'request line (is too large|timed out)' /data/framing-provider-line-res
     PROVIDER_MAX_INPUT_TOKENS=1024 PROVIDER_MAX_REQUESTS_PER_HOUR=10 \
     PROVIDER_DAILY_TOKEN_BUDGET=2048 PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=1 \
     /usr/local/bin/provider-broker-entrypoint > /data/framing-provider-header-response
-grep -Eq 'header (is too large|timed out)' /data/framing-provider-header-response >/dev/null
+expect_response provider_header /data/framing-provider-header-response \
+    'header (is too large|timed out)'
 
 {
     printf '%s' '{"auth":"cap-client","operation":"'
     sleep 4
 } | HA_TOKEN=test-token CAPABILITY_CLIENT_AUTH_TOKEN=cap-client \
     /usr/local/bin/ha-broker-entrypoint > /data/framing-idle-response
-grep -F '"error_code":"request_timeout"' /data/framing-idle-response >/dev/null
+expect_response capability_idle /data/framing-idle-response \
+    '"error_code":"request_timeout"'
 
 echo 'BROKER_FRAMING_OK bounded_lines=true bounded_headers=true idle_timeout=true'
