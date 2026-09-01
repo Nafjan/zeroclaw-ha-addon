@@ -27,6 +27,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: zeroclaw-canary-alias-${{ inputs.target_tag }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Publish exact candidate digest as temporary canary tag
@@ -38,10 +42,14 @@ jobs:
       packages: write
       attestations: read
     steps:
-      - name: Check out the exact candidate metadata
+      - name: Check out the workflow revision for release tooling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.candidate_commit }}
+          # The candidate image is verified independently below.  Use the
+          # workflow revision for the descriptor renderer so a later alias
+          # cannot silently resurrect an obsolete renderer from the candidate
+          # commit (for example, one that violates Supervisor's image schema).
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Set up Buildx
@@ -172,14 +180,17 @@ jobs:
           bash .github/scripts/verify-canary-descriptor.sh \
             "$descriptor_dir/config.yaml" "$IMAGE" "$TARGET_TAG" "$SOURCE_DIGEST" \
             "$CANDIDATE_COMMIT" "$descriptor_sha256"
-          jq -e --arg image "$IMAGE:$TARGET_TAG@$SOURCE_DIGEST" \
-            --arg tag "$TARGET_TAG" --arg digest "$SOURCE_DIGEST" \
-            --arg commit "$CANDIDATE_COMMIT" --arg sha "$descriptor_sha256" \
-            '(.schema_version == 1) and
+          jq -e --arg image "$IMAGE" \
+            --arg resolved_image "$IMAGE:$TARGET_TAG@$SOURCE_DIGEST" \
+             --arg tag "$TARGET_TAG" --arg digest "$SOURCE_DIGEST" \
+             --arg commit "$CANDIDATE_COMMIT" --arg sha "$descriptor_sha256" \
+            '(.schema_version == 2) and
              (.descriptor_kind == "homeassistant_local_app") and
              (.app_slug == "zeroclaw_canary") and
-             (.version == ($tag | split("-canary.")[0])) and
+             (.version == $tag) and
              (.image == $image) and
+             (.image_tag == $tag) and
+             (.resolved_image == $resolved_image) and
              (.candidate_tag == $tag) and
              (.candidate_digest == $digest) and
              (.candidate_commit == $commit) and

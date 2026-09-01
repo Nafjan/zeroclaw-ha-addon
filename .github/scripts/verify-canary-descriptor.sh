@@ -35,7 +35,6 @@ printf '%s' "$CANARY_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-canary\.[0
 printf '%s' "$CANDIDATE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' || exit 1
 printf '%s' "$CANDIDATE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || exit 1
 
-version="${CANARY_TAG%-canary.*}"
 image_ref="${IMAGE}:${CANARY_TAG}@${CANDIDATE_DIGEST}"
 grep -F -x "# candidate_commit: ${CANDIDATE_COMMIT}" "$DESCRIPTOR" >/dev/null || {
     echo "descriptor candidate commit binding is missing" >&2
@@ -49,9 +48,13 @@ grep -F -x "# candidate_digest: ${CANDIDATE_DIGEST}" "$DESCRIPTOR" >/dev/null ||
     echo "descriptor candidate digest binding is missing" >&2
     exit 1
 }
+grep -F -x "# resolved_image: ${image_ref}" "$DESCRIPTOR" >/dev/null || {
+    echo "descriptor resolved image binding is missing" >&2
+    exit 1
+}
 test "$(grep -Ec '^image:[[:space:]]+' "$DESCRIPTOR")" -eq 1
-grep -F -x "image: \"${image_ref}\"" "$DESCRIPTOR" >/dev/null || {
-    echo "descriptor image is not pinned to the exact canary tag and digest" >&2
+grep -F -x "image: \"${IMAGE}\"" "$DESCRIPTOR" >/dev/null || {
+    echo "descriptor image is not a Supervisor-compatible bare image repository" >&2
     exit 1
 }
 test "$(grep -Ec '^slug:[[:space:]]+' "$DESCRIPTOR")" -eq 1
@@ -63,8 +66,8 @@ grep -F -x 'name: ZeroClaw Canary' "$DESCRIPTOR" >/dev/null || {
     echo "descriptor does not identify the canary app" >&2
     exit 1
 }
-grep -F -x "version: ${version}" "$DESCRIPTOR" >/dev/null || {
-    echo "descriptor version does not match the canary tag" >&2
+grep -F -x "version: ${CANARY_TAG}" "$DESCRIPTOR" >/dev/null || {
+    echo "descriptor version does not carry the exact canary tag" >&2
     exit 1
 }
 
