@@ -32,6 +32,19 @@ smoke_failure_diagnostics() {
     done
 }
 
+assert_stat() {
+    stat_path="$1"
+    expected_stat="$2"
+    actual_stat=$(stat -c '%u:%a' "$stat_path" 2>/dev/null) || {
+        echo "startup smoke stat missing: ${stat_path} (expected ${expected_stat})" >&2
+        return 1
+    }
+    if [ "$actual_stat" != "$expected_stat" ]; then
+        echo "startup smoke stat mismatch: ${stat_path} expected=${expected_stat} actual=${actual_stat}" >&2
+        return 1
+    fi
+}
+
 # The image test provides a synthetic Supervisor credential so the entrypoint
 # exercises its real fail-closed preflight against the fake Supervisor below.
 : "${SUPERVISOR_TOKEN:=supervisor-secret}"
@@ -339,18 +352,18 @@ if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
     exit 1
 fi
 [ "$(cat /tmp/zeroclaw-planner-uid)" -ne 0 ]
-test "$(stat -c '%u:%a' /data)" = "0:1770"
-test "$(stat -c '%u:%a' /data/approval-receipts/.locks)" = "0:700"
-test "$(stat -c '%u:%a' /data/approval-receipts/.claims)" = "0:700"
-test "$(stat -c '%u:%a' /data/approval-receipts/tickets)" = "0:700"
-test "$(stat -c '%u:%a' /data/audit)" = "0:750"
-test "$(stat -c '%u:%a' /data/logs)" = "0:750"
-test "$(stat -c '%u:%a' /data/provider)" = "0:700"
-test "$(stat -c '%u:%a' /data/capability)" = "0:700"
-test "$(stat -c '%u:%a' /data/capability/telegram-replies)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:710"
-test "$(stat -c '%u:%a' /data/capability/telegram-offset)" = "0:600"
-test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
+assert_stat /data 0:1770
+assert_stat /data/approval-receipts/.locks 0:700
+assert_stat /data/approval-receipts/.claims 0:700
+assert_stat /data/approval-receipts/tickets 0:700
+assert_stat /data/audit 0:750
+assert_stat /data/logs 0:750
+assert_stat /data/provider 0:700
+assert_stat /data/capability 0:700
+assert_stat /data/capability/telegram-replies 0:700
+assert_stat /run/zeroclaw 0:710
+assert_stat /data/capability/telegram-offset 0:600
+assert_stat /run/zeroclaw/telegram-users 0:600
 test -x /usr/local/bin/ha-broker-entrypoint
 test -x /usr/local/bin/tg-broker-entrypoint
 test -x /usr/local/bin/telegram-render
