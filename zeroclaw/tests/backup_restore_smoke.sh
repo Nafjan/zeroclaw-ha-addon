@@ -17,7 +17,8 @@ ARCHIVE="$ROOT/zeroclaw-backup.tar"
 mkdir -p \
     "$SOURCE/data/workspace/sessions-1" \
     "$SOURCE/data/migrations/3.1.3.3-to-3.1.3.5" \
-    "$SOURCE/data/audit"
+    "$SOURCE/data/audit" \
+    "$SOURCE/data/capability"
 
 printf 'brain-before-backup\n' > "$SOURCE/data/brain.db"
 printf 'config-before-backup\n' > "$SOURCE/data/config.toml"
@@ -25,6 +26,8 @@ printf 'session-before-backup\n' > "$SOURCE/data/workspace/sessions-1/state.db"
 printf 'old_version=3.1.3.3\nnew_version=3.1.3.5\n' \
     > "$SOURCE/data/migrations/3.1.3.3-to-3.1.3.5/manifest"
 printf '{"event":"intent"}\n' > "$SOURCE/data/audit/2026-08-17.jsonl"
+printf '42\n' > "$SOURCE/data/capability/telegram-offset"
+chmod 0600 "$SOURCE/data/capability/telegram-offset"
 # options.json is Supervisor-owned configuration state. It must be recoverable,
 # but remains secret-bearing and is never copied into the planner workspace.
 printf '{"openrouter_api_key":"backup-secret"}\n' > "$SOURCE/data/options.json"
@@ -44,6 +47,7 @@ for path in \
     data/workspace/sessions-1/state.db \
     data/migrations/3.1.3.3-to-3.1.3.5/manifest \
     data/audit/2026-08-17.jsonl \
+    data/capability/telegram-offset \
     data/options.json; do
     cmp "$SOURCE/$path" "$RESTORE/$path"
 done

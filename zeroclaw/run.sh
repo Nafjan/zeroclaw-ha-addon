@@ -1,10 +1,19 @@
 #!/usr/bin/with-contenv bashio
 
-# ZeroClaw HAOS Add-on v3.1.4.0 — root provider profile broker release
+# ZeroClaw HAOS app — root provider profile broker release
 # Writes, scheduling, generic HTTP, and the built-in Telegram transport are
 # disabled by default; enabled writes remain broker- and policy-gated.
 
-ADDON_VERSION="3.1.4.0"
+ADDON_VERSION="${ZEROCLAW_ADDON_VERSION-}"
+printf '%s' "${ADDON_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
+    bashio::log.fatal "missing or invalid baked app version; refusing to start"
+    exit 1
+}
+STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA-}"
+printf '%s' "${STATE_SCHEMA}" | grep -Eq '^[1-9][0-9]{0,2}$' || {
+    bashio::log.fatal "missing or invalid baked state schema; refusing to start"
+    exit 1
+}
 bashio::log.info "ZeroClaw v${ADDON_VERSION} starting..."
 
 # ==============================================================
@@ -19,7 +28,7 @@ HA_TOKEN="${SUPERVISOR_TOKEN:-${LEGACY_HA_TOKEN}}"
 TELEGRAM_TOKEN="$(bashio::config 'telegram_bot_token')"
 TELEGRAM_USERS="$(bashio::config 'telegram_allowed_users')"
 if [ -z "${PROVIDER_KEY_MODE}" ]; then
-    bashio::log.warning "provider_key_mode is absent in existing options; using the broker default. Set direct_temporary only for a controlled migration comparison."
+    bashio::log.warning "provider_key_mode is absent in existing options; using the broker default."
     PROVIDER_KEY_MODE="broker"
 fi
 DEFAULT_MODEL="$(bashio::config 'default_model')"
@@ -64,6 +73,7 @@ MAX_TOOL_ITER="$(bashio::config 'max_tool_iterations')"
 MAX_HISTORY_MSGS="$(bashio::config 'max_history_messages')"
 MAX_CONTEXT_TOKENS="$(bashio::config 'max_context_tokens')"
 PROVIDER_MAX_TOKENS="$(bashio::config 'provider_max_tokens')"
+PROVIDER_MAX_INPUT_TOKENS="$(bashio::config 'provider_max_input_tokens')"
 RESPONSE_CACHE_TTL="$(bashio::config 'response_cache_ttl_minutes')"
 CONV_RETENTION_DAYS="$(bashio::config 'conversation_retention_days')"
 
@@ -90,6 +100,46 @@ POLICY_CLIMATE_DELTA="$(bashio::config 'policy_climate_delta_confirm_c')"
 POLICY_TRUST_ENABLED="$(bashio::config 'policy_trust_enabled')"
 POLICY_TRUST_PROMOTE="$(bashio::config 'policy_trust_promote_after')"
 
+# Existing Supervisor options objects can predate these fields.  Keep the
+# migration defaults explicit, then reject malformed values before any
+# user-controlled string is used by a generated helper or policy function.
+DAILY_REPORT_TIME="${DAILY_REPORT_TIME:-08:00}"
+QUIET_HOURS="${QUIET_HOURS:-23:00-06:00}"
+ENABLE_LEARNING="${ENABLE_LEARNING:-false}"
+case "${ENABLE_LEARNING}" in
+    true|false) ;;
+    *)
+        bashio::log.fatal "enable_learning_loops is invalid; refusing to start"
+        exit 1
+        ;;
+esac
+
+validate_clock_value() {
+    clock_label="$1"
+    clock_value="$2"
+    printf '%s' "$clock_value" | grep -Eq '^[0-9]{1,2}:[0-9]{2}$' || {
+        bashio::log.fatal "${clock_label} must use H:MM or HH:MM; refusing to start"
+        exit 1
+    }
+    clock_hour="${clock_value%%:*}"
+    clock_minute="${clock_value##*:}"
+    [ "$clock_hour" -ge 0 ] && [ "$clock_hour" -le 23 ] &&
+        [ "$clock_minute" -ge 0 ] && [ "$clock_minute" -le 59 ] || {
+        bashio::log.fatal "${clock_label} is outside the valid 24-hour range; refusing to start"
+        exit 1
+    }
+}
+
+validate_clock_value daily_report_time "${DAILY_REPORT_TIME}"
+printf '%s' "${QUIET_HOURS}" | grep -Eq '^[0-9]{1,2}:[0-9]{2}-[0-9]{1,2}:[0-9]{2}$' || {
+    bashio::log.fatal "quiet_hours must use H:MM-H:MM; refusing to start"
+    exit 1
+}
+QUIET_HOURS_START="${QUIET_HOURS%%-*}"
+QUIET_HOURS_END="${QUIET_HOURS##*-}"
+validate_clock_value quiet_hours_start "${QUIET_HOURS_START}"
+validate_clock_value quiet_hours_end "${QUIET_HOURS_END}"
+
 # The planner and the local TCP transport are intentionally untrusted.  Keep
 # this security gate hard-coded: every write must be backed by a root-sealed,
 # actor-bound Telegram approval before the capability broker will execute it.
@@ -98,6 +148,32 @@ POLICY_REQUIRE_APPROVAL=true
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
+PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-32768}"
+DAILY_COST_LIMIT="${DAILY_COST_LIMIT:-5.0}"
+MONTHLY_COST_LIMIT="${MONTHLY_COST_LIMIT:-20.0}"
+PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000
+
+cost_to_micros() {
+    awk -v cost="$1" 'BEGIN {
+        if (cost !~ /^[0-9]+([.][0-9]{1,6})?$/) exit 1
+        printf "%.0f\n", cost * 1000000
+    }'
+}
+
+DAILY_COST_LIMIT_MICROS="$(cost_to_micros "${DAILY_COST_LIMIT}")" || {
+    bashio::log.fatal "daily_cost_limit_usd is invalid; refusing to start"
+    exit 1
+}
+MONTHLY_COST_LIMIT_MICROS="$(cost_to_micros "${MONTHLY_COST_LIMIT}")" || {
+    bashio::log.fatal "monthly_cost_limit_usd is invalid; refusing to start"
+    exit 1
+}
+[ "${DAILY_COST_LIMIT_MICROS}" -le 1000000000000 ] &&
+    [ "${MONTHLY_COST_LIMIT_MICROS}" -le 1000000000000 ] &&
+    [ "${MONTHLY_COST_LIMIT_MICROS}" -ge "${DAILY_COST_LIMIT_MICROS}" ] || {
+    bashio::log.fatal "cost budgets are outside the safe range; refusing to start"
+    exit 1
+}
 PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR="${PROVIDER_OPENROUTER_MAX_REQUESTS_HOUR:-${PROVIDER_MAX_REQUESTS_HOUR}}"
 PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET="${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET:-${PROVIDER_DAILY_TOKEN_BUDGET}}"
 PROVIDER_NVIDIA_MAX_REQUESTS_HOUR="${PROVIDER_NVIDIA_MAX_REQUESTS_HOUR:-60}"
@@ -143,6 +219,18 @@ esac
     bashio::log.fatal "provider_max_tokens is outside the safe range; refusing to start"
     exit 1
 }
+case "${PROVIDER_MAX_INPUT_TOKENS}" in
+    ''|*[!0-9]*) bashio::log.fatal "provider_max_input_tokens is invalid; refusing to start"; exit 1 ;;
+esac
+[ "${PROVIDER_MAX_INPUT_TOKENS}" -ge 1024 ] && [ "${PROVIDER_MAX_INPUT_TOKENS}" -le 128000 ] || {
+    bashio::log.fatal "provider_max_input_tokens is outside the safe range; refusing to start"
+    exit 1
+}
+# The broker reserves the configured input ceiling plus the configured output
+# ceiling before contacting any provider. A profile budget that covers only
+# output tokens is an accepted-but-unusable configuration, so reject it at the
+# Supervisor boundary rather than failing every request later with 429.
+MIN_PROVIDER_PROFILE_DAILY_BUDGET=$((PROVIDER_MAX_TOKENS + PROVIDER_MAX_INPUT_TOKENS))
 
 validate_model_id() {
     model_label="$1"
@@ -245,10 +333,10 @@ done
         bashio::log.fatal "provider profile token budgets are outside the safe range; refusing to start"
         exit 1
     }
-[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
-    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] &&
-    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge "${PROVIDER_MAX_TOKENS}" ] || {
-        bashio::log.fatal "provider profile token budgets must cover one maximum request; refusing to start"
+[ "${PROVIDER_OPENROUTER_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] &&
+    [ "${PROVIDER_NVIDIA_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] &&
+    [ "${PROVIDER_ARK_DAILY_TOKEN_BUDGET}" -ge "${MIN_PROVIDER_PROFILE_DAILY_BUDGET}" ] || {
+        bashio::log.fatal "provider profile token budgets must cover maximum input plus output reservation; refusing to start"
         exit 1
     }
 
@@ -290,31 +378,37 @@ esac
 
 case "${PROVIDER_KEY_MODE}" in
     direct_temporary)
-        # Explicit, temporary exception for existing installations that have
-        # not migrated to the root-owned model broker yet.
-        if [ "${ENABLE_WRITE_ACTIONS}" = "true" ]; then
-            bashio::log.fatal "provider_key_mode=direct_temporary cannot be combined with write actions; migrate to broker mode first."
-            exit 1
-        fi
-        bashio::log.warning "Provider key is in direct_temporary mode; the planner can read it. Keep production writes disabled and migrate to provider_key_mode=broker."
-        export ZEROCLAW_API_KEY="${OPENROUTER_KEY}"
+        # Existing Supervisor options may retain the removed compatibility
+        # value. Migrate it in memory before any provider credential is
+        # exported; the planner must never receive a real provider key.
+        bashio::log.warning "provider_key_mode=direct_temporary is retired; forcing the root-owned broker mode."
+        PROVIDER_KEY_MODE="broker"
         ;;
     broker)
-        # The planner gets only a non-secret local credential.  The root-owned
-        # provider broker below attaches OPENROUTER_KEY to the fixed upstream.
-        export ZEROCLAW_API_KEY="local-provider-broker"
+        # The per-start local provider credential is generated immediately
+        # before the broker children are launched below. Do not retain a
+        # predictable placeholder in the entrypoint environment.
+        unset ZEROCLAW_API_KEY
         ;;
     *)
-        bashio::log.fatal "provider_key_mode must be direct_temporary or broker."
+        bashio::log.fatal "provider_key_mode must be broker."
         exit 1
         ;;
 esac
 export RUST_LOG="${LOG_LEVEL}"
 
-for var in OPENROUTER_KEY HA_TOKEN; do
-    eval val=\$$var
-    [ -z "$val" ] && { bashio::log.fatal "${var} not set!"; exit 1; }
-done
+[ "${PROVIDER_KEY_MODE}" = "broker" ] || {
+    bashio::log.fatal "provider_key_mode did not resolve to broker; refusing to start"
+    exit 1
+}
+[ -n "${OPENROUTER_KEY}" ] || {
+    bashio::log.fatal "OPENROUTER_KEY not set!"
+    exit 1
+}
+[ -n "${HA_TOKEN}" ] || {
+    bashio::log.fatal "HA_TOKEN not set!"
+    exit 1
+}
 
 # Telegram is an optional transport. When configured, it must have both a bot
 # token and a numeric approval owner; when absent, no Telegram child process is
@@ -361,6 +455,45 @@ export HA_URL
 if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -n "${LEGACY_HA_TOKEN}" ]; then
     bashio::log.warning "Using deprecated ha_token option; migrate to the Supervisor token before enabling writes."
 fi
+# Home Assistant app manifests have a supported Core-version field, but no
+# supported Supervisor-version minimum field.  Enforce the release floor at
+# runtime through the documented Supervisor API before scrubbing the token.
+# This is deliberately fail-closed: a legacy Core token, an unavailable API,
+# an invalid response, or an older Supervisor must never start the planner.
+supervisor_api_preflight() {
+    [ -n "${SUPERVISOR_TOKEN:-}" ] || {
+        bashio::log.fatal "SUPERVISOR_TOKEN is required for the Supervisor version preflight; refusing to start"
+        exit 1
+    }
+    supervisor_info_json="$(curl -fsS --connect-timeout 5 --max-time 15 \
+        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        "http://supervisor/supervisor/info")" || {
+        bashio::log.fatal "Supervisor version preflight failed; refusing to start"
+        exit 1
+    }
+    SUPERVISOR_VERSION="$(printf '%s' "${supervisor_info_json}" | jq -er '
+        if ((.result? // "ok") == "ok") then
+            (.data.version // .version)
+        else
+            empty
+        end |
+        select(type == "string" and test("^[0-9]{4}\\.[0-9]{1,2}([.][0-9]+)?$"))
+    ' 2>/dev/null)" || {
+        bashio::log.fatal "Supervisor version response is invalid; refusing to start"
+        exit 1
+    }
+    supervisor_major="${SUPERVISOR_VERSION%%.*}"
+    supervisor_minor="${SUPERVISOR_VERSION#*.}"
+    supervisor_minor="${supervisor_minor%%.*}"
+    if (( 10#${supervisor_major} < 2026 ||
+          (10#${supervisor_major} == 2026 && 10#${supervisor_minor} < 4) )); then
+        bashio::log.fatal "Supervisor ${SUPERVISOR_VERSION} is below the supported floor 2026.04.0; refusing to start"
+        exit 1
+    fi
+    bashio::log.info "Supervisor ${SUPERVISOR_VERSION} satisfies the runtime floor >= 2026.04.0"
+    unset supervisor_info_json supervisor_major supervisor_minor
+}
+supervisor_api_preflight
 # Supervisor exports SUPERVISOR_TOKEN into the app entrypoint environment. The
 # typed HA broker receives a private HA_TOKEN copy below; scrub the inherited
 # name before any unrelated provider, Telegram, or scheduler child is born.
@@ -388,7 +521,14 @@ for entry in /data/* /data/.[!.]* /data/..?*; do
         exit 1
     fi
 done
-mkdir -p "${WS}/skills/ha" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets
+if [ -L "${WS}/sessions" ] ||
+    [ -e "${WS}/sessions" ] && [ ! -d "${WS}/sessions" ]; then
+    bashio::log.fatal "Telegram session directory is not a regular directory"
+    exit 1
+fi
+mkdir -p "${WS}/skills/ha" "${WS}/sessions" /data/logs /data/pending /data/approved /data/audit /data/undo /data/tools /data/routines /data/provider /data/capability /data/approval-receipts/tickets /data/approval-receipts/outcomes
+chown zeroclaw:zeroclaw "${WS}/sessions"
+chmod 0700 "${WS}/sessions"
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
 # listener opens a log path, then keep the directory unreadable to the planner.
 find /data/logs -type l -exec rm -f {} \; 2>/dev/null || true
@@ -399,6 +539,18 @@ chown -R root:root /data/provider
 chmod 0700 /data/provider
 chown -R root:root /data/capability
 chmod 0700 /data/capability
+mkdir -p /data/capability/telegram-replies
+mkdir -p /data/capability/telegram-session-locks
+mkdir -p /data/capability/action-admissions
+mkdir -p /data/capability/telegram-callbacks
+chown -R root:root /data/capability/telegram-replies
+chmod 0700 /data/capability/telegram-replies
+chown root:root /data/capability/telegram-session-locks
+chmod 0700 /data/capability/telegram-session-locks
+chown root:root /data/capability/action-admissions
+chmod 0700 /data/capability/action-admissions
+chown root:root /data/capability/telegram-callbacks
+chmod 0700 /data/capability/telegram-callbacks
 
 # Do not let a planner-controlled symlink hide or redirect a root-owned state
 # file.  Workspace/pending/routines/tools are the only intentionally
@@ -413,33 +565,66 @@ for state_tree in "${WS}" /data/pending /data/routines /data/tools /data/approve
     fi
 done
 
-# Snapshot persistent state before rendering this release's config.toml. The
-# version marker is root-only state; the planner must not be able to rewrite it
-# and suppress or fabricate an upgrade snapshot.
-VF="${CONFIG_DIR}/.state-version"
-LEGACY_VF="${WS}/.last_version"
-if [ ! -e "$VF" ] && [ -f "$LEGACY_VF" ]; then
-    LEGACY_VERSION=$(tr -d '\r\n' < "$LEGACY_VF")
-    case "$LEGACY_VERSION" in
-        ''|*[!A-Za-z0-9._-]*)
-            bashio::log.warning "Ignoring malformed legacy version marker; treating state as fresh."
-            ;;
-        *)
-            printf '%s\n' "$LEGACY_VERSION" > "$VF"
-            ;;
-    esac
-    rm -f "$LEGACY_VF"
-fi
-if [ -e "$VF" ] && [ ! -f "$VF" ]; then
-    bashio::log.fatal "persistent version marker is not a regular file"
+# The generated action wrapper must not embed operator-supplied policy strings
+# into shell source.  Keep the canonical values in a root-owned, planner-
+# readable JSON file; the wrapper reloads this file for every invocation and
+# never trusts ambient planner environment overrides.
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+if [ -L "${POLICY_RUNTIME_FILE}" ] ||
+    [ -e "${POLICY_RUNTIME_FILE}" ] && [ ! -f "${POLICY_RUNTIME_FILE}" ]; then
+    bashio::log.fatal "policy runtime file is not a regular file"
     exit 1
 fi
-if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$VF" "${ADDON_VERSION}"; then
+POLICY_RUNTIME_TMP=$(mktemp "${CONFIG_DIR}/.policy-runtime.XXXXXX")
+if ! jq -nc \
+    --arg mode "${POLICY_MODE}" \
+    --arg quiet_confirm "${POLICY_QUIET_CONFIRM}" \
+    --arg quiet_hours "${QUIET_HOURS}" \
+    --arg home_location "${HOME_LOCATION}" \
+    --arg extra_deny "${POLICY_EXTRA_DENY}" \
+    --arg extra_confirm "${POLICY_EXTRA_CONFIRM}" \
+    --arg extra_allow "${POLICY_EXTRA_ALLOW}" \
+    --argjson bulk_threshold "${POLICY_BULK_THRESHOLD}" \
+    --argjson climate_delta "${POLICY_CLIMATE_DELTA}" \
+    '{policy_mode:$mode,policy_quiet_confirm:$quiet_confirm,
+      policy_bulk_threshold:$bulk_threshold,policy_climate_delta:$climate_delta,
+      quiet_hours:$quiet_hours,home_location:$home_location,
+      extra_deny:$extra_deny,
+      extra_confirm:$extra_confirm,extra_allow:$extra_allow,
+      require_approval:true}' > "${POLICY_RUNTIME_TMP}"; then
+    rm -f "${POLICY_RUNTIME_TMP}"
+    bashio::log.fatal "could not render the root-owned policy runtime file"
+    exit 1
+fi
+chown root:zeroclaw "${POLICY_RUNTIME_TMP}"
+chmod 0640 "${POLICY_RUNTIME_TMP}"
+mv -f "${POLICY_RUNTIME_TMP}" "${POLICY_RUNTIME_FILE}"
+
+# Snapshot persistent state before rendering this release's config.toml. The
+# integer schema marker is root-only state; the planner must not be able to
+# rewrite it and suppress or fabricate an upgrade snapshot. Legacy semver
+# markers are inspected and preserved inside the migration snapshot by the
+# migration helper, then removed only after the new schema marker is committed.
+SCHEMA_FILE="${CONFIG_DIR}/.state-schema"
+if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$SCHEMA_FILE" "${STATE_SCHEMA}"; then
     bashio::log.fatal "State migration failed; refusing to start without a rollback snapshot."
     exit 1
 fi
-chown root:root "$VF"
-chmod 0600 "$VF"
+chown root:root "$SCHEMA_FILE"
+chmod 0600 "$SCHEMA_FILE"
+# Reserve the old semver marker name with a root-owned tombstone.  /data is
+# deliberately group-writable for the planner's narrow runtime needs, so an
+# absent legacy path could otherwise be recreated by the planner and create
+# ambiguity on the next restart.  state-migrate recognizes only this exact
+# root-owned tombstone as inactive legacy state.
+LEGACY_VERSION_TOMBSTONE="${CONFIG_DIR}/.state-version"
+if [ ! -e "$LEGACY_VERSION_TOMBSTONE" ]; then
+    tombstone_tmp="${LEGACY_VERSION_TOMBSTONE}.tmp.$$"
+    printf 'schema-tombstone-%s\n' "$STATE_SCHEMA" > "$tombstone_tmp"
+    chown root:root "$tombstone_tmp"
+    chmod 0600 "$tombstone_tmp"
+    mv -f "$tombstone_tmp" "$LEGACY_VERSION_TOMBSTONE"
+fi
 
 # ==============================================================
 # Typed capability broker and read-only HA helpers
@@ -448,8 +633,64 @@ install -m 0755 /opt/zeroclaw/lib/capability-broker-handler.sh /usr/local/bin/ha
 install -m 0755 /opt/zeroclaw/lib/ha-capability.sh /usr/local/bin/ha-capability
 install -m 0755 /opt/zeroclaw/lib/capability-broker-entrypoint.sh /usr/local/bin/ha-broker-entrypoint
 
-# Broker provider credentials when requested.  The direct_temporary mode is
-# retained only as an explicit migration exception for existing installs.
+# BusyBox nc provides the small local transport used by the typed brokers.
+# Bind it to loopback and require a fresh, per-start client credential as a
+# second boundary so another process in the container cannot invoke a root
+# broker merely by discovering its port. The planner is allowed to read only
+# these non-provider client credentials; the root broker retains the matching
+# value in its private environment.
+BROKER_RUNTIME_DIR="/run/zeroclaw"
+mkdir -p "${BROKER_RUNTIME_DIR}"
+if [ -L "${BROKER_RUNTIME_DIR}" ] || [ ! -d "${BROKER_RUNTIME_DIR}" ]; then
+    bashio::log.fatal "broker runtime directory is not a regular directory"
+    exit 1
+fi
+chown root:zeroclaw "${BROKER_RUNTIME_DIR}"
+chmod 0710 "${BROKER_RUNTIME_DIR}"
+
+create_broker_client_auth() {
+    auth_name="$1"
+    auth_path="${BROKER_RUNTIME_DIR}/${auth_name}"
+    [ ! -L "${auth_path}" ] || {
+        bashio::log.fatal "broker auth path is a symlink: ${auth_path}"
+        exit 1
+    }
+    if [ -e "${auth_path}" ] && [ ! -f "${auth_path}" ]; then
+        bashio::log.fatal "broker auth path is not a regular file: ${auth_path}"
+        exit 1
+    fi
+    auth_tmp=$(mktemp "${BROKER_RUNTIME_DIR}/.${auth_name}.XXXXXX") || {
+        bashio::log.fatal "could not create broker auth file"
+        exit 1
+    }
+    auth_value=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+    case "${auth_value}" in
+        [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+        *) rm -f "${auth_tmp}"; bashio::log.fatal "could not generate broker auth credential"; exit 1 ;;
+    esac
+    printf '%s\n' "${auth_value}" > "${auth_tmp}"
+    chown root:zeroclaw "${auth_tmp}"
+    chmod 0640 "${auth_tmp}"
+    mv -f "${auth_tmp}" "${auth_path}"
+    printf '%s' "${auth_value}"
+}
+
+PROVIDER_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-client-auth"
+CAPABILITY_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/capability-client-auth"
+TELEGRAM_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-client-auth"
+PROVIDER_CLIENT_AUTH_TOKEN="$(create_broker_client_auth provider-client-auth)"
+CAPABILITY_CLIENT_AUTH_TOKEN="$(create_broker_client_auth capability-client-auth)"
+TELEGRAM_CLIENT_AUTH_TOKEN="$(create_broker_client_auth telegram-client-auth)"
+if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
+    # Native ZeroClaw sends ZEROCLAW_API_KEY as the Authorization bearer on
+    # its OpenAI-compatible provider request. In broker mode that value is a
+    # local client credential, never a provider secret.
+    export ZEROCLAW_API_KEY="${PROVIDER_CLIENT_AUTH_TOKEN}"
+fi
+
+# Broker provider credentials. Provider secrets never enter the planner
+# environment, including when an existing options object still contains the
+# retired direct_temporary value.
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     install -m 0755 /opt/zeroclaw/lib/provider-broker-handler.sh /usr/local/bin/provider-broker-handler
     install -m 0755 /opt/zeroclaw/lib/provider-broker-entrypoint.sh /usr/local/bin/provider-broker-entrypoint
@@ -466,6 +707,7 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     (
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             LEGACY_HA_TOKEN ZEROCLAW_API_KEY
+        export PROVIDER_CLIENT_AUTH_TOKEN
         # The endpoint remains root-controlled.  The test-only override lets
         # the real arm64 planner binary exercise this broker against a local
         # deterministic upstream without ever exposing a provider key to it.
@@ -500,21 +742,34 @@ ${COMPLEX_MODEL}|ark|${ARK_PRO_MODEL}|paid"
         if [ -n "${OPENROUTER_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_MODEL}|free"
         fi
         if [ -n "${OPENROUTER_FREE_ROUTER_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|openrouter|${OPENROUTER_FREE_ROUTER_MODEL}|free"
         fi
         if [ "${NVIDIA_FALLBACK_ENABLED}" = "true" ] && [ -n "${NVIDIA_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|nvidia|${NVIDIA_FREE_MODEL}|free"
         fi
         if [ "${ARK_FALLBACK_ENABLED}" = "true" ] && [ -n "${ARK_FREE_MODEL}" ]; then
             PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
 ${DEFAULT_MODEL}|ark|${ARK_FREE_MODEL}|free"
+            PROVIDER_ROUTE_SPEC="${PROVIDER_ROUTE_SPEC}
+${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
         fi
         export PROVIDER_FALLBACK_ENABLED PROVIDER_FREE_FALLBACK_ENABLED
-        export PROVIDER_MAX_TOKENS
+        export PROVIDER_MAX_TOKENS PROVIDER_MAX_INPUT_TOKENS
+        export PROVIDER_MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_HOUR}"
+        export PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET}"
+        export PROVIDER_DAILY_COST_LIMIT_MICROS="${DAILY_COST_LIMIT_MICROS}"
+        export PROVIDER_MONTHLY_COST_LIMIT_MICROS="${MONTHLY_COST_LIMIT_MICROS}"
+        export PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS="${PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS}"
         # Reuse the legacy quota path so the broker can atomically migrate the
         # previous hourly/day counters into the durable reservation ledger.
         export PROVIDER_LEDGER_FILE="/data/provider/quota.json"
@@ -541,11 +796,12 @@ CAPABILITY_PORT=42618
     unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-    export HA_TOKEN HA_URL
+    export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
     export CAPABILITY_QUOTA_FILE="/data/capability/quota.json"
     export CAPABILITY_QUOTA_LOCK="/data/capability/.quota.lock"
+    export ZEROCLAW_APPROVAL_OUTCOME_DIR="/data/approval-receipts/outcomes"
     export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA POLICY_REQUIRE_APPROVAL
     export QUIET_HOURS
     export EXTRA_DENY="${POLICY_EXTRA_DENY}"
@@ -559,6 +815,11 @@ CAPABILITY_PORT=42618
     done
 ) &
 CAPABILITY_BROKER_PID=$!
+# The background subshell has its private copy for the typed broker.  Erase
+# the parent-shell copies immediately after the fork so the entrypoint itself
+# cannot retain or accidentally pass the Supervisor credential to later
+# helpers.
+unset HA_TOKEN LEGACY_HA_TOKEN
 
 cat > /usr/local/bin/ha-lights-on << 'SCRIPT'
 #!/bin/sh
@@ -642,15 +903,35 @@ install -m 0755 /opt/zeroclaw/lib/state-restore.sh /usr/local/bin/state-restore
 # Telegram credentials are held in a root-only runtime file and consumed by a
 # root-owned broker/watcher. Agent-side helpers only send typed local requests.
 mkdir -p /run/zeroclaw
-chmod 0700 /run/zeroclaw
+chown root:zeroclaw /run/zeroclaw
+chmod 0710 /run/zeroclaw
 TG_USERS_FILE="/run/zeroclaw/telegram-users"
 echo "${TELEGRAM_USERS}" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$' > "${TG_USERS_FILE}" || true
 chown root:root "${TG_USERS_FILE}"
 chmod 0600 "${TG_USERS_FILE}"
-TELEGRAM_OFFSET_FILE="/run/zeroclaw/telegram-offset"
-# The old offset was planner-writable.  Reset it instead of trusting a
-# planner-controlled cursor; Telegram updates are harmlessly revalidated.
-printf '0\n' > "${TELEGRAM_OFFSET_FILE}"
+TELEGRAM_OFFSET_FILE="/data/capability/telegram-offset"
+LEGACY_TELEGRAM_OFFSET_FILE="/run/zeroclaw/telegram-offset"
+# The Telegram cursor is broker state, not ephemeral runtime state.  Preserve
+# a numeric cursor from the pre-3.1.4 runtime when it is available.  A fresh
+# configured bot gets a -1 sentinel; the watcher confirms and discards the
+# currently queued historical updates before it begins normal polling.  This
+# avoids replaying stale commands after an app replacement while refusing to
+# guess a cursor that was never durably recorded.
+if [ -L "${TELEGRAM_OFFSET_FILE}" ] || [ -e "${TELEGRAM_OFFSET_FILE}" ] && [ ! -f "${TELEGRAM_OFFSET_FILE}" ]; then
+    bashio::log.fatal "Telegram cursor is not a regular persistent file"
+    exit 1
+fi
+if [ ! -e "${TELEGRAM_OFFSET_FILE}" ]; then
+    if [ -f "${LEGACY_TELEGRAM_OFFSET_FILE}" ] &&
+        grep -Eq '^[0-9]+$' "${LEGACY_TELEGRAM_OFFSET_FILE}"; then
+        cp "${LEGACY_TELEGRAM_OFFSET_FILE}" "${TELEGRAM_OFFSET_FILE}"
+    elif [ "${TELEGRAM_ENABLED}" = "true" ]; then
+        printf '%s\n' '-1' > "${TELEGRAM_OFFSET_FILE}"
+    else
+        printf '%s\n' '0' > "${TELEGRAM_OFFSET_FILE}"
+    fi
+fi
+rm -f "${LEGACY_TELEGRAM_OFFSET_FILE}"
 rm -f /data/.tg_users /data/.tg_offset
 chown root:root "${TELEGRAM_OFFSET_FILE}"
 chmod 0600 "${TELEGRAM_OFFSET_FILE}"
@@ -658,16 +939,38 @@ TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
 printf '%s' "${TELEGRAM_TOKEN}" > "${TELEGRAM_TOKEN_FILE}"
 chown root:root "${TELEGRAM_TOKEN_FILE}"
 chmod 0600 "${TELEGRAM_TOKEN_FILE}"
+TELEGRAM_CONFLICT_FILE="/data/capability/telegram-conflict"
+TELEGRAM_CONFLICT_TOKEN_FILE="/data/capability/telegram-conflict.token"
+if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    TELEGRAM_TOKEN_HASH=$(sha256sum "${TELEGRAM_TOKEN_FILE}" | cut -d' ' -f1)
+    if [ -e "${TELEGRAM_CONFLICT_FILE}" ] || [ -L "${TELEGRAM_CONFLICT_FILE}" ]; then
+        if [ -L "${TELEGRAM_CONFLICT_FILE}" ] || [ ! -f "${TELEGRAM_CONFLICT_FILE}" ] ||
+            [ ! -f "${TELEGRAM_CONFLICT_TOKEN_FILE}" ]; then
+            bashio::log.fatal "Telegram conflict state is malformed; refusing to start"
+            exit 1
+        fi
+        previous_conflict_token=$(cat "${TELEGRAM_CONFLICT_TOKEN_FILE}")
+        if [ "$previous_conflict_token" = "$TELEGRAM_TOKEN_HASH" ]; then
+            bashio::log.fatal "Telegram polling conflict is latched; stop the other poller and remove ${TELEGRAM_CONFLICT_FILE} before restarting"
+            exit 1
+        fi
+        rm -f "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+    else
+        rm -f "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+    fi
+fi
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-handler.sh /usr/local/bin/tg-broker-handler
 install -m 0755 /opt/zeroclaw/lib/telegram-capability.sh /usr/local/bin/tg-capability
 install -m 0755 /opt/zeroclaw/lib/telegram-broker-entrypoint.sh /usr/local/bin/tg-broker-entrypoint
+install -m 0755 /opt/zeroclaw/lib/telegram-render.sh /usr/local/bin/telegram-render
+install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/telegram-legacy-action
 TELEGRAM_PORT=42619
-if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
             ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-        export TELEGRAM_TOKEN_FILE
+        export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN
         export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
         while true; do
             if ! /bin/busybox nc -l -p "${TELEGRAM_PORT}" -s 127.0.0.1 \
@@ -702,7 +1005,7 @@ SCRIPT
 # Long-polls ALL updates (messages + callback_query) because Telegram
 # permits only one getUpdates client per bot. Replaces ZeroClaw's
 # built-in Telegram channel entirely:
-#   • .message      → validate sender, forward text to gateway /webhook,
+#   • .message      → validate sender, run the full single-message agent,
 #                     send the agent's response back via sendMessage
 #   • .callback_query → validate sender, apply the ticket directly,
 #                     edit message in place, ping agent for audit
@@ -719,12 +1022,96 @@ unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
     OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
     ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
-OFFSET_F="/run/zeroclaw/telegram-offset"
+OFFSET_F="${TELEGRAM_OFFSET_FILE}"
+REPLY_CACHE_DIR="/data/capability/telegram-replies"
+CALLBACK_CACHE_DIR="/data/capability/telegram-callbacks"
+APPROVAL_OUTCOME_DIR="/data/approval-receipts/outcomes"
 USERS_F="${TG_USERS_FILE}"
 GW="${GW}"
+AGENT_BIN="/usr/local/bin/zeroclaw"
+AGENT_CONFIG_DIR="${CONFIG_DIR}"
+AGENT_WORKSPACE="${WS}"
+AGENT_SESSION_LOCK_DIR="/data/capability/telegram-session-locks"
 APPROVAL_USER="${FIRST_USER}"
 APPROVAL_CHAT="${FIRST_USER}"
-[ -f "\$OFFSET_F" ] || echo 0 > "\$OFFSET_F"
+[ -n "\$TOKEN" ] || exit 1
+. /opt/zeroclaw/lib/telegram-session.sh
+. /opt/zeroclaw/lib/telegram-agent-turn.sh
+[ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
+if [ ! -d "\$REPLY_CACHE_DIR" ]; then
+    mkdir -m 0700 "\$REPLY_CACHE_DIR" 2>/dev/null || exit 1
+fi
+[ ! -L "\$CALLBACK_CACHE_DIR" ] || exit 1
+if [ ! -d "\$CALLBACK_CACHE_DIR" ]; then
+    mkdir -m 0700 "\$CALLBACK_CACHE_DIR" 2>/dev/null || exit 1
+fi
+[ ! -L "\$OFFSET_F" ] && [ -f "\$OFFSET_F" ] || exit 1
+
+telegram_response_ok() {
+    response="\$1"
+    [ -n "\$response" ] || return 1
+    # Never log or relay a Telegram response that contains the bot token.
+    if printf '%s' "\$response" | grep -F -- "\$TOKEN" >/dev/null 2>&1; then
+        return 1
+    fi
+    printf '%s' "\$response" | jq -e '.ok == true' >/dev/null 2>&1
+}
+
+telegram_polling_conflict() {
+    response="\$1"
+    printf '%s' "\$response" | jq -e '.ok == false and .error_code == 409' >/dev/null 2>&1
+}
+
+telegram_call_ok() {
+    response=\$(telegram_curl "\$@" 2>/dev/null) || return 1
+    telegram_response_ok "\$response"
+}
+
+commit_offset() {
+    next_offset="\$1"
+    case "\$next_offset" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    offset_tmp="\${OFFSET_F}.tmp.\$\$"
+    if ! printf '%s\n' "\$next_offset" > "\$offset_tmp"; then
+        rm -f "\$offset_tmp"
+        return 1
+    fi
+    chmod 0600 "\$offset_tmp"
+    if ! mv -f "\$offset_tmp" "\$OFFSET_F"; then
+        rm -f "\$offset_tmp"
+        return 1
+    fi
+    sync
+}
+
+bootstrap_offset() {
+    # Telegram's negative offset confirms all older queued updates.  Do this
+    # exactly once on a fresh persistent state file, then enter normal
+    # positive-offset polling.  If the API is unavailable, leave -1 intact so
+    # no update is silently acknowledged.
+    offset_state=\$(cat "\$OFFSET_F" 2>/dev/null || printf '%s' invalid)
+    [ "\$offset_state" = "-1" ] || return 0
+    bootstrap_response=\$(telegram_curl getUpdates -s --max-time 30 --get \\
+        --data-urlencode 'offset=-1' \\
+        --data-urlencode 'timeout=0' \\
+        --data-urlencode 'allowed_updates=["message","callback_query"]' \\
+        2>/dev/null) || return 1
+    if ! telegram_response_ok "\$bootstrap_response"; then
+        if telegram_polling_conflict "\$bootstrap_response"; then
+            printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
+            exit 42
+        fi
+        return 1
+    fi
+    printf '%s' "\$bootstrap_response" | jq -e '.result | type == "array"' >/dev/null 2>&1 || return 1
+    latest=\$(printf '%s' "\$bootstrap_response" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    case "\$latest" in
+        ''|null) commit_offset 0 ;;
+        *[!0-9]*) return 1 ;;
+        *) commit_offset "\$((latest + 1))" ;;
+    esac
+}
 
 # Keep the Telegram bot token in a private curl config file. The URL is never
 # passed as a child-process argument, which prevents token leakage through ps
@@ -735,7 +1122,7 @@ telegram_curl() {
     config_file=\$(mktemp /run/zeroclaw/.telegram-curl.XXXXXX) || return 1
     chmod 0600 "\$config_file"
     printf 'url = "https://api.telegram.org/bot%s/%s"\n' "\$TOKEN" "\$method" > "\$config_file"
-    curl --config "\$config_file" "\$@"
+    curl --connect-timeout 5 --max-time 35 --config "\$config_file" "\$@"
     rc=\$?
     rm -f "\$config_file"
     return "\$rc"
@@ -743,25 +1130,26 @@ telegram_curl() {
 
 answer_cb() {
     cb_id="\$1"; text="\$2"
-    telegram_curl answerCallbackQuery -s -X POST \\
+    telegram_call_ok answerCallbackQuery -s -X POST \\
         --data-urlencode "callback_query_id=\$cb_id" \\
-        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+        --data-urlencode "text=\$text"
 }
 
 edit_msg() {
     chat_id="\$1"; msg_id="\$2"; new_text="\$3"
+    [ -n "\$msg_id" ] || return 1
     # Strip the inline keyboard by omitting reply_markup on edit.
-    telegram_curl editMessageText -s -X POST \\
+    telegram_call_ok editMessageText -s -X POST \\
         -H "Content-Type: application/json" \\
         -d "\$(jq -nc --arg c "\$chat_id" --argjson m "\$msg_id" --arg t "\$new_text" \\
-              '{chat_id:\$c, message_id:\$m, text:\$t}')" >/dev/null 2>&1 || true
+              '{chat_id:\$c, message_id:\$m, text:\$t}')"
 }
 
 send_msg() {
     chat_id="\$1"; text="\$2"
-    telegram_curl sendMessage -s -X POST \\
+    telegram_call_ok sendMessage -s -X POST \\
         --data-urlencode "chat_id=\$chat_id" \\
-        --data-urlencode "text=\$text" >/dev/null 2>&1 || true
+        --data-urlencode "text=\$text"
 }
 
 send_typing() {
@@ -771,10 +1159,145 @@ send_typing() {
         --data-urlencode "action=typing" >/dev/null 2>&1 || true
 }
 
+cache_reply() {
+    update_id="\$1"; reply="\$2"
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ ! -L "\$REPLY_CACHE_DIR" ] && [ -d "\$REPLY_CACHE_DIR" ] || return 1
+    cache_tmp="\${REPLY_CACHE_DIR}/.\${update_id}.tmp.\$\$"
+    if ! printf '%s' "\$reply" > "\$cache_tmp"; then
+        rm -f "\$cache_tmp"
+        return 1
+    fi
+    chmod 0600 "\$cache_tmp"
+    mv -f "\$cache_tmp" "\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    sync
+}
+
+send_and_cache() {
+    update_id="\$1"; chat_id="\$2"; reply="\$3"
+    cache_reply "\$update_id" "\$reply" || return 1
+    send_msg "\$chat_id" "\$reply"
+}
+
+send_cached_reply() {
+    update_id="\$1"; chat_id="\$2"
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
+    cached_reply=\$(cat "\$cached_file") || return 1
+    if sanitized_cached=\$(printf '%s' "\$cached_reply" | /usr/local/bin/telegram-render 2>/dev/null); then
+        cached_reply="\$sanitized_cached"
+    else
+        printf '%s\n' 'blocked internal tool syntax in cached Telegram reply; replacing it with a safe status message' >>/data/logs/telegram-broker.log
+        cached_reply="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
+        cache_reply "\$update_id" "\$cached_reply" || true
+    fi
+    send_msg "\$chat_id" "\$cached_reply"
+}
+
+cache_callback_result() {
+    update_id="\$1"; chat_id="\$2"; message_id="\$3"; answer="\$4"; edit="\$5"
+    case "\$update_id:\$message_id" in
+        *[!0-9:]*|:*) return 1 ;;
+    esac
+    [ ! -L "\$CALLBACK_CACHE_DIR" ] && [ -d "\$CALLBACK_CACHE_DIR" ] || return 1
+    cache_tmp="\${CALLBACK_CACHE_DIR}/.\${update_id}.tmp.\$\$"
+    if ! jq -nc --arg chat "\$chat_id" --argjson message "\$message_id" \
+        --arg answer "\$answer" --arg edit "\$edit" \
+        '{chat_id:\$chat,message_id:\$message,answer:\$answer,edit:\$edit}' > "\$cache_tmp"; then
+        rm -f "\$cache_tmp"
+        return 1
+    fi
+    chmod 0600 "\$cache_tmp"
+    mv -f "\$cache_tmp" "\${CALLBACK_CACHE_DIR}/\${update_id}.json"
+    sync
+}
+
+replay_callback_result() {
+    update_id="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    cached_file="\${CALLBACK_CACHE_DIR}/\${update_id}.json"
+    [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
+    cached_chat=\$(jq -r '.chat_id // empty' "\$cached_file" 2>/dev/null) || return 1
+    cached_message=\$(jq -r '.message_id // empty' "\$cached_file" 2>/dev/null) || return 1
+    [ "\$cached_chat" = "\$chat_id" ] && [ "\$cached_message" = "\$message_id" ] || return 1
+    cached_answer=\$(jq -r '.answer // empty' "\$cached_file" 2>/dev/null) || return 1
+    cached_edit=\$(jq -r '.edit // empty' "\$cached_file" 2>/dev/null) || return 1
+    answer_cb "\$cb_id" "\$cached_answer" || return 1
+    [ -z "\$cached_edit" ] || edit_msg "\$chat_id" "\$message_id" "\$cached_edit"
+}
+
+canonical_ticket_summary() {
+    summary_file="\$1"
+    summary_service=\$(jq -r '.service // empty' "\$summary_file" 2>/dev/null) || return 1
+    summary_payload=\$(jq -cS '.payload' "\$summary_file" 2>/dev/null) || return 1
+    [ -n "\$summary_service" ] && [ -n "\$summary_payload" ] || return 1
+    printf '%s | %s' "\$summary_service" "\$summary_payload"
+}
+
+approval_outcome_text() {
+    outcome_file="\$1"
+    [ ! -L "\$outcome_file" ] && [ -f "\$outcome_file" ] || return 1
+    jq -e --arg actor "\$APPROVAL_USER" --arg chat "\$APPROVAL_CHAT" \
+        '.state == "applied" and .actor_user_id == \$actor and .chat_id == \$chat and
+         (.service | type == "string") and (.payload | type == "object")' \
+        "\$outcome_file" >/dev/null 2>&1 || return 1
+    outcome_summary=\$(canonical_ticket_summary "\$outcome_file") || return 1
+    outcome_result=\$(jq -c '.result // null' "\$outcome_file" 2>/dev/null) || return 1
+    printf '✅ Approved and applied: %s\\nHome Assistant accepted the exact service call.\\nResult: %s' \
+        "\$outcome_summary" "\$outcome_result" | cut -c1-4000
+}
+
+replay_approval_message() {
+    short="\$1"; update_id="\$2"; chat_id="\$3"
+    outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
+    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    send_and_cache "\$update_id" "\$chat_id" "\$outcome_reply"
+}
+
+replay_approval_outcome() {
+    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
+    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    answer_cb "\$cb_id" "Applied." || return 1
+    edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
+    cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "Applied." "\$outcome_reply"
+}
+
+approval_marker_ready() {
+    short="\$1"
+    marker="/data/approved/\${short}.marker"
+    [ -f "\$marker" ] && [ ! -L "\$marker" ] || return 1
+    jq -e '.state == "approved_audited"' "\$marker" >/dev/null 2>&1
+}
+
+run_agent_turn() {
+    run_telegram_agent_turn "\$@"
+}
+
 is_allowed_user() {
     uid="\$1"
     [ ! -f "\$USERS_F" ] && return 1
     grep -Fx "\$uid" "\$USERS_F" >/dev/null 2>&1
+}
+
+valid_positive_id() {
+    case "\$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_chat_id() {
+    case "\$1" in
+        ''|*[!0-9-]*) return 1 ;;
+        -) return 1 ;;
+        -*) valid_positive_id "\${1#-}" ;;
+        *) valid_positive_id "\$1" ;;
+    esac
 }
 
 approval_id() {
@@ -805,10 +1328,25 @@ apply_approved_ticket() {
 
 # Forward an inbound text message to the gateway and relay the response.
 handle_message() {
-    chat_id="\$1"; from_id="\$2"; text="\$3"
-    if ! is_allowed_user "\$from_id"; then
-        send_msg "\$chat_id" "Not authorized."
+    chat_id="\$1"; from_id="\$2"; text="\$3"; update_id="\$4"
+    valid_chat_id "\$chat_id" || return 1
+    valid_positive_id "\$from_id" || return 1
+    case "\$update_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    # Approval replies are also cached before notification.  If Telegram
+    # rejects the first delivery after a successful claim, replay sends the
+    # same truthful outcome instead of reporting an unrelated expired ticket.
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    if [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ]; then
+        send_cached_reply "\$update_id" "\$chat_id"
         return
+    fi
+
+    if ! is_allowed_user "\$from_id"; then
+        if ! send_and_cache "\$update_id" "\$chat_id" "Not authorized."; then return 1; fi
+        return 0
     fi
     [ -z "\$text" ] && return
 
@@ -817,46 +1355,69 @@ handle_message() {
     if [ -n "\$APPROVE_ID" ] || [ -n "\$REJECT_ID" ]; then
         SHORT="\${APPROVE_ID:-\$REJECT_ID}"
         if [ "\$from_id" != "\$APPROVAL_USER" ] || [ "\$chat_id" != "\$APPROVAL_CHAT" ]; then
-            send_msg "\$chat_id" "This approval belongs to the configured approval owner."
-            return
+            if ! send_and_cache "\$update_id" "\$chat_id" "This approval belongs to the configured approval owner."; then return 1; fi
+            return 0
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
         if [ ! -f "\$TICKET" ]; then
-            send_msg "\$chat_id" "Ticket \${SHORT} is expired or already actioned."
-            return
+            if [ -n "\$APPROVE_ID" ] && replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+                return 0
+            fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
+            return 0
         fi
-        SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        SUMMARY=\$(canonical_ticket_summary "\$TICKET") || return 1
         if [ -n "\$APPROVE_ID" ]; then
-            if ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
+            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+                return 0
+            fi
+            # A watcher restart can occur after the durable approved_audited
+            # marker but before HA execution. Resume that approval instead of
+            # treating the redelivery as a duplicate and abandoning it.
+            if approval_marker_ready "\$SHORT" || \
+                ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
                 if OUT=\$(apply_approved_ticket "\$SHORT" "\$from_id" "\$chat_id"); then
-                    send_msg "\$chat_id" "✅ Approved and applied: \${SUMMARY}
+                    if ! send_and_cache "\$update_id" "\$chat_id" "✅ Approved and applied: \${SUMMARY}
 \${OUT}"
+                    then return 1; fi
                 else
-                    send_msg "\$chat_id" "⚠️ Approved, but execution failed; the claim remains for recovery.
+                    if ! send_and_cache "\$update_id" "\$chat_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
 \${OUT}"
+                    then return 1; fi
                 fi
             else
-                send_msg "\$chat_id" "Approval for \${SHORT} could not be applied."
+                if ! send_and_cache "\$update_id" "\$chat_id" "Approval for \${SHORT} could not be applied."; then return 1; fi
             fi
         elif ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
-            send_msg "\$chat_id" "❌ Rejected: \${SUMMARY}"
+            if ! send_and_cache "\$update_id" "\$chat_id" "❌ Rejected: \${SUMMARY}"; then return 1; fi
         else
-            send_msg "\$chat_id" "Rejection for \${SHORT} could not be applied."
+            if ! send_and_cache "\$update_id" "\$chat_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
         fi
-        return
+        return 0
     fi
 
     # v3.1.3: correction-detection branch.
     # If the previous turn produced an outcome AND the user's reply opens with
     # a correction marker, fire a synthetic learning prompt to the gateway in
     # the background. The agent will produce a one-line lesson and persist it
-    # via zc.lesson_add. We only fire when /data/.last_outcome exists, so a
+    # via zc.lesson_add. We only fire when the root-owned outcome receipt exists, so a
     # bare "no" in response to a question (no outcome stored) won't trigger.
     # v3.1.3.1: regex widened to catch "they're not on", "didn't work",
     # "still off", "isn't", "nothing happened" — common real corrections that
     # don't open with the "no/wrong" markers.
-    LAST_OUTCOME_FILE="/data/.last_outcome"
-    if [ -f "\$LAST_OUTCOME_FILE" ]; then
+    LAST_OUTCOME_FILE="/data/capability/last-outcome.json"
+    if [ "${ENABLE_LEARNING}" != "true" ]; then
+        LAST_OUTCOME_FILE="/data/capability/.learning-disabled"
+    fi
+    if [ "${ENABLE_LEARNING}" = "true" ] && [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
+        OUTCOME_NOW=\$(date -u +%s)
+        if ! jq -e --argjson now "\$OUTCOME_NOW" \
+            '(.expires_at | type == "number" and floor == . and . >= \$now)' "\$LAST_OUTCOME_FILE" >/dev/null 2>&1; then
+            rm -f "\$LAST_OUTCOME_FILE"
+        fi
+    fi
+    CORRECTION_PROMPT=""
+    if [ ! -L "\$LAST_OUTCOME_FILE" ] && [ -f "\$LAST_OUTCOME_FILE" ]; then
         # Lowercase + trim leading whitespace for matching only
         tlc=\$(printf '%s' "\$text" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')
         case "\$tlc" in
@@ -868,31 +1429,76 @@ handle_message() {
             "nothing happened"*|"nothing changed"*|"that didn't"*|"that didnt"*|\
             "doesn't work"*|"doesnt work"*|"not working"*|"didn't work"*|"didnt work"*|\
             لا|"لا "*|"لا،"*|"لا,"*|غلط*|"ما اشتغل"*|"ماشتغل"*|"مو شغال"*|"لسه"*|"لسة"*)
-                LAST=\$(cat "\$LAST_OUTCOME_FILE" 2>/dev/null)
+                LAST=\$(jq -r '.text // empty' "\$LAST_OUTCOME_FILE" 2>/dev/null)
                 rm -f "\$LAST_OUTCOME_FILE"
                 if [ -n "\$LAST" ]; then
-                    CP="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then call zc.lesson_add with it. Do not message the user — this is a silent learning hook."
-                    CBODY=\$(jq -nc --arg m "\$CP" '{message:\$m}')
-                    (curl -s --max-time 60 -X POST "\${GW}/webhook" \\
-                        -H "Content-Type: application/json" -d "\$CBODY" >/dev/null 2>&1) &
+                    # Queue the learning prompt for after the foreground turn.
+                    # It uses the same durable session file, so running it in the
+                    # background here races the user turn for the session lock.
+                    CORRECTION_PROMPT="User correction received. Previous turn outcome was: \${LAST}. User just said: \${text}. Generate ONE lesson line ≤80 chars that would prevent this mistake next time, then use the native shell tool with zc-lesson-add. Do not message the user — this is a silent learning hook."
                 fi
                 ;;
         esac
+        rm -f "\$LAST_OUTCOME_FILE"
     fi
 
     send_typing "\$chat_id"
-    BODY=\$(jq -nc --arg m "\$text" '{message:\$m}')
-    RESP=\$(curl -s --max-time 60 -X POST "\${GW}/webhook" \\
-        -H "Content-Type: application/json" -d "\$BODY" 2>/dev/null)
-    REPLY=\$(echo "\$RESP" | jq -r '.response // .reply // .text // empty' 2>/dev/null)
-    [ -z "\$REPLY" ] && REPLY="(no response)"
+    REPLY=\$(run_agent_turn "\$chat_id" "\$text" \\
+        2>>/data/logs/telegram-broker.log)
+    AGENT_STATUS=\$?
+    # A malformed provider-side tool call is an internal protocol failure, not
+    # a user-facing reply. Do not leak commands such as a fenced tool_call into
+    # Telegram, and do not imply that an action ran when it was not dispatched.
+    if [ "\$AGENT_STATUS" -eq 0 ] && [ -n "\$REPLY" ] && \\
+        SANITIZED=\$(printf '%s' "\$REPLY" | /usr/local/bin/telegram-render 2>/dev/null); then
+        REPLY="\$SANITIZED"
+    else
+        printf '%s\n' "blocked internal tool syntax in Telegram reply or Telegram agent failure (status=\$AGENT_STATUS)" >>/data/logs/telegram-broker.log
+        LEGACY_ACTION_REPLY=""
+        # Older/non-tool-capable models sometimes return the exact guarded
+        # action spelling as plain text. Recover only that bounded form; the
+        # helper validates it and sends it through the root broker.
+        if [ "\$AGENT_STATUS" -eq 0 ] && \
+            LEGACY_ACTION_REPLY=\$(/usr/local/bin/telegram-legacy-action "\$REPLY" 2>>/data/logs/telegram-broker.log); then
+            printf '%s\n' 'recovered one-line guarded action through the typed broker' >>/data/logs/telegram-broker.log
+            REPLY="\$LEGACY_ACTION_REPLY"
+        elif [ "\$AGENT_STATUS" -eq 0 ]; then
+            # Do not launch a second model turn here. A recovery turn can race
+            # the chat session and can repeat a tool request after the first
+            # turn has already reached a broker. The bounded legacy parser above
+            # is the only text-to-action compatibility path; all other malformed
+            # output gets a truthful, non-retrying response.
+            REPLY="I couldn't safely complete that request because the model returned an invalid tool request. I did not retry it. Please check Home Assistant history before retrying."
+        else
+            REPLY="I couldn't complete that request. I did not retry it. Please check Home Assistant history before retrying."
+        fi
+    fi
+    [ -z "\$REPLY" ] && REPLY="I couldn't complete that request. I did not retry it. Please check Home Assistant history before retrying."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
+    cache_reply "\$update_id" "\$REPLY" || return 1
     send_msg "\$chat_id" "\$REPLY"
+    if [ -n "\${CORRECTION_PROMPT:-}" ]; then
+        # The foreground turn has released the per-chat lock before this hook.
+        run_agent_turn "\$chat_id" "\$CORRECTION_PROMPT" \\
+            >/dev/null 2>>/data/logs/telegram-broker.log || true
+    fi
 }
 
 while true; do
-    OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || echo 0)
+    if ! bootstrap_offset; then
+        printf '%s\n' 'Telegram cursor bootstrap failed; refusing to acknowledge queued updates' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
+    OFFSET=\$(cat "\$OFFSET_F" 2>/dev/null || printf '%s' invalid)
+    case "\$OFFSET" in
+        ''|*[!0-9]*)
+            printf '%s\n' 'Telegram cursor is invalid; refusing to poll' >>/data/logs/telegram-broker.log
+            sleep 5
+            continue
+            ;;
+    esac
     # Long-poll up to 25s for both message + callback_query updates.
     # We are the SOLE poller for this bot — ZC's telegram channel is disabled.
     RESP=\$(telegram_curl getUpdates -s --max-time 30 --get \\
@@ -900,100 +1506,188 @@ while true; do
         --data-urlencode "timeout=25" \\
         --data-urlencode 'allowed_updates=["message","callback_query"]' \\
         2>/dev/null)
-    OK=\$(echo "\$RESP" | jq -r '.ok // false' 2>/dev/null)
+    if telegram_polling_conflict "\$RESP"; then
+        printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
+        exit 42
+    fi
+    OK=\$(printf '%s' "\$RESP" | jq -r '.ok // false' 2>/dev/null)
     if [ "\$OK" != "true" ]; then
         sleep 5
         continue
     fi
 
-    NEW_OFFSET=\$(echo "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
-    [ -n "\$NEW_OFFSET" ] && [ "\$NEW_OFFSET" != "null" ] && echo \$((NEW_OFFSET + 1)) > "\$OFFSET_F"
+    if ! printf '%s' "\$RESP" | jq -e '.result | type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' 'Telegram response had no valid result array; refusing to acknowledge it' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
 
-    echo "\$RESP" | jq -c '.result[]?' 2>/dev/null | while read -r upd; do
+    # Process the complete batch before committing its cursor.  If the
+    # watcher dies while a handler is running, Telegram will redeliver the
+    # batch. Root-owned response caches and approval claims make replay safe.
+    BATCH_FILE=\$(mktemp /run/zeroclaw/.telegram-updates.XXXXXX) || {
+        sleep 2
+        continue
+    }
+    if ! printf '%s' "\$RESP" | jq -c '.result[]' >"\$BATCH_FILE" 2>/dev/null; then
+        rm -f "\$BATCH_FILE"
+        printf '%s\n' 'Telegram update batch could not be decoded; refusing to acknowledge it' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
+    chmod 0600 "\$BATCH_FILE"
+    BATCH_OK=true
+    while IFS= read -r upd; do
+        [ -n "\$upd" ] || continue
+        UPDATE_ID=\$(printf '%s' "\$upd" | jq -r '.update_id // empty' 2>/dev/null)
+        case "\$UPDATE_ID" in
+            ''|*[!0-9]*)
+                printf '%s\n' 'Telegram update had an invalid update_id; refusing to acknowledge batch' >>/data/logs/telegram-broker.log
+                BATCH_OK=false
+                break
+                ;;
+        esac
         # Branch on update kind. message and callback_query are mutually exclusive.
-        MSG_TEXT=\$(echo "\$upd" | jq -r '.message.text // empty')
+        MSG_TEXT=\$(printf '%s' "\$upd" | jq -r '.message.text // empty')
         if [ -n "\$MSG_TEXT" ]; then
-            M_CHAT=\$(echo "\$upd" | jq -r '.message.chat.id // empty')
-            M_FROM=\$(echo "\$upd" | jq -r '.message.from.id // empty')
-            handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" &
+            M_CHAT=\$(printf '%s' "\$upd" | jq -r '.message.chat.id // empty')
+            M_FROM=\$(printf '%s' "\$upd" | jq -r '.message.from.id // empty')
+            if ! handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" "\$UPDATE_ID"; then
+                printf '%s\n' "Telegram message update \$UPDATE_ID was not fully handled; cursor retained" >>/data/logs/telegram-broker.log
+                BATCH_OK=false
+                break
+            fi
             continue
         fi
 
-        CB_ID=\$(echo "\$upd" | jq -r '.callback_query.id // empty')
+        CB_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.id // empty')
         [ -z "\$CB_ID" ] && continue
 
-        DATA=\$(echo "\$upd"  | jq -r '.callback_query.data // empty')
-        FROM=\$(echo "\$upd"  | jq -r '.callback_query.from.id // empty')
-        FROM_NAME=\$(echo "\$upd" | jq -r '.callback_query.from.first_name // "user"')
-        CHAT_ID=\$(echo "\$upd" | jq -r '.callback_query.message.chat.id // empty')
-        MSG_ID=\$(echo "\$upd"  | jq -r '.callback_query.message.message_id // empty')
+        DATA=\$(printf '%s' "\$upd" | jq -r '.callback_query.data // empty')
+        FROM=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.id // empty')
+        FROM_NAME=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.first_name // "user"')
+        CHAT_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.chat.id // empty')
+        MSG_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.message_id // empty')
+
+        if ! valid_positive_id "\$FROM" || ! valid_chat_id "\$CHAT_ID" || ! valid_positive_id "\$MSG_ID"; then
+            printf '%s\n' "Telegram callback update \$UPDATE_ID had invalid actor or chat identifiers" >>/data/logs/telegram-broker.log
+            if ! answer_cb "\$CB_ID" "Invalid callback."; then BATCH_OK=false; break; fi
+            continue
+        fi
 
         if ! is_allowed_user "\$FROM"; then
-            answer_cb "\$CB_ID" "Not authorized."
+            if ! answer_cb "\$CB_ID" "Not authorized."; then BATCH_OK=false; break; fi
             continue
         fi
         if [ "\$FROM" != "\$APPROVAL_USER" ] || [ "\$CHAT_ID" != "\$APPROVAL_CHAT" ]; then
-            answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."
+            if ! answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."; then BATCH_OK=false; break; fi
+            continue
+        fi
+        if replay_callback_result "\$UPDATE_ID" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
             continue
         fi
         case "\$DATA" in
             zcv1:*) ;;
-            *) answer_cb "\$CB_ID" "Unknown chip."; continue ;;
+            *) if ! answer_cb "\$CB_ID" "Unknown chip."; then BATCH_OK=false; break; fi; continue ;;
         esac
-        VERB=\$(echo "\$DATA" | cut -d: -f2)
-        SHORT=\$(echo "\$DATA" | cut -d: -f3)
+        VERB=\$(printf '%s' "\$DATA" | cut -d: -f2)
+        SHORT=\$(printf '%s' "\$DATA" | cut -d: -f3)
         if ! printf '%s' "\$SHORT" | grep -Eq '^[a-f0-9]{8}$'; then
-            answer_cb "\$CB_ID" "Invalid ticket."
+            if ! answer_cb "\$CB_ID" "Invalid ticket."; then BATCH_OK=false; break; fi
             continue
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
         if [ ! -f "\$TICKET" ]; then
-            answer_cb "\$CB_ID" "Ticket expired or already actioned."
-            [ -n "\$MSG_ID" ] && edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"
+            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+                continue
+            fi
+            if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
+            if [ -n "\$MSG_ID" ] && ! edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"; then BATCH_OK=false; break; fi
             continue
         fi
 
-        SUMMARY=\$(jq -r '.summary // "(action)"' "\$TICKET")
+        SUMMARY=\$(canonical_ticket_summary "\$TICKET") || { BATCH_OK=false; break; }
+        CALLBACK_ANSWER=""
+        CALLBACK_EDIT=""
         case "\$VERB" in
           approve)
-              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
-                  answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."
+              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+                  continue
+              fi
+              if ! approval_marker_ready "\$SHORT" && \
+                  ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
+                  if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
               if OUT=\$(apply_approved_ticket "\$SHORT" "\$FROM" "\$CHAT_ID"); then
-                  answer_cb "\$CB_ID" "Applied."
-                  edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
+                  if ! answer_cb "\$CB_ID" "Applied."; then BATCH_OK=false; break; fi
+                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
-                  curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
-                      -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" '{message:\$m}')" \\
-                      >/dev/null 2>&1 || true
-              else
-                  answer_cb "\$CB_ID" "Execution failed; claim retained."
-                  edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but execution failed; claim retained for recovery.
+                  then BATCH_OK=false; break; fi
+                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome: \${OUT}" \\
+                       >/dev/null 2>>/data/logs/telegram-broker.log &
+                   CALLBACK_ANSWER="Applied."
+                   CALLBACK_EDIT="✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
-                  curl -s -X POST "\${GW}/webhook" -H "Content-Type: application/json" \\
-                      -d "\$(jq -nc --arg m "ZCAUTO ticket \${SHORT} approved via chip — execution failed; claim retained: \${OUT}" '{message:\$m}')" \\
-                      >/dev/null 2>&1 || true
-              fi
+               else
+                  if ! answer_cb "\$CB_ID" "Outcome unconfirmed; claim retained."; then BATCH_OK=false; break; fi
+                  if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
+\${OUT}"
+                  then BATCH_OK=false; break; fi
+                   run_agent_turn "\$CHAT_ID" "ZCAUTO ticket \${SHORT} approved via chip — outcome unconfirmed; claim retained: \${OUT}" \\
+                       >/dev/null 2>>/data/logs/telegram-broker.log &
+                   CALLBACK_ANSWER="Outcome unconfirmed; claim retained."
+                   CALLBACK_EDIT="⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
+\${OUT}"
+               fi
               ;;
           reject)
               if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
-                  answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."
+                  if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
-              answer_cb "\$CB_ID" "Rejected."
-              edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"
-              ;;
+              if ! answer_cb "\$CB_ID" "Rejected."; then BATCH_OK=false; break; fi
+               if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "❌ Rejected by \${FROM_NAME}: \${SUMMARY}"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Rejected."
+               CALLBACK_EDIT="❌ Rejected by \${FROM_NAME}: \${SUMMARY}"
+               ;;
           discuss)
-              answer_cb "\$CB_ID" "Tell me more."
-              send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"
-              ;;
+              if ! answer_cb "\$CB_ID" "Tell me more."; then BATCH_OK=false; break; fi
+               if ! send_msg "\$CHAT_ID" "About ticket \${SHORT} (\${SUMMARY}) — what would you like me to change or explain?"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Tell me more."
+               ;;
           *)
-              answer_cb "\$CB_ID" "Unknown verb: \$VERB"
-              ;;
+               if ! answer_cb "\$CB_ID" "Unknown verb: \$VERB"; then BATCH_OK=false; break; fi
+               CALLBACK_ANSWER="Unknown verb: \$VERB"
+               ;;
         esac
-    done
+        if [ -n "\$CALLBACK_ANSWER" ] && ! cache_callback_result "\$UPDATE_ID" "\$CHAT_ID" "\$MSG_ID" "\$CALLBACK_ANSWER" "\$CALLBACK_EDIT"; then
+            BATCH_OK=false
+            break
+        fi
+    done <"\$BATCH_FILE"
+    rm -f "\$BATCH_FILE"
+    if [ "\$BATCH_OK" != "true" ]; then
+        sleep 2
+        continue
+    fi
+    NEW_OFFSET=\$(printf '%s' "\$RESP" | jq -r '.result | (max_by(.update_id).update_id // empty)' 2>/dev/null)
+    case "\$NEW_OFFSET" in
+        ''|null) ;;
+        *[!0-9]*)
+            printf '%s\\n' 'Telegram batch cursor was invalid; retaining the previous cursor' >>/data/logs/telegram-broker.log
+            sleep 2
+            continue
+            ;;
+        *)
+            if ! commit_offset "\$((NEW_OFFSET + 1))"; then
+                printf '%s\\n' "failed to commit Telegram update cursor: \$NEW_OFFSET" >>/data/logs/telegram-broker.log
+                sleep 2
+                continue
+            fi
+            ;;
+    esac
 done
 SCRIPT
 
@@ -1011,7 +1705,9 @@ cat > /usr/local/bin/ha-action-guarded << SCRIPT
 # Returns:
 #   0 + result    on allow
 #   2 + ticket    on confirm
-#   1 + reason    on deny
+#   1 + reason    on deny or a confirmed pre-execution failure
+#   3 + reason    when execution may have occurred but durable outcome state
+#                is incomplete; the approval claim must remain for recovery
 
 set -e
 
@@ -1019,15 +1715,22 @@ set -e
 export ZEROCLAW_INTERNAL_ACTION=1
 
 # Export policy environment so /usr/local/bin/policy-decide sees it.
-export POLICY_MODE="${POLICY_MODE}"
-export POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM}"
-export POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD}"
-export POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA}"
-export POLICY_REQUIRE_APPROVAL="${POLICY_REQUIRE_APPROVAL}"
-export QUIET_HOURS="${QUIET_HOURS}"
-export EXTRA_DENY="${POLICY_EXTRA_DENY}"
-export EXTRA_CONFIRM="${POLICY_EXTRA_CONFIRM}"
-export EXTRA_ALLOW="${POLICY_EXTRA_ALLOW}"
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+[ -f "\$POLICY_RUNTIME_FILE" ] && [ ! -L "\$POLICY_RUNTIME_FILE" ] || {
+    echo "ERROR: canonical policy runtime file is unavailable" >&2
+    exit 1
+}
+POLICY_MODE=\$(jq -er '.policy_mode | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_QUIET_CONFIRM=\$(jq -er '.policy_quiet_confirm | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_BULK_THRESHOLD=\$(jq -er '.policy_bulk_threshold | select(type == "number" and floor == .) | tostring' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_CLIMATE_DELTA=\$(jq -er '.policy_climate_delta | select(type == "number" and floor == .) | tostring' "\$POLICY_RUNTIME_FILE") || exit 1
+POLICY_REQUIRE_APPROVAL=\$(jq -er '.require_approval | select(type == "boolean")' "\$POLICY_RUNTIME_FILE") || exit 1
+QUIET_HOURS=\$(jq -er '.quiet_hours | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_DENY=\$(jq -er '.extra_deny | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_CONFIRM=\$(jq -er '.extra_confirm | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+EXTRA_ALLOW=\$(jq -er '.extra_allow | select(type == "string")' "\$POLICY_RUNTIME_FILE") || exit 1
+export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA
+export POLICY_REQUIRE_APPROVAL QUIET_HOURS EXTRA_DENY EXTRA_CONFIRM EXTRA_ALLOW
 
 # --- Apply-ticket short circuit ---
 if [ "\$1" = "--apply-ticket" ]; then
@@ -1040,8 +1743,13 @@ if [ "\$1" = "--apply-ticket" ]; then
     # The root broker verifies and consumes the sealed ticket transactionally.
     # Claim state is carried by root-owned state, never by an environment
     # variable that would stop at the local TCP boundary.
-    if OUT=\$(ZEROCLAW_APPROVAL_TICKET="\$UUID" /usr/local/bin/ha-action-raw "\$SVC" "\$BODY"); then
+    STATUS=0
+    OUT=\$(ZEROCLAW_APPROVAL_TICKET="\$UUID" /usr/local/bin/ha-action-raw "\$SVC" "\$BODY") || STATUS=\$?
+    if [ "\$STATUS" -eq 0 ]; then
         :
+    elif [ "\$STATUS" -eq 3 ]; then
+        echo "ERROR: service execution occurred or may have occurred, but durable outcome state is incomplete; the claim remains for recovery. Check Home Assistant history before retrying." >&2
+        exit 3
     else
         /usr/local/bin/zc-audit-write failed "\$SVC" "\$BODY" "ticket=\${UUID};broker_failed" || echo "WARNING: broker failure could not be written to the audit store" >&2
         echo "ERROR: approved action failed or its outcome audit was unavailable; the claim remains for recovery" >&2
@@ -1092,7 +1800,7 @@ case "\$KIND" in
             echo "\$OUT"
             exit 0
         fi
-        echo "ERROR: action failed or its outcome audit was unavailable; inspect broker/audit state" >&2
+        echo "ERROR: action failed before confirmation or its durable outcome state is incomplete; inspect Home Assistant history and broker/audit state" >&2
         exit 1 ;;
     deny)
         if ! /usr/local/bin/zc-audit-write deny "\$SERVICE" "\$BODY" "\$VERDICT"; then
@@ -1283,12 +1991,14 @@ SCRIPT
 # zc-set-outcome — agent records the one-line outcome of a completed action
 # so the next user message can be classified as a correction (or not).
 # Empty/missing file = no outcome to correct (greetings, status queries).
-cat > /usr/local/bin/zc-set-outcome << 'SCRIPT'
+cat > /usr/local/bin/zc-set-outcome << SCRIPT
 #!/bin/sh
 # Usage: zc-set-outcome "<one-line outcome>"
-TEXT="$1"
-[ -z "$TEXT" ] && exit 0
-printf '%s\n' "$TEXT" > /data/.last_outcome
+LEARNING_ENABLED="${ENABLE_LEARNING}"
+TEXT="\$1"
+[ -z "\$TEXT" ] && exit 0
+[ "\$LEARNING_ENABLED" = "true" ] || exit 0
+exec /usr/local/bin/ha-capability set_outcome "\$TEXT" >/dev/null
 SCRIPT
 
 # zc-lesson-add — append a one-line lesson to LESSONS.md (deduped, FIFO-capped).
@@ -1388,8 +2098,17 @@ else
     ACS_DETAIL=""
 fi
 LAST_AUDIT=\$(/usr/local/bin/zc-audit-tail 1 2>/dev/null | jq -r '"\(.ts) \(.kind) \(.service) \(.entity)"' 2>/dev/null)
-QH_START=\$(echo "${QUIET_HOURS}" | cut -d- -f1 | cut -d: -f1 | sed 's/^0*//')
-QH_END=\$(echo "${QUIET_HOURS}" | cut -d- -f2 | cut -d: -f1 | sed 's/^0*//')
+POLICY_RUNTIME_FILE="${CONFIG_DIR}/policy-runtime.json"
+QUIET_HOURS=\$(jq -er '.quiet_hours | select(type == "string")' "\$POLICY_RUNTIME_FILE" 2>/dev/null) || {
+    echo "(policy unavailable)"
+    exit 1
+}
+HOME_LOCATION=\$(jq -er '.home_location | select(type == "string")' "\$POLICY_RUNTIME_FILE" 2>/dev/null) || {
+    echo "(policy unavailable)"
+    exit 1
+}
+QH_START=\$(echo "\$QUIET_HOURS" | cut -d- -f1 | cut -d: -f1 | sed 's/^0*//')
+QH_END=\$(echo "\$QUIET_HOURS" | cut -d- -f2 | cut -d: -f1 | sed 's/^0*//')
 NOW_H=\$(date +%H | sed 's/^0*//'); [ -z "\$NOW_H" ] && NOW_H=0
 [ -z "\$QH_START" ] && QH_START=0; [ -z "\$QH_END" ] && QH_END=0
 QUIET="OFF"
@@ -1401,11 +2120,11 @@ fi
 PENDING=\$(/usr/local/bin/ha-capability pending_count 2>/dev/null || echo unavailable)
 cat << WSEOF
 === WORLD STATE ===
-Time: \${NOW} (\${DOW}) · Location: ${HOME_LOCATION}
+Time: \${NOW} (\${DOW}) · Location: \${HOME_LOCATION}
 Lights on: \${LIGHTS_ON}\${LIGHTS_LIST:+ (\${LIGHTS_LIST})}
 ACs running: \${ACS_ON}\${ACS_DETAIL:+ — \${ACS_DETAIL}}
 Last action: \${LAST_AUDIT:-(none today)}
-Quiet hours (${QUIET_HOURS}): \${QUIET}
+Quiet hours (\${QUIET_HOURS}): \${QUIET}
 Pending approvals: \${PENDING}
 === END WORLD STATE ===
 WSEOF
@@ -1621,7 +2340,7 @@ base_url = "${PROVIDER_BASE_URL}"
 api_path = "/chat/completions"
 model = "${DEFAULT_MODEL}"
 temperature = 0.2
-timeout_secs = 20
+timeout_secs = 80
 wire_api = "chat_completions"
 max_tokens = ${PROVIDER_MAX_TOKENS}
 
@@ -1637,7 +2356,7 @@ model = "${COMPLEX_MODEL}"
 
 [channels]
 cli = true
-message_timeout_secs = 60
+message_timeout_secs = 150
 ack_reactions = true
 session_persistence = true
 session_backend = "sqlite"
@@ -1719,6 +2438,21 @@ Role: Home automation executor for ${HOME_LOCATION}.
 Languages: ${HOME_LANGUAGES} — match the user's language exactly.
 Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
 
+## Tool invocation protocol (gateway/channel safety)
+When a Home Assistant or ZeroClaw command helper is needed, use the runtime's
+structured shell tool exactly. Command helpers are valid only inside that tool;
+they are never a user-facing response syntax. Only call a name directly when
+it is present in the runtime's actual tool list.
+Never write a tool call as Markdown, a bare shell command, or prose. If the
+native shell tool is unavailable, do not print command syntax or a Markdown/XML
+tool block. Explain briefly that tool execution is unavailable; never imply
+that an action ran.
+Do not add approved:true; the HA policy gate owns action approval. The command must be
+inside the shell tool's JSON arguments so the gateway can execute it and
+continue the tool loop.
+After the tool result, continue until you can give the user a short final
+answer. Never show internal tool results or shell syntax to the user.
+
 ## World state
 A WORLD STATE block may appear in your prompt. Trust it. Don't re-fetch what's already there
 (time, lights on, ACs running, quiet hours, pending approvals). To refresh manually: zc-world-state.
@@ -1731,10 +2465,11 @@ Unknown name? Call memory_recall("<name>") first. Entity mappings are pre-loaded
 Still unknown? Reply: "I don't know '<name>'. What's the entity ID?"
 
 ## Step 2 — Status queries
-ha.lights_on · ha.ac_status · ha.cover_status · ha.sensor_status · ha.all_status
-ha.get_entity <entity_id> · ha.logbook [entity_id] · ha.error_log
+Use the shell tool with the documented command:
+ha-lights-on · ha-ac-status · ha-cover-status · ha-sensors · ha-all-status
+ha-state <entity_id> · ha-logbook [entity_id] · ha-errors
 
-## Step 3 — Actions go through ha.action_guarded (the policy gate)
+## Step 3 — Actions go through ha-action-guarded (the policy gate)
 You CANNOT call ha-action-raw directly. Every action goes through ha-action-guarded.
 The gate returns one of three things:
 
@@ -1749,14 +2484,14 @@ the model to manufacture an approval or call an approval bridge. After a
 successful approval, the adapter applies the ticket and reports the outcome.
 
 ## AC actions — pre-check first
-Before set_temperature / set_hvac_mode, call ha.get_entity. If state already matches request,
+Before set_temperature / set_hvac_mode, use the shell tool with ha-state. If state already matches request,
 skip the action and write: "Study AC is already at 24°C." Save tool calls.
 
 ## Decision tree for ambiguous requests
 "turn off the lights" with no scope:
   • If exactly one light is on → act, write specific outcome.
   • If multiple → ask: "Which? all / specific room / a specific light?"
-"make it cooler / warmer" → call ha.get_entity first, propose ±2°C delta, then apply.
+"make it cooler / warmer" → use the shell tool with ha-state first, propose ±2°C delta, then apply.
 
 ## Outcome lines (positive examples)
 Lights:    "Example light on."         "Example group off."    "All lights off."
@@ -1781,7 +2516,7 @@ zc-cost — return current cost. If asked about spend, call this; never guess.
 
 ## Tool-call budget
 You have ≤ ${MAX_TOOL_ITER} tool calls per turn. Budget them. Memory-first lookup before
-ha.list_entities or any broad query. Never call http_request GET /api/states (532KB).
+ha-all-status or any broad query. Never call http_request GET /api/states (532KB).
 
 ## Model routing
 Default route is fast (${DEFAULT_MODEL}). Switch to the reasoning route when ANY of:
@@ -1795,17 +2530,16 @@ To switch routes, prepend your first scratchpad/reasoning line with the literal 
 
 ## Outcome tracking (lessons loop) — REQUIRED after real actions
 After every turn that produced a real action (NOT a status query, greeting, or
-"already at" no-op), invoke the registered tool exactly once:
-    zc.set_outcome "<the same one-line outcome you just wrote to the user>"
-This is a real tool — call it like ha.action_guarded or memory_recall. The shell
-helper underneath is /usr/local/bin/zc-set-outcome; it writes /data/.last_outcome.
+"already at" no-op), use the native shell tool exactly once with
+zc-set-outcome '<same one-line outcome>'.
+The shell helper underneath is /usr/local/bin/zc-set-outcome; it records a
+root-owned broker receipt under /data/capability. Never emit zc.set_outcome or
+zc-set-outcome as plain text.
 
-Concrete example for a turn that just turned on a light:
-  ha.action_guarded 'light/turn_on' '{"entity_id":"light.example"}'
-  → "Example light on."
-  zc.set_outcome "Example light on."
+Do not write either command in the user-facing assistant message. If the
+native shell tool is not available, do not emit a textual substitute.
 
-If you skip zc.set_outcome the lessons loop cannot fire on the user's next reply
+If you skip the zc-set-outcome shell command the lessons loop cannot fire on the user's next reply
 and the agent will not learn from corrections. Skipping it is a SOUL violation.
 
 The runtime detects a correction in the user's NEXT message (e.g. "no", "wrong",
@@ -1915,7 +2649,9 @@ For "every night at 11 IF any AC is on, ASK me before turning it off":
    condition with current state, and drafts an action ticket if needed.
 3. User approves or denies in chat.
 
-The user must add this rest_command to /config/configuration.yaml ONCE:
+The user may add this rest_command to /config/configuration.yaml ONCE for a
+simple, non-tool wake-up. Telegram turns use the full agent path below; this
+compatibility webhook does not execute Home Assistant actions:
 ```yaml
 rest_command:
   zeroclaw_message:
@@ -1957,31 +2693,37 @@ LESSEOF
 # TOOLS.md
 # ==============================================================
 cat > "${WS}/TOOLS.md" << 'TOOLSEOF'
-## ha.* tool reference (read-only and guarded action)
+## Home Assistant command reference
+
+The entries below are command aliases, not function-call names. Invoke every
+command through the runtime's native `shell` tool. Never emit a bare `ha.*`,
+`ha-*`, or `zc-*` line, Markdown/XML tool syntax, or an internal command in a
+user-facing assistant turn. If the native shell tool is unavailable, say that
+the action could not be executed and stop.
 
 STATUS:
-- ha.all_status     — lights + AC + covers (use for "home overview")
-- ha.lights_on      — which lights are ON
-- ha.ac_status      — all ACs: mode, set, current
-- ha.cover_status   — all curtains
-- ha.sensor_status  — soil/temperature sensors
-- ha.get_entity     — one entity by ID (pass entity_id)
-- ha.logbook        — recent events (optionally entity_id)
-- ha.error_log      — HA system error log
+- ha-all-status     — lights + AC + covers (use for "home overview")
+- ha-lights-on      — which lights are ON
+- ha-ac-status      — all ACs: mode, set, current
+- ha-cover-status   — all curtains
+- ha-sensors        — soil/temperature sensors
+- ha-state          — one entity by ID (pass entity_id)
+- ha-logbook        — recent events (optionally entity_id)
+- ha-errors         — HA system error log
 
 ACTIONS (all routed through the policy gate):
-- ha.action_guarded <service_path> '<json_body>'
-    e.g. ha.action_guarded 'light/turn_on' '{"entity_id":"light.example"}'
-    e.g. ha.action_guarded 'climate/set_temperature' '{"entity_id":"climate.example","temperature":22}'
-- ha.action_guarded --apply-ticket <id8>   — apply an approved ticket
+- command: ha-action-guarded <service_path> '<json_body>'
+    e.g. ha-action-guarded 'light/turn_on' '{"entity_id":"light.example"}'
+    e.g. ha-action-guarded 'climate/set_temperature' '{"entity_id":"climate.example","temperature":22}'
+- command: ha-action-guarded --apply-ticket <id8>   — adapter-only approved-ticket path
 
-ZC. (ZeroClaw self-tools):
-- zc.schedule '<cron>' '<msg-to-self>' [name]   — recurring task
-- zc.schedule_once <min> '<msg>'                — one-off delay
-- zc.audit_tail [N]                              — recent actions
-- zc.undo [N]                                    — revert last N actions (1h window)
-- zc.cost                                        — current spend
-- zc.world_state                                 — refresh world state
+ZC. (ZeroClaw self-commands; invoke through shell):
+- zc-schedule '<cron>' '<msg-to-self>' [name]   — recurring task
+- zc-schedule-once <min> '<msg>'                — one-off delay
+- zc-audit-tail [N]                              — recent actions
+- zc-undo [N]                                    — revert last N actions (1h window)
+- zc-cost                                        — current spend
+- zc-world-state                                 — refresh world state
 
 WARNING: never call http_request GET /api/states — payload too large.
 TOOLSEOF
@@ -2019,142 +2761,41 @@ broker, which enforce the configured policy options. The legacy
 /config/zeroclaw_policy.yaml is not parsed. The gate returns CONFIRM_PENDING for
 actions that need approval; relay the ticket id to the user.
 
-[[tools]]
-name = "all_status"
-description = "Full home overview: lights on, AC status, and cover/curtain states."
-kind = "shell"
-command = "ha-all-status"
+## Command catalog — use the runtime shell tool
 
-[[tools]]
-name = "lights_on"
-description = "List which lights are currently ON."
-kind = "shell"
-command = "ha-lights-on"
+The entries below are command aliases, not callable tool names and not text to
+send to the user. Invoke them only inside the structured shell tool.
 
-[[tools]]
-name = "ac_status"
-description = "All AC/climate status: mode, set temperature, current temperature."
-kind = "shell"
-command = "ha-ac-status"
-
-[[tools]]
-name = "cover_status"
-description = "All curtain/cover status."
-kind = "shell"
-command = "ha-cover-status"
-
-[[tools]]
-name = "sensor_status"
-description = "Soil moisture and temperature sensors."
-kind = "shell"
-command = "ha-sensors"
-
-[[tools]]
-name = "get_entity"
-description = "State of one entity. Pass entity_id, e.g. 'climate.room_air_conditioner'"
-kind = "shell"
-command = "ha-state"
-
-[[tools]]
-name = "action_guarded"
-description = "Policy-gated action. Args: <service_path> '<json_body>'. May return CONFIRM_PENDING ticket=<id8> — relay it to the user. To apply an approved ticket: '--apply-ticket <id8>'."
-kind = "shell"
-command = "ha-action-guarded"
-
-[[tools]]
-name = "logbook"
-description = "Recent device activity. Pass entity_id to filter."
-kind = "shell"
-command = "ha-logbook"
-
-[[tools]]
-name = "error_log"
-description = "Home Assistant system error log."
-kind = "shell"
-command = "ha-errors"
-
-[[tools]]
-name = "schedule"
-description = "Schedule a future message to yourself (cron expression). Args: '<cron>' '<message>' [name]"
-kind = "shell"
-command = "zc-schedule"
-
-[[tools]]
-name = "schedule_once"
-description = "Schedule a one-off message to yourself in N minutes. Args: <minutes> '<message>'"
-kind = "shell"
-command = "zc-schedule-once"
-
-[[tools]]
-name = "audit_tail"
-description = "Recent audit log rows. Optional N (default 20)."
-kind = "shell"
-command = "zc-audit-tail"
-
-[[tools]]
-name = "undo"
-description = "Revert the last N actions within the last hour (default 1)."
-kind = "shell"
-command = "zc-undo"
-
-[[tools]]
-name = "cost"
-description = "Current cost telemetry (today, month, limits)."
-kind = "shell"
-command = "zc-cost"
-
-[[tools]]
-name = "world_state"
-description = "Compact home-state header (time, lights, ACs, quiet hours, pending approvals)."
-kind = "shell"
-command = "zc-world-state"
-
-[[tools]]
-name = "set_outcome"
-description = "Record the one-line outcome of a real action so the lessons loop can detect a user correction in the NEXT message. Call EXACTLY ONCE per action turn with the same outcome line you wrote to the user. Do NOT call after status queries, greetings, or 'already at' no-ops."
-kind = "shell"
-command = "zc-set-outcome"
-
-[[tools]]
-name = "lesson_add"
-description = "Append a one-line lesson (≤80 chars) to LESSONS.md. Reserved for the synthetic 'User correction received.' prompt — do not call from regular turns."
-kind = "shell"
-command = "zc-lesson-add"
+- ha-all-status — full home overview.
+- ha-lights-on — list lights that are currently on.
+- ha-ac-status — current climate state.
+- ha-cover-status — current covers/curtains.
+- ha-sensors — soil and temperature sensors.
+- ha-state <entity_id> — state of one entity.
+- ha-action-guarded '<service_path>' '<json_body>' — policy-gated action.
+- ha-logbook [entity_id] — recent activity.
+- ha-errors — Home Assistant error log.
+- zc-schedule '<cron>' '<message>' [name] — recurring reminder.
+- zc-schedule-once <minutes> '<message>' — one-off reminder.
+- zc-audit-tail [N] — recent audit rows.
+- zc-undo [N] — revert recent actions.
+- zc-cost — current cost telemetry.
+- zc-world-state — compact current-home header.
+- zc-set-outcome '<outcome>' — record a real action outcome exactly once.
+- zc-lesson-add '<lesson>' — reserved for the correction hook.
 SKILLEOF
 
 # v3.1: append creation tools to the ha skill only when the feature is on
 if [ "${ENABLE_CREATION}" = "true" ]; then
 cat >> "${WS}/skills/ha/SKILL.md" << 'CRSKILLEOF'
 
-[[tools]]
-name = "create_scene"
-description = "Draft a new HA scene. Args: <scene_id> '<friendly name>' '<json entity_states>'. Returns CONFIRM_PENDING ticket=<id8>; relay it to user. The Telegram adapter owns approval and applies the ticket after the bound user confirms."
-kind = "shell"
-command = "ha-create-scene"
-
-[[tools]]
-name = "create_automation"
-description = "Draft a new HA automation. Args: <alias> '<yaml with trigger: and action: keys>'. Returns CONFIRM_PENDING ticket=<id8>. yq validates the YAML before queueing."
-kind = "shell"
-command = "ha-create-automation"
-
-[[tools]]
-name = "create_routine"
-description = "Save an agent-side macro of action steps. Args: <name> '<json array of {service,payload}>'. No approval — but each step still goes through ha-action-guarded when run."
-kind = "shell"
-command = "ha-create-routine"
-
-[[tools]]
-name = "run_routine"
-description = "Run a previously-saved routine by name. Each step goes through ha-action-guarded."
-kind = "shell"
-command = "ha-run-routine"
-
-[[tools]]
-name = "apply_creation"
-description = "Apply an APPROVED creation ticket. Args: <id8>. Persists scene → /config/scenes.yaml or automation → /config/automations.yaml then reloads HA."
-kind = "shell"
-command = "ha-apply-creation"
+- ha-create-scene <scene_id> '<friendly name>' '<json entity_states>' —
+  draft a scene and return a confirmation ticket.
+- ha-create-automation <alias> '<yaml>' — draft an automation and return a
+  confirmation ticket.
+- ha-create-routine <name> '<json steps>' — save an agent-side macro.
+- ha-run-routine <name> — run a saved routine through the policy gate.
+- ha-apply-creation <id8> — apply an approved creation ticket.
 CRSKILLEOF
 fi
 
@@ -2179,7 +2820,8 @@ bashio::log.info "Config ready | mode=${POLICY_MODE} | ${DEFAULT_MODEL} + ${COMP
 scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY \
+        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
 }
 
 # ==============================================================
@@ -2256,7 +2898,16 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
             /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
                 bashio::log.info "[tg-cb] $line"
             done
-            bashio::log.warning "tg-callback-watcher exited; restarting in 5s"
+            watcher_status=${PIPESTATUS[0]}
+            if [ "$watcher_status" -eq 42 ]; then
+                printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) Telegram polling conflict" > "${TELEGRAM_CONFLICT_FILE}"
+                printf '%s\n' "${TELEGRAM_TOKEN_HASH}" > "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                chown root:root "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                chmod 0600 "${TELEGRAM_CONFLICT_FILE}" "${TELEGRAM_CONFLICT_TOKEN_FILE}"
+                bashio::log.fatal "Telegram polling conflict; watcher is latched and will not restart"
+                exit 1
+            fi
+            bashio::log.warning "tg-callback-watcher exited (status ${watcher_status}); restarting in 5s"
             sleep 5
         done
     ) &
@@ -2296,7 +2947,8 @@ fi
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
- unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY
+ unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
+    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from
@@ -2309,17 +2961,16 @@ chmod 1770 /data
 # every restore service and records the real HA outcome; keeping the directory
 # planner-writable makes the advertised undo tool functional without granting
 # the planner access to trusted audit or approval state.
-for planner_tree in "${WS}" /data/pending /data/routines /data/tools /data/undo; do
+for planner_tree in "${WS}" "${WS}/sessions" /data/pending /data/routines /data/tools /data/undo; do
     mkdir -p "$planner_tree"
     chown -R zeroclaw:zeroclaw "$planner_tree"
     find "$planner_tree" -type d -exec chmod 0700 {} \; 2>/dev/null || true
     find "$planner_tree" -type f -exec chmod 0600 {} \; 2>/dev/null || true
 done
-if [ ! -e /data/.last_outcome ]; then
-    : > /data/.last_outcome
-fi
-chown zeroclaw:zeroclaw /data/.last_outcome
-chmod 0600 /data/.last_outcome
+# Older releases stored correction state in planner-writable /data. Remove
+# only that exact legacy path; current correction state is root-owned broker
+# state under /data/capability and is never read from a planner-owned path.
+rm -f /data/.last_outcome
 if [ -L /data/logs ]; then
     rm -f /data/logs
 fi
@@ -2334,15 +2985,20 @@ chown -R root:root /data/provider
 chmod 0700 /data/provider
 find /data/provider -type f -exec chmod 0600 {} \; 2>/dev/null || true
 mkdir -p /data/capability
+if [ "${ENABLE_LEARNING}" != "true" ]; then
+    rm -f /data/capability/last-outcome.json
+fi
 find /data/capability -type l -exec rm -f {} \; 2>/dev/null || true
 chown -R root:root /data/capability
 chmod 0700 /data/capability
 find /data/capability -type f -exec chmod 0600 {} \; 2>/dev/null || true
-mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets
+mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets /data/approval-receipts/outcomes
 chown root:root /data/approved /data/approval-receipts
 chmod 0700 /data/approved /data/approval-receipts
 chown -R root:root /data/approval-receipts
 chmod 0700 /data/approval-receipts/tickets
+chown root:root /data/approval-receipts/outcomes
+chmod 0700 /data/approval-receipts/outcomes
 mkdir -p /data/approval-receipts/.locks
 chown root:root /data/approval-receipts/.locks
 chmod 0700 /data/approval-receipts/.locks
@@ -2365,12 +3021,18 @@ if [ -f /data/config.toml ]; then
     chmod 0640 /data/config.toml
 fi
 # Preserve any legacy root-level state as root-owned, read-only-to-planner
-# data.  The explicitly writable .last_outcome is handled above.
+# data.  Correction state is broker-owned under /data/capability.
 find /data -maxdepth 1 -type f \
-    ! -name options.json ! -name config.toml ! -name .last_outcome ! -name .state-version \
+    ! -name options.json ! -name config.toml ! -name .state-version ! -name .state-schema \
     -exec chown root:zeroclaw {} \; -exec chmod 0640 {} \; 2>/dev/null || true
-chown root:root /data/.state-version
-chmod 0600 /data/.state-version
+if [ -f /data/.state-schema ]; then
+    chown root:root /data/.state-schema
+    chmod 0600 /data/.state-schema
+fi
+if [ -f /data/.state-version ]; then
+    chown root:root /data/.state-version
+    chmod 0600 /data/.state-version
+fi
 
 CRASH_COUNT=0
 while true; do

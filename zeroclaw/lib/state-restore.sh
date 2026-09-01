@@ -1,54 +1,66 @@
 #!/bin/sh
-# Restore only the state files captured by state-migrate.sh.
-#
-# Usage: state-restore <data_dir> <backup_dir>
-# The app must be stopped before invoking this helper.  The current state is
-# moved into a new rollback snapshot first, so a failed/incorrect rollback is
-# recoverable without deleting the data directory.
+# Restore the schema-governed persistent state inventory captured by
+# state-migrate.sh.  The current state is first snapshotted into a rollback
+# directory, so a failed restore remains recoverable.
 
 set -eu
+umask 077
 
 [ "$#" -eq 2 ] || {
     echo "Usage: state-restore <data_dir> <backup_dir>" >&2
     exit 64
 }
 
-DATA_DIR=$(cd "$1" 2>/dev/null && pwd -P) || {
-    echo "ERROR: data directory does not exist" >&2
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+if [ -r /opt/zeroclaw/lib/state-inventory.sh ]; then
+    # shellcheck disable=SC1091
+    . /opt/zeroclaw/lib/state-inventory.sh
+else
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/state-inventory.sh"
+fi
+
+die() {
+    echo "ERROR: $*" >&2
     exit 1
 }
-BACKUP_DIR=$(cd "$2" 2>/dev/null && pwd -P) || {
-    echo "ERROR: backup directory does not exist" >&2
-    exit 1
-}
+
+DATA_DIR=$(cd "$1" 2>/dev/null && pwd -P) || die "data directory does not exist"
+BACKUP_DIR=$(cd "$2" 2>/dev/null && pwd -P) || die "backup directory does not exist"
 MIGRATIONS_DIR="$DATA_DIR/migrations"
-VERSION_FILE="${ZEROCLAW_VERSION_FILE:-$DATA_DIR/.state-version}"
+SCHEMA_FILE="$DATA_DIR/.state-schema"
 
-[ "$(dirname "$BACKUP_DIR")" = "$MIGRATIONS_DIR" ] || {
-    echo "ERROR: backup must be a direct child of ${MIGRATIONS_DIR}" >&2
-    exit 1
+[ "$(dirname "$BACKUP_DIR")" = "$MIGRATIONS_DIR" ] ||
+    die "backup must be a direct child of ${MIGRATIONS_DIR}"
+[ -f "$BACKUP_DIR/manifest" ] || die "backup manifest is missing"
+[ -f "$BACKUP_DIR/checksums" ] || die "backup checksums are missing"
+
+manifest_value() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$BACKUP_DIR/manifest" | head -n 1
 }
-[ -f "$BACKUP_DIR/manifest" ] || { echo "ERROR: backup manifest is missing" >&2; exit 1; }
-[ -f "$BACKUP_DIR/checksums" ] || { echo "ERROR: backup checksums are missing" >&2; exit 1; }
 
-grep -q '^old_version=' "$BACKUP_DIR/manifest" || {
-    echo "ERROR: backup manifest has no old_version" >&2
-    exit 1
-}
-OLD_VERSION=$(sed -n 's/^old_version=//p' "$BACKUP_DIR/manifest" | head -n 1)
-NEW_VERSION=$(sed -n 's/^new_version=//p' "$BACKUP_DIR/manifest" | head -n 1)
+OLD_SCHEMA=$(manifest_value old_schema)
+NEW_SCHEMA=$(manifest_value new_schema)
+OLD_VERSION=$(manifest_value old_version)
+NEW_VERSION=$(manifest_value new_version)
 
-# Verify the snapshot before moving the live state.  All paths in the
-# generated checksum file are relative to BACKUP_DIR and are checked to avoid
-# turning a tampered manifest into a path traversal primitive.
+if [ -n "$OLD_SCHEMA" ]; then
+    printf '%s' "$OLD_SCHEMA" | grep -Eq '^(0|[1-9][0-9]{0,2})$' || die "backup old_schema is malformed"
+    [ "$OLD_SCHEMA" -le 255 ] || die "backup old_schema is out of range"
+fi
+[ -n "$OLD_VERSION" ] || die "backup manifest has no old_version"
+
+# Verify every file before creating or touching live state.  Generated paths
+# are relative to BACKUP_DIR; reject traversal and symlink-based escapes.
 if ! (
     cd "$BACKUP_DIR"
-    while IFS='  ' read -r digest file; do
+    while IFS=' ' read -r digest file; do
         [ -n "$digest" ] || continue
         case "$file" in
             ./*)
                 case "$file" in
-                    ./*/../*|./../*|../*)
+                    ./*/../*|./../*|../*|.|./|./..|..)
                         echo "ERROR: unsafe checksum path: $file" >&2
                         exit 1
                         ;;
@@ -61,6 +73,10 @@ if ! (
             echo "ERROR: invalid checksum in backup" >&2
             exit 1
         }
+        [ ! -L "$file" ] || {
+            echo "ERROR: backup contains a symlink: $file" >&2
+            exit 1
+        }
         actual=$(sha256sum "$file" | cut -d' ' -f1)
         [ "$actual" = "$digest" ] || {
             echo "ERROR: backup checksum mismatch for $file" >&2
@@ -71,78 +87,74 @@ if ! (
     exit 1
 fi
 
+[ -d "$MIGRATIONS_DIR" ] && [ ! -L "$MIGRATIONS_DIR" ] || die "migrations directory is unsafe"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 ROLLBACK_DIR="$MIGRATIONS_DIR/rollback-${STAMP}-$$"
-mkdir "$ROLLBACK_DIR"
-mkdir -p "$ROLLBACK_DIR/workspace"
+STAGE_DIR="$MIGRATIONS_DIR/.restore-stage-${STAMP}-$$"
+mkdir "$ROLLBACK_DIR" "$STAGE_DIR"
 
-CURRENT_VERSION=""
-if [ -f "$VERSION_FILE" ]; then
-    CURRENT_VERSION=$(tr -d '\r\n' < "$VERSION_FILE")
+current_schema=legacy
+if [ -e "$SCHEMA_FILE" ]; then
+    [ ! -L "$SCHEMA_FILE" ] && [ -f "$SCHEMA_FILE" ] || die "current schema marker is unsafe"
+    current_schema=$(tr -d '\r' < "$SCHEMA_FILE")
+    printf '%s' "$current_schema" | grep -Eq '^(0|[1-9][0-9]{0,2})$' || die "current schema marker is malformed"
+    [ "$current_schema" -le 255 ] || die "current schema marker is out of range"
 fi
-ROLLBACK_OLD_VERSION="${CURRENT_VERSION:-${NEW_VERSION:-}}"
 
-write_snapshot_metadata() {
-    snapshot_dir="$1"
-    old_version="$2"
-    new_version="$3"
-    {
-        printf 'old_version=%s\n' "$old_version"
-        printf 'new_version=%s\n' "$new_version"
-        printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'backup_dir=%s\n' "$snapshot_dir"
-    } > "$snapshot_dir/manifest"
-    : > "$snapshot_dir/checksums"
-    (
-        cd "$snapshot_dir"
-        find . -type f ! -name manifest ! -name checksums -print | sort | while IFS= read -r file; do
-            sha256sum "$file"
-        done
-    ) > "$snapshot_dir/checksums"
-    sync
-}
-
-move_live() {
-    source_path="$1"
-    target_path="$2"
-    if [ -e "$source_path" ]; then
-        mkdir -p "$(dirname "$target_path")"
-        mv "$source_path" "$target_path"
+rollback_ready=0
+restore_succeeded=0
+recover_on_failure() {
+    status=$?
+    if [ "$restore_succeeded" -ne 1 ] && [ "$status" -ne 0 ]; then
+        if [ "$rollback_ready" -eq 1 ] && state_inventory_remove "$DATA_DIR" &&
+            state_inventory_copy "$ROLLBACK_DIR" "$DATA_DIR" &&
+            state_inventory_copy_markers "$ROLLBACK_DIR" "$DATA_DIR"; then
+            echo "ERROR: restore failed; live state was restored from rollback snapshot $ROLLBACK_DIR" >&2
+        else
+            echo "ERROR: restore failed and automatic recovery from $ROLLBACK_DIR also failed" >&2
+            status=1
+        fi
     fi
-}
-
-restore_copy() {
-    source_path="$1"
-    target_path="$2"
-    if [ -e "$source_path" ]; then
-        mkdir -p "$(dirname "$target_path")"
-        cp -a "$source_path" "$target_path"
+    rm -rf -- "$STAGE_DIR" 2>/dev/null || true
+    if [ "$rollback_ready" -eq 0 ] && [ "$status" -ne 0 ]; then
+        rm -rf -- "$ROLLBACK_DIR" 2>/dev/null || true
     fi
+    exit "$status"
 }
+trap recover_on_failure EXIT
 
-move_live "$DATA_DIR/brain.db" "$ROLLBACK_DIR/brain.db"
-move_live "$DATA_DIR/config.toml" "$ROLLBACK_DIR/config.toml"
-for session_path in "$DATA_DIR"/workspace/sessions*; do
-    [ -e "$session_path" ] || continue
-    move_live "$session_path" "$ROLLBACK_DIR/workspace/$(basename "$session_path")"
-done
-
-restore_copy "$BACKUP_DIR/brain.db" "$DATA_DIR/brain.db"
-restore_copy "$BACKUP_DIR/config.toml" "$DATA_DIR/config.toml"
-for session_path in "$BACKUP_DIR"/workspace/sessions*; do
-    [ -e "$session_path" ] || continue
-    restore_copy "$session_path" "$DATA_DIR/workspace/$(basename "$session_path")"
-done
-
-if [ -n "$OLD_VERSION" ]; then
-    MARKER_TMP="${VERSION_FILE}.tmp.$$"
-    printf '%s\n' "$OLD_VERSION" > "$MARKER_TMP"
-    chmod 0600 "$MARKER_TMP"
-    mv -f "$MARKER_TMP" "$VERSION_FILE"
-else
-    rm -f "$VERSION_FILE"
-fi
-write_snapshot_metadata "$ROLLBACK_DIR" "$ROLLBACK_OLD_VERSION" "$OLD_VERSION"
+state_inventory_copy "$DATA_DIR" "$ROLLBACK_DIR" || die "current state could not be snapshotted"
+state_inventory_copy_markers "$DATA_DIR" "$ROLLBACK_DIR" || die "current state markers could not be snapshotted"
+{
+    printf 'format=2\n'
+    printf 'old_schema=%s\n' "$current_schema"
+    printf 'new_schema=%s\n' "${OLD_SCHEMA:-legacy}"
+    printf 'old_version=%s\n' "${current_schema}"
+    printf 'new_version=%s\n' "${OLD_VERSION}"
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'backup_dir=%s\n' "$ROLLBACK_DIR"
+} > "$ROLLBACK_DIR/manifest"
+: > "$ROLLBACK_DIR/checksums"
+(
+    cd "$ROLLBACK_DIR"
+    find . -type f ! -name checksums -print | sort | while IFS= read -r file; do
+        sha256sum "$file"
+    done
+) > "$ROLLBACK_DIR/checksums"
 sync
-printf 'STATE_RESTORE backup=%s rollback_snapshot=%s restored_version=%s\n' \
-    "$BACKUP_DIR" "$ROLLBACK_DIR" "${OLD_VERSION:-fresh}"
+rollback_ready=1
+
+state_inventory_copy "$BACKUP_DIR" "$STAGE_DIR" || die "restore staging failed; live state was not changed"
+state_inventory_copy_markers "$BACKUP_DIR" "$STAGE_DIR" || die "restore marker staging failed; live state was not changed"
+
+restore_succeeded=0
+state_inventory_remove "$DATA_DIR" || die "current state could not be removed safely"
+state_inventory_copy "$STAGE_DIR" "$DATA_DIR" || die "staged state could not be installed"
+state_inventory_copy_markers "$STAGE_DIR" "$DATA_DIR" || die "staged state markers could not be installed"
+if [ "${STATE_RESTORE_TEST_FAIL_AFTER_MUTATION:-false}" = "true" ]; then
+    die "test failure injected after live-state replacement"
+fi
+restore_succeeded=1
+sync
+printf 'STATE_RESTORE backup=%s rollback_snapshot=%s restored_schema=%s restored_version=%s\n' \
+    "$BACKUP_DIR" "$ROLLBACK_DIR" "${OLD_SCHEMA:-legacy}" "$OLD_VERSION"

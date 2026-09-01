@@ -47,9 +47,6 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
       - name: Reject CRLF in shipped text files
         shell: bash
         run: |
@@ -84,15 +81,31 @@ jobs:
           for script in .github/scripts/*.sh; do bash -n "$script"; done
 
       - name: ShellCheck shipped scripts
+        env:
+          SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
         run: |
-          shellcheck -s bash --severity=error zeroclaw/run.sh
-          shellcheck -s sh --severity=error zeroclaw/lib/*.sh
-          shellcheck -s sh --severity=error zeroclaw/tests/*.sh
-          shellcheck -s bash --severity=error .github/scripts/*.sh
+          set -euo pipefail
+          bash_scripts=(/src/zeroclaw/run.sh)
+          for script in "$GITHUB_WORKSPACE"/.github/scripts/*.sh; do
+            bash_scripts+=("/src/.github/scripts/$(basename "$script")")
+          done
+          sh_scripts=()
+          for script in "$GITHUB_WORKSPACE"/zeroclaw/lib/*.sh; do
+            sh_scripts+=("/src/zeroclaw/lib/$(basename "$script")")
+          done
+          for script in "$GITHUB_WORKSPACE"/zeroclaw/tests/*.sh; do
+            sh_scripts+=("/src/zeroclaw/tests/$(basename "$script")")
+          done
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
+            -s bash --severity=error "${bash_scripts[@]}"
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" "$SHELLCHECK_IMAGE" \
+            -s sh --severity=error "${sh_scripts[@]}"
 
   container:
     name: Build and smoke-test arm64 image
-    timeout-minutes: 20
+    # The acceptance lane runs several sequential arm64/QEMU containers,
+    # including the real daemon/provider round-trip and backup contract.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
@@ -116,11 +129,14 @@ jobs:
         run: |
           docker build --platform linux/arm64 --tag zeroclaw-ci --file zeroclaw/Dockerfile \
             --build-arg BUILD_VERSION="$(yq -r '.version' zeroclaw/config.yaml)" \
+            --build-arg BUILD_ARCH="$(yq -r '.arch[0]' zeroclaw/config.yaml)" \
             --build-arg ZEROCLAW_SHA256="$(yq -r '.sha256' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_SOURCE_COMMIT="$(yq -r '.source_commit' zeroclaw/binary-manifest.json)" \
+            --build-arg ADDON_SOURCE_COMMIT="$GITHUB_SHA" \
             --build-arg ZEROCLAW_SOURCE_DATE_EPOCH="$(yq -r '.source_date_epoch' zeroclaw/binary-manifest.json)" \
             --build-arg ZEROCLAW_LLVM_RNG_SEED="$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)" \
             --build-arg REQUIRE_VERIFIED_ARTIFACT="${{ inputs.require_verified_artifact == true && 'true' || 'false' }}" \
+            --build-arg ZEROCLAW_STATE_SCHEMA="$(tr -d '\r\n' < zeroclaw/state-schema)" \
             zeroclaw
 
       - name: Smoke-test image contents and entrypoint syntax
@@ -134,6 +150,11 @@ jobs:
           expected="$(yq -r '.version' zeroclaw/config.yaml)"
           actual="$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "io.hass.version" }}')"
           test "$expected" = "$actual"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$expected"
+          env_json="$(docker image inspect zeroclaw-ci --format '{{json .Config.Env}}')"
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_ADDON_VERSION=${expected}" 'index($expected) != null' >/dev/null
+          state_schema="$(tr -d '\r\n' < zeroclaw/state-schema)"
+          printf '%s' "$env_json" | jq -e --arg expected "ZEROCLAW_STATE_SCHEMA=${state_schema}" 'index($expected) != null' >/dev/null
 
       - name: Verify binary provenance manifest and image contents
         shell: bash
@@ -141,7 +162,43 @@ jobs:
           manifest_sha="$(yq -r '.sha256' zeroclaw/binary-manifest.json)"
           image_sha="$(docker run --rm --platform linux/arm64 --entrypoint /bin/sh zeroclaw-ci -c 'sha256sum /usr/local/bin/zeroclaw' | awk '{print $1}')"
           test "$manifest_sha" = "$image_sha"
-          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker image inspect zeroclaw-ci --format '{{ index .Config.Labels "org.opencontainers.image.upstream.revision" }}')" = "$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+
+      - name: Prove missing and invalid build metadata fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          common_args=(
+            --build-arg "BUILD_VERSION=$(yq -r '.version' zeroclaw/config.yaml)"
+            --build-arg "BUILD_ARCH=$(yq -r '.arch[0]' zeroclaw/config.yaml)"
+            --build-arg "ZEROCLAW_SHA256=$(yq -r '.sha256' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_SOURCE_COMMIT=$(yq -r '.source_commit' zeroclaw/binary-manifest.json)"
+            --build-arg "ADDON_SOURCE_COMMIT=$GITHUB_SHA"
+            --build-arg "ZEROCLAW_SOURCE_DATE_EPOCH=$(yq -r '.source_date_epoch' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_LLVM_RNG_SEED=$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)"
+            --build-arg "ZEROCLAW_STATE_SCHEMA=$(tr -d '\r\n' < zeroclaw/state-schema)"
+          )
+          expect_rejected() {
+            local name="$1"
+            shift
+            local log="$RUNNER_TEMP/zeroclaw-negative-${name}.log"
+            set +e
+            docker build --platform linux/arm64 \
+              --tag "zeroclaw-negative-${name}" \
+              --file zeroclaw/Dockerfile "$@" zeroclaw >"$log" 2>&1
+            local status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              cat "$log"
+              echo "expected ${name} build to be rejected" >&2
+              exit 1
+            fi
+          }
+          expect_rejected missing
+          expect_rejected invalid-verification-flag \
+            "${common_args[@]}" \
+            --build-arg REQUIRE_VERIFIED_ARTIFACT=maybe
 
       - name: Smoke-test startup rendering without external services
         run: >-
@@ -149,6 +206,31 @@ jobs:
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Smoke-test startup rendering with Telegram disabled
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -e SMOKE_NO_TELEGRAM=true
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Prove Supervisor floor fails closed before planner startup
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -e SMOKE_SUPERVISOR_VERSION=2026.03.9
+          -e SMOKE_EXPECT_STARTUP_FAILURE=true
+          -e SMOKE_EXPECTED_FAILURE='below the supported floor'
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Smoke-test Telegram session ownership boundary
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/telegram_session_smoke.sh'
 
       - name: Smoke-test broker-backed write path with fake HA
         run: >-
@@ -169,6 +251,7 @@ jobs:
       - name: Smoke-test root-owned provider broker mode
         run: >-
           docker run --rm --network none --platform linux/arm64
+          -e CANARY_CANDIDATE_COMMIT="$GITHUB_SHA"
           -e SMOKE_PROVIDER_BROKER=true
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci

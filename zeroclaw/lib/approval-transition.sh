@@ -14,6 +14,25 @@ CLAIMS_DIR="${ZEROCLAW_APPROVAL_CLAIM_DIR:-/data/approval-receipts/.claims}"
 CLAIM="${CLAIMS_DIR}/${SHORT}.claim"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 TICKET="${TICKET_DIR}/${SHORT}.json"
+AUDIT_DIR="${ZEROCLAW_AUDIT_DIR:-/data/audit}"
+ACTION_ADMISSION_DIR="${ZEROCLAW_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
+ACTION_QUOTA_LOCK="${ZEROCLAW_ACTION_QUOTA_LOCK:-/data/capability/.quota.lock}"
+ACTION_QUOTA_FILE="${ZEROCLAW_ACTION_QUOTA_FILE:-/data/capability/quota.json}"
+ACTION_LIMIT="${CAPABILITY_MAX_ACTIONS_PER_HOUR:-200}"
+approval_lock_held=0
+quota_lock_held=0
+admission_tmp=""
+
+cleanup() {
+    rm -f "$admission_tmp"
+    if [ "$quota_lock_held" -eq 1 ]; then
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+    fi
+    if [ "$approval_lock_held" -eq 1 ]; then
+        rmdir "$LOCK" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 fail() {
     echo "ERROR: $1" >&2
@@ -21,7 +40,7 @@ fail() {
 }
 
 case "$ACTION" in
-    approve|reject|claim|complete)
+    approve|reject|claim|claim_admit|complete)
         [ "${ZEROCLAW_APPROVAL_INTERNAL:-}" = "1" ] || fail "approval transition is internal-only"
         ;;
     verify|verify_claim)
@@ -35,20 +54,33 @@ esac
 printf '%s' "$SHORT" | grep -Eq '^[a-f0-9]{8}$' || fail "invalid ticket id"
 
 verify_marker() {
-    [ -f "$MARKER" ] || fail "ticket ${SHORT} is not approved"
-    [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing"
+    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "ticket ${SHORT} is not approved"
+    [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing"
     jq -e --arg id "$SHORT" --arg actor "$(jq -r '.approval.actor_user_id // empty' "$TICKET")" \
         --arg chat "$(jq -r '.approval.chat_id // empty' "$TICKET")" \
-        '.ticket == $id and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number")' \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number")' \
         "$MARKER" >/dev/null 2>&1 || fail "ticket ${SHORT} approval marker is invalid"
     verify_receipt
+    approval_audit_found=1
+    if [ -d "$AUDIT_DIR" ] && [ ! -L "$AUDIT_DIR" ]; then
+        for audit_file in "$AUDIT_DIR"/*.jsonl; do
+            [ -f "$audit_file" ] && [ ! -L "$audit_file" ] || continue
+            if jq -e --arg ticket "$SHORT" \
+                'select(.kind == "approve" and (.reason | type == "string") and (.reason | contains("ticket=" + $ticket)))' \
+                "$audit_file" >/dev/null 2>&1; then
+                approval_audit_found=0
+                break
+            fi
+        done
+    fi
+    [ "$approval_audit_found" -eq 0 ] || fail "ticket ${SHORT} approval audit is missing"
     EXP=$(jq -r '.expires_at // 0' "$TICKET")
     NOW=$(date -u +%s)
     [ "$NOW" -le "$EXP" ] || fail "ticket ${SHORT} expired"
 }
 
 verify_receipt() {
-    [ -f "$RECEIPT" ] || fail "ticket ${SHORT} was not sealed by the Telegram broker"
+    [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail "ticket ${SHORT} was not sealed by the Telegram broker"
     expected_digest=$(cat "$RECEIPT")
     actual_digest=$(sha256sum "$TICKET" | cut -d' ' -f1)
     [ -n "$expected_digest" ] && [ "$actual_digest" = "$expected_digest" ] || fail "ticket ${SHORT} changed after notification"
@@ -56,7 +88,7 @@ verify_receipt() {
 
 if [ "$ACTION" = "verify" ]; then
     verify_marker
-    [ ! -e "$CLAIM" ] || fail "ticket ${SHORT} is already claimed for application"
+    [ ! -e "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is already claimed for application"
     echo "APPROVED ${SHORT}"
     exit 0
 fi
@@ -75,18 +107,102 @@ acquire_lock() {
         [ "$LOCK_ATTEMPTS" -lt 100 ] || fail "ticket ${SHORT} is already being transitioned"
         sleep 0.1
     done
-    trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+    approval_lock_held=1
 }
+
+acquire_quota_lock() {
+    quota_attempts=0
+    while ! mkdir "$ACTION_QUOTA_LOCK" 2>/dev/null; do
+        quota_attempts=$((quota_attempts + 1))
+        [ "$quota_attempts" -le 100 ] || fail "capability action quota is busy"
+        sleep 0.1
+    done
+    quota_lock_held=1
+}
+
+validate_action_quota_config() {
+    case "$ACTION_LIMIT" in
+        ''|*[!0-9]*) fail "capability action limit is invalid" ;;
+    esac
+    [ "$ACTION_LIMIT" -ge 1 ] && [ "$ACTION_LIMIT" -le 1000 ] || \
+        fail "capability action limit is outside the safe range"
+}
+
+ticket_admission_count() {
+    count=0
+    if [ -d "$ACTION_ADMISSION_DIR" ] && [ ! -L "$ACTION_ADMISSION_DIR" ]; then
+        for admission in "$ACTION_ADMISSION_DIR"/*.json; do
+            [ -f "$admission" ] && [ ! -L "$admission" ] || continue
+            if jq -e --argjson hour "$1" \
+                '.hour_window == $hour and (.ticket | type == "string")' \
+                "$admission" >/dev/null 2>&1; then
+                count=$((count + 1))
+            fi
+        done
+    fi
+    if [ -d "$CLAIMS_DIR" ] && [ ! -L "$CLAIMS_DIR" ]; then
+        for claim_dir in "$CLAIMS_DIR"/*.claim; do
+            [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] || continue
+            claim_short=$(basename "$claim_dir" .claim)
+            [ -f "$ACTION_ADMISSION_DIR/${claim_short}.json" ] && continue
+            claim_quota="$claim_dir/quota.json"
+            if jq -e --argjson hour "$1" '.hour_window == $hour' "$claim_quota" >/dev/null 2>&1; then
+                count=$((count + 1))
+            else
+                # An incomplete claim is safer to count against the current
+                # window than to ignore and under-enforce the action budget.
+                count=$((count + 1))
+            fi
+        done
+    fi
+    printf '%s' "$count"
+}
+
+claim_with_admission() {
+    validate_action_quota_config
+    [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
+    acquire_lock
+    verify_marker
+    [ ! -e "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is already claimed"
+    acquire_quota_lock
+    now=$(date -u +%s)
+    hour_window=$((now / 3600))
+    if [ -f "$ACTION_QUOTA_FILE" ] && [ ! -L "$ACTION_QUOTA_FILE" ]; then
+        quota=$(cat "$ACTION_QUOTA_FILE")
+    else
+        quota='{}'
+    fi
+    printf '%s' "$quota" | jq -e 'type == "object"' >/dev/null 2>&1 || fail "capability action quota state is invalid"
+    global_requests=$(printf '%s' "$quota" | jq -r --argjson hour "$hour_window" \
+        'if .hour_window == $hour then (.requests_hour // 0) else 0 end')
+    case "$global_requests" in
+        ''|*[!0-9]*) fail "capability action quota state is invalid" ;;
+    esac
+    admission_count=$(ticket_admission_count "$hour_window")
+    total_requests=$((global_requests + admission_count))
+    [ "$total_requests" -lt "$ACTION_LIMIT" ] || fail "capability hourly action budget exceeded"
+    mkdir -p "$CLAIMS_DIR"
+    mkdir "$CLAIM" 2>/dev/null || fail "ticket ${SHORT} is already claimed"
+    admission_tmp="$CLAIM/.quota.json.tmp"
+    jq -nc --arg ticket "$SHORT" --argjson hour "$hour_window" --argjson created "$now" \
+        '{ticket:$ticket,hour_window:$hour,created_at:$created}' > "$admission_tmp" || fail "ticket admission could not be recorded"
+    chmod 0600 "$admission_tmp"
+    mv "$admission_tmp" "$CLAIM/quota.json"
+    admission_tmp=""
+    sync
+    echo "CLAIMED_ADMITTED ${SHORT}"
+}
+
+if [ "$ACTION" = "claim_admit" ]; then
+    claim_with_admission
+    exit 0
+fi
 
 if [ "$ACTION" = "claim" ]; then
     [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
     acquire_lock
-    verify_receipt
-    [ -f "$MARKER" ] || fail "ticket ${SHORT} is not approved"
+    verify_marker
     [ ! -e "$CLAIM" ] || fail "ticket ${SHORT} is already claimed"
-    EXP=$(jq -r '.expires_at // 0' "$TICKET")
-    NOW=$(date -u +%s)
-    [ "$NOW" -le "$EXP" ] || fail "ticket ${SHORT} expired"
     mkdir -p "$CLAIMS_DIR"
     mkdir "$CLAIM" 2>/dev/null || fail "ticket ${SHORT} is already claimed"
     echo "CLAIMED ${SHORT}"
@@ -95,8 +211,36 @@ fi
 
 if [ "$ACTION" = "complete" ]; then
     acquire_lock
-    [ -d "$CLAIM" ] || fail "ticket ${SHORT} is not claimed"
+    [ -d "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is not claimed"
+    claim_quota="$CLAIM/quota.json"
+    if [ -f "$claim_quota" ] && [ ! -L "$claim_quota" ]; then
+        if [ -e "$ACTION_ADMISSION_DIR" ] || [ -L "$ACTION_ADMISSION_DIR" ]; then
+            [ -d "$ACTION_ADMISSION_DIR" ] && [ ! -L "$ACTION_ADMISSION_DIR" ] || \
+                fail "capability action admission directory is unsafe"
+        else
+            mkdir "$ACTION_ADMISSION_DIR" 2>/dev/null || fail "capability action admission directory could not be created"
+            chmod 0700 "$ACTION_ADMISSION_DIR"
+        fi
+        admission_file="$ACTION_ADMISSION_DIR/${SHORT}.json"
+        if [ -e "$admission_file" ] || [ -L "$admission_file" ]; then
+            [ -f "$admission_file" ] && [ ! -L "$admission_file" ] || \
+                fail "capability action admission record is unsafe"
+            jq -e --arg ticket "$SHORT" \
+                '.ticket == $ticket and (.hour_window | type == "number" and floor == .)' \
+                "$admission_file" >/dev/null 2>&1 || \
+                fail "capability action admission record is invalid"
+        else
+            admission_tmp="${ACTION_ADMISSION_DIR}/.${SHORT}.XXXXXX"
+            admission_tmp=$(mktemp "$admission_tmp")
+            jq -c --arg ticket "$SHORT" '. + {ticket:$ticket}' "$claim_quota" > "$admission_tmp" || fail "ticket admission could not be finalized"
+            chmod 0600 "$admission_tmp"
+            mv "$admission_tmp" "$admission_file"
+            admission_tmp=""
+            sync
+        fi
+    fi
     rm -f "$MARKER" "$TICKET" "$RECEIPT"
+    rm -f "$claim_quota"
     rmdir "$CLAIM" || fail "ticket ${SHORT} claim could not be cleared"
     echo "COMPLETED ${SHORT}"
     exit 0
@@ -113,18 +257,42 @@ EXPECTED_ACTOR=$(jq -r '.approval.actor_user_id // empty' "$TICKET")
 EXPECTED_CHAT=$(jq -r '.approval.chat_id // empty' "$TICKET")
 [ -n "$EXPECTED_ACTOR" ] && [ "$ACTOR" = "$EXPECTED_ACTOR" ] || fail "actor is not authorized for ticket ${SHORT}"
 [ -n "$EXPECTED_CHAT" ] && [ "$CHAT" = "$EXPECTED_CHAT" ] || fail "chat is not authorized for ticket ${SHORT}"
-[ ! -e "$CLAIM" ] || fail "ticket ${SHORT} is being applied"
-[ ! -e "$MARKER" ] || fail "ticket ${SHORT} was already approved"
+[ ! -e "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is being applied"
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && jq -e '.state == "approval_pending"' "$MARKER" >/dev/null 2>&1; then
+        rm -f "$MARKER"
+    else
+        fail "ticket ${SHORT} was already approved"
+    fi
+fi
 
 case "$ACTION" in
     approve)
+        APPROVE_SERVICE=$(jq -er '.service | select(type == "string")' "$TICKET") || \
+            fail "ticket ${SHORT} has an invalid service; approval retained as pending"
+        APPROVE_PAYLOAD=$(jq -ce '.payload | select(type == "object")' "$TICKET") || \
+            fail "ticket ${SHORT} has an invalid payload; approval retained as pending"
         mkdir -p /data/approved
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
             --argjson approved_at "$NOW" \
-            '{ticket:$ticket,actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
         chmod 0640 "$TMP"
+        sync
         mv "$TMP" "$MARKER"
+        if ! /usr/local/bin/zc-audit-write approve "$APPROVE_SERVICE" "$APPROVE_PAYLOAD" \
+            "source=telegram;actor=${ACTOR};chat=${CHAT};ticket=${SHORT}"; then
+            rm -f "$MARKER"
+            fail "approval audit could not be persisted; ticket retained"
+        fi
+        TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
+        jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
+            --argjson approved_at "$NOW" \
+            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+        chmod 0640 "$TMP"
+        sync
+        mv "$TMP" "$MARKER"
+        sync
         echo "APPROVED ${SHORT}"
         ;;
     reject)
