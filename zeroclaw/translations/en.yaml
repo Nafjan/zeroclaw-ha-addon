@@ -161,26 +161,29 @@ configuration:
   provider_daily_token_budget:
     name: "Provider daily token budget"
     description: >-
-      Root broker reservation budget for requested output tokens. Requests
-      without max_tokens reserve the configured provider maximum.
+      Root broker reservation budget for input plus output tokens. Requests
+      without max_tokens reserve the configured provider maximum; the default
+      leaves room for a full-context primary reservation and one fallback.
   provider_openrouter_max_requests_per_hour:
     name: "OpenRouter requests per hour"
     description: "Independent root admission limit for the OpenRouter profile."
   provider_openrouter_daily_token_budget:
     name: "OpenRouter daily token budget"
-    description: "Independent root output-token budget for the OpenRouter profile."
+    description: >-
+      Independent root input-plus-output reservation budget for OpenRouter;
+      the default permits a failed full-context primary and one free fallback.
   provider_nvidia_max_requests_per_hour:
     name: "NVIDIA requests per hour"
     description: "Independent root admission limit for the NVIDIA profile."
   provider_nvidia_daily_token_budget:
     name: "NVIDIA daily token budget"
-    description: "Independent root output-token budget for the NVIDIA profile."
+    description: "Independent root input-plus-output reservation budget for the NVIDIA profile."
   provider_ark_max_requests_per_hour:
     name: "Ark requests per hour"
     description: "Independent root admission limit for the BytePlus ModelArk profile."
   provider_ark_daily_token_budget:
     name: "Ark daily token budget"
-    description: "Independent root output-token budget for the BytePlus ModelArk profile."
+    description: "Independent root input-plus-output reservation budget for the BytePlus ModelArk profile."
 
   # ─────── Agent runtime budgets ───────
   max_tool_iterations:
