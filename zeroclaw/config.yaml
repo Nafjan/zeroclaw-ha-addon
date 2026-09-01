@@ -62,8 +62,12 @@ options:
   log_level: info
 
   # --- Cost / safety budgets ---
-  daily_cost_limit_usd: 5.0
-  monthly_cost_limit_usd: 20.0
+  # The broker reserves a worst-case 65536-input/2048-output request at its
+  # conservative $0.10/1K-token ceiling before contacting an upstream. Keep
+  # the default above that one-request reservation so the documented full
+  # context path and its free fallback are actually usable.
+  daily_cost_limit_usd: 10.0
+  monthly_cost_limit_usd: 40.0
   max_actions_per_hour: 200
   # Root provider broker admission limits; these are independent of planner
   # settings and remain enforced when a client calls the local gateway.

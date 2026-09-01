@@ -146,6 +146,20 @@ jobs:
           test "$candidate_commit_prefix" = "${CANDIDATE_COMMIT:0:12}"
           git cat-file -e "${CANDIDATE_COMMIT}^{commit}"
           git merge-base --is-ancestor "$CANDIDATE_COMMIT" HEAD
+          # The candidate image must represent the exact source tree that was
+          # reviewed and built. Only the redacted post-canary evidence bundle
+          # may be committed after the candidate; source/workflow changes make
+          # this promotion request stale and require a new candidate build.
+          while IFS= read -r changed_file; do
+            case "$changed_file" in
+              zeroclaw/CANARY-EVIDENCE.md|zeroclaw/canary-evidence.json|zeroclaw/canary-config.yaml|zeroclaw/canary-identity.json|zeroclaw/provider-contract-report.json) ;;
+              '') ;;
+              *)
+                echo "candidate is stale: non-evidence file changed after the candidate: $changed_file" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only --diff-filter=ACMRTUXB "$CANDIDATE_COMMIT" HEAD)
           # A signed image and valid attestations are not sufficient for
           # production.  Bind the supplied candidate run to the exact
           # trusted reproducible-builder job; otherwise a hosted/cross/direct
@@ -247,11 +261,11 @@ jobs:
     name: Promote the already-canaryed digest
     needs: verify
     runs-on: ubuntu-latest
-    # This group is shared with release.yml's promote job.  The entire
-    # check/create/tag sequence must be serialized per release tag so two
-    # approved entry points cannot interleave on the same version.
+    # This group is shared with release.yml's promote job. Serialize the
+    # entire check/create/tag sequence globally: GitHub expression keys cannot
+    # canonicalize both vX and X spellings of the same release tag.
     concurrency:
-      group: zeroclaw-promotion-${{ inputs.release_tag }}
+      group: zeroclaw-promotion-production
       cancel-in-progress: false
     environment:
       name: production

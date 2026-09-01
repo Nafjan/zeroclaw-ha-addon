@@ -48,6 +48,7 @@ jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
     export PATH="/tmp/fake-curl:$PATH"
     export TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
     export TELEGRAM_CLIENT_AUTH_TOKEN=telegram-client-secret
+    export TELEGRAM_SYSTEM_AUTH_TOKEN=telegram-system-secret
     export TELEGRAM_APPROVAL_CHAT=42
     export ZEROCLAW_TELEGRAM_PORT=42629
     while true; do
@@ -67,9 +68,13 @@ SEALED_EXP=$(jq -r '.expires_at' /data/approval-receipts/tickets/abcdef12.json)
 [ "$SEALED_EXP" -le "$((SEALED_NOW + 1800))" ]
 
 if RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_text 43 'unexpected recipient' 2>/dev/null); then
-    echo "Telegram broker accepted a non-owner chat" >&2
+    echo "Telegram planner capability exposed arbitrary send_text" >&2
     exit 1
 fi
+
+SYSTEM_REQUEST=$(jq -nc '{operation:"send_system_notice",auth:"telegram-system-secret",text:"cost watchdog"}')
+SYSTEM_RESPONSE=$(printf '%s\n' "$SYSTEM_REQUEST" | /bin/busybox nc -w 10 127.0.0.1 42629)
+printf '%s' "$SYSTEM_RESPONSE" | jq -e '.ok == true and .result.message_id == 123' >/dev/null
 
 if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 >/dev/null 2>&1; then
     echo "Telegram broker smoke accepted the wrong actor" >&2

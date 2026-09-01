@@ -156,10 +156,14 @@ start_proxy() {
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
         PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
+        PROVIDER_MAX_REQUESTS_PER_HOUR="${TEST_PROVIDER_MAX_REQUESTS_PER_HOUR:-120}" \
+        PROVIDER_CLIENT_REQUESTS_PER_HOUR="${TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR:-120}" \
         PROVIDER_DAILY_COST_LIMIT_MICROS="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
          PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 \
          PROVIDER_LEDGER_FILE="$LEDGER" \
          PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
+         PROVIDER_CLIENT_RATE_FILE=/data/provider/profile-client-rate.json \
+         PROVIDER_CLIENT_RATE_LOCK=/data/provider/.profile-client-rate.lock \
          PROVIDER_RESERVATION_TTL_SECONDS=180 \
          PROVIDER_TOTAL_TIMEOUT_SECONDS="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}" \
          /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 \
@@ -229,6 +233,28 @@ jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "
     "$LEDGER" >/dev/null
 jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 3' \
     "$LEDGER" >/dev/null
+
+# The hourly request ceiling is global to the provider ledger, not a separate
+# allowance per profile. A failed primary must therefore prevent a fallback
+# attempt when the single global slot is already consumed.
+rm -f "$LEDGER" "$LOCK" /data/provider/global-hour-primary.log /data/provider/global-hour-fallback.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
+nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="global-hour-route|openrouter|global-hour-primary|paid
+global-hour-route|nvidia|global-hour-fallback|paid"
+start_upstream "$OPENROUTER_PORT" 402 "Payment Required" \
+    '{"error":{"code":"insufficient_quota","message":"credits exhausted"}}' \
+    /data/provider/global-hour-primary.log
+start_upstream "$NVIDIA_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}]}' \
+    /data/provider/global-hour-fallback.log
+TEST_PROVIDER_MAX_REQUESTS_PER_HOUR=1 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+global_hour_response=$(request_proxy '{"model":"global-hour-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$global_hour_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/global-hour-fallback.log ]
+jq -e '[.records[] | select(.hour_window == (now / 3600 | floor))] | length == 1' "$LEDGER" >/dev/null
 
 # A transient 5xx is classified separately from credit exhaustion and can
 # reach an explicitly configured alternate profile.
@@ -458,6 +484,27 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 413 Payload Too Large' >/dev/null
 printf '%s' "$response" | grep -F 'provider input is too large' >/dev/null
 [ ! -f /data/provider/input-limit.log ]
 
+# Exercise the real near-boundary default instead of only a reduced fixture
+# limit. The complete JSON envelope must fit under the 65,536-token admission
+# ceiling and still reach the upstream.
+rm -f "$LEDGER" "$LOCK" /data/provider/input-boundary.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|200000"
+ROUTE_SPEC="input-boundary-route|openrouter|input-boundary-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"input-boundary-ok"}}]}' \
+    /data/provider/input-boundary.log
+PROVIDER_MAX_INPUT_TOKENS=65536 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+boundary_content=$(head -c 64800 /dev/zero | tr '\0' x)
+boundary_body=$(jq -nc --arg content "$boundary_content" \
+    '{model:"input-boundary-route",messages:[{role:"user",content:$content}]}' )
+response=$(request_proxy "$boundary_body")
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'input-boundary-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "input-boundary-model" and .reserved_input_tokens >= 65000 and .reserved_input_tokens <= 65536)] | length == 1' \
+    "$LEDGER" >/dev/null
+
 # The root broker must reject fan-out requests instead of forwarding n>1 while
 # reserving only one completion budget.
 rm -f "$LEDGER" "$LOCK" /data/provider/n-invalid.log
@@ -492,7 +539,25 @@ response=$(request_proxy "$overhead_body")
 stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
-jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens == 260)] | length == 1' \
+jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens >= 260 and .settled_tokens == 16)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# Provider usage is telemetry, not permission to release a durable reservation.
+# A successful response that under-reports both dimensions remains charged at
+# least the admitted input/output reservation.
+rm -f "$LEDGER" "$LOCK" /data/provider/usage-floor.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="usage-floor-route|openrouter|usage-floor-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"usage-floor-ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}' \
+    /data/provider/usage-floor.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"usage-floor-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'usage-floor-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "usage-floor-model" and .usage_floor == true and .settled_input_tokens > 0 and .settled_tokens == 16)] | length == 1' \
     "$LEDGER" >/dev/null
 
 # Provider-reported paid cost is untrusted. A syntactically valid understated
@@ -569,6 +634,17 @@ jq -n \
         budget_denied_before_upstream: true,
         ledger_schema: 1,
         ledger_sha256: $ledger_sha256
+      },
+      limits: {
+        max_input_tokens: 65536,
+        max_output_tokens: 2048,
+        profile_daily_token_budget: 200000,
+        global_daily_token_budget: 200000,
+        global_requests_per_hour: 120,
+        client_requests_per_hour: 120,
+        daily_cost_limit_micros: 10000000,
+        monthly_cost_limit_micros: 40000000,
+        max_cost_micros_per_1k_tokens: 100000
       }
     }' > "$report_tmp"
 chmod 0640 "$report_tmp"

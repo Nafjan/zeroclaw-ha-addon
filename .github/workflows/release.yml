@@ -1410,11 +1410,11 @@ jobs:
     needs: [candidate, canary]
     if: ${{ inputs.promote == true }}
     runs-on: ubuntu-latest
-    # Share the version-keyed lock with promote-existing.yml.  The candidate
-    # build may run concurrently, but immutable tag creation and Git release
-    # tagging must be one serialized operation per release tag.
+    # Share the production lock with promote-existing.yml. GitHub expression
+    # keys cannot canonicalize both vX and X spellings of one release tag, so
+    # immutable tag creation and Git release tagging use one global lock.
     concurrency:
-      group: zeroclaw-promotion-${{ needs.candidate.outputs.release_tag }}
+      group: zeroclaw-promotion-production
       cancel-in-progress: false
     environment:
       name: production

@@ -74,7 +74,16 @@ jq -e \
         .accounting.budget_denied_before_upstream
     ][]; . == true) and
     (.accounting.ledger_schema == 1) and
-    (.accounting.ledger_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    (.accounting.ledger_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.limits.max_input_tokens == 65536) and
+    (.limits.max_output_tokens == 2048) and
+    (.limits.profile_daily_token_budget == 200000) and
+    (.limits.global_daily_token_budget == 200000) and
+    (.limits.global_requests_per_hour == 120) and
+    (.limits.client_requests_per_hour == 120) and
+    (.limits.daily_cost_limit_micros == 10000000) and
+    (.limits.monthly_cost_limit_micros == 40000000) and
+    (.limits.max_cost_micros_per_1k_tokens == 100000)
     ' "$REPORT_FILE" >/dev/null || {
     echo "provider contract report does not satisfy the required machine-checked contract" >&2
     exit 1

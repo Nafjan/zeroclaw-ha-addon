@@ -16,6 +16,7 @@ TOKEN_FILE="${TELEGRAM_TOKEN_FILE:-/run/zeroclaw/telegram-token}"
 APPROVAL_CHAT="${TELEGRAM_APPROVAL_CHAT:-}"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 CLIENT_AUTH_TOKEN="${TELEGRAM_CLIENT_AUTH_TOKEN:-}"
+SYSTEM_AUTH_TOKEN="${TELEGRAM_SYSTEM_AUTH_TOKEN:-}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -45,11 +46,18 @@ case "$read_status" in
 esac
 [ -n "$request" ] || json_error "empty Telegram request"
 [ "${#request}" -le 131072 ] || json_error "Telegram request too large"
-[ -n "$CLIENT_AUTH_TOKEN" ] || json_error "Telegram broker client authentication is unavailable"
+[ -n "$CLIENT_AUTH_TOKEN" ] || [ -n "$SYSTEM_AUTH_TOKEN" ] || \
+    json_error "Telegram broker authentication is unavailable"
 provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
     json_error "Telegram broker client authentication failed"
-[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+AUTH_KIND=""
+if [ -n "$CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
+    AUTH_KIND=client
+elif [ -n "$SYSTEM_AUTH_TOKEN" ] && [ "$provided_auth" = "$SYSTEM_AUTH_TOKEN" ]; then
+    AUTH_KIND=system
+else
     json_error "Telegram broker client authentication failed"
+fi
 request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
     json_error "Telegram request is not valid JSON"
 [ -r "$TOKEN_FILE" ] || json_error "Telegram broker credential is unavailable"
@@ -324,12 +332,12 @@ send_approval() {
     json_value "$result"
 }
 
-send_text() {
-    chat_id="$1"
-    text="$2"
-    valid_chat_id "$chat_id" || json_error "invalid chat id"
-    [ -n "$APPROVAL_CHAT" ] && [ "$chat_id" = "$APPROVAL_CHAT" ] || json_error "chat is not the configured approval owner"
-    body=$(jq -nc --arg cid "$chat_id" --arg text "$text" '{chat_id:$cid,text:$text}')
+send_system_notice() {
+    text="$1"
+    [ "$AUTH_KIND" = system ] || json_error "system Telegram notice is not available to the planner"
+    [ -n "$APPROVAL_CHAT" ] || json_error "Telegram approval owner is not configured"
+    [ "${#text}" -ge 1 ] && [ "${#text}" -le 512 ] || json_error "system notice is too long"
+    body=$(jq -nc --arg cid "$APPROVAL_CHAT" --arg text "System notice: $text" '{chat_id:$cid,text:$text}')
     if ! response=$(telegram_curl sendMessage -fsS --fail-with-body --connect-timeout 5 --max-time 15 -X POST \
         -H 'Content-Type: application/json' -d "$body"); then
         json_error "Telegram sendMessage failed"
@@ -339,16 +347,16 @@ send_text() {
 
 case "$operation" in
     send_approval)
+        [ "$AUTH_KIND" = client ] || json_error "approval delivery is not available to the system notifier"
         ticket=$(printf '%s' "$request" | jq -er '.ticket | select(type == "string")' 2>/dev/null) || json_error "ticket must be a string"
         text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || json_error "text must be a string"
         ticket_json=$(printf '%s' "$request" | jq -er '.ticket_json | select(type == "string")' 2>/dev/null) || json_error "ticket_json must be a string"
         chat_id=$(printf '%s' "$request" | jq -er '.chat_id | tostring' 2>/dev/null) || json_error "chat_id is required"
         send_approval "$ticket" "$text" "$chat_id" "$ticket_json"
         ;;
-    send_text)
-        chat_id=$(printf '%s' "$request" | jq -er '.chat_id | tostring' 2>/dev/null) || json_error "chat_id is required"
+    send_system_notice)
         text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || json_error "text must be a string"
-        send_text "$chat_id" "$text"
+        send_system_notice "$text"
         ;;
     *)
         json_error "operation is not available to the planner"
