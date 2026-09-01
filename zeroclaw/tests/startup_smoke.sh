@@ -21,6 +21,7 @@ smoke_failure_diagnostics() {
         /tmp/zeroclaw-real-provider-response \
         /data/logs/capability-broker.log \
         /data/logs/provider-broker.log \
+        /data/provider/quota.json \
         /data/provider/roundtrip-upstream-request; do
         if [ -f "$diagnostic_file" ]; then
             echo "--- ${diagnostic_file} ---" >&2
@@ -56,8 +57,8 @@ cat > /data/options.json <<'JSON'
   "provider_nvidia_fallback_enabled": false,
   "provider_ark_fallback_enabled": false,
   "log_level": "info",
-  "daily_cost_limit_usd": 5.0,
-  "monthly_cost_limit_usd": 20.0,
+  "daily_cost_limit_usd": 10.0,
+  "monthly_cost_limit_usd": 40.0,
   "max_actions_per_hour": 200,
   "provider_max_requests_per_hour": 120,
   "provider_daily_token_budget": 200000,

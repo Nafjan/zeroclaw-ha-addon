@@ -151,8 +151,12 @@ PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-200000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-65536}"
-DAILY_COST_LIMIT="${DAILY_COST_LIMIT:-5.0}"
-MONTHLY_COST_LIMIT="${MONTHLY_COST_LIMIT:-20.0}"
+# The broker reserves a worst-case 65536-input/2048-output request at its
+# conservative $0.10/1K-token ceiling before contacting an upstream. Keep the
+# runtime default above that one-request reservation so the documented full
+# context path and its free fallback are actually usable.
+DAILY_COST_LIMIT="${DAILY_COST_LIMIT:-10.0}"
+MONTHLY_COST_LIMIT="${MONTHLY_COST_LIMIT:-40.0}"
 PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000
 
 cost_to_micros() {
@@ -585,9 +589,21 @@ chmod 0700 /data/capability/telegram-callbacks
 # present because root adapters read selected files from pending state.
 for state_tree in "${WS}" /data/pending /data/routines /data/tools /data/approved \
     /data/audit /data/undo /data/logs /data/provider /data/capability /data/approval-receipts /data/migrations; do
-    [ -d "$state_tree" ] || continue
+    [ -e "$state_tree" ] || [ -L "$state_tree" ] || continue
+    if [ -L "$state_tree" ] || [ ! -d "$state_tree" ]; then
+        bashio::log.fatal "persistent state tree is not a regular directory: ${state_tree}"
+        exit 1
+    fi
     if find "$state_tree" -type l -print -quit | grep -q .; then
         bashio::log.fatal "persistent state tree contains a symlink: ${state_tree}"
+        exit 1
+    fi
+    special_state_entry=$(find "$state_tree" ! -type f ! -type d -print -quit 2>/dev/null) || {
+        bashio::log.fatal "persistent state tree could not be inspected: ${state_tree}"
+        exit 1
+    }
+    if [ -n "$special_state_entry" ]; then
+        bashio::log.fatal "persistent state tree contains a non-regular entry: ${special_state_entry}"
         exit 1
     fi
 done
@@ -747,12 +763,41 @@ create_broker_client_auth() {
     printf '%s' "${auth_value}"
 }
 
+create_root_client_auth() {
+    auth_name="$1"
+    auth_path="${BROKER_RUNTIME_DIR}/${auth_name}"
+    [ ! -L "${auth_path}" ] || {
+        bashio::log.fatal "root broker auth path is a symlink: ${auth_path}"
+        exit 1
+    }
+    if [ -e "${auth_path}" ] && [ ! -f "${auth_path}" ]; then
+        bashio::log.fatal "root broker auth path is not a regular file: ${auth_path}"
+        exit 1
+    fi
+    auth_tmp=$(mktemp "${BROKER_RUNTIME_DIR}/.${auth_name}.XXXXXX") || {
+        bashio::log.fatal "could not create root broker auth file"
+        exit 1
+    }
+    auth_value=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+    case "${auth_value}" in
+        [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+        *) rm -f "${auth_tmp}"; bashio::log.fatal "could not generate root broker auth credential"; exit 1 ;;
+    esac
+    printf '%s\n' "${auth_value}" > "${auth_tmp}"
+    chown root:root "${auth_tmp}"
+    chmod 0600 "${auth_tmp}"
+    mv -f "${auth_tmp}" "${auth_path}"
+    printf '%s' "${auth_value}"
+}
+
 PROVIDER_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-client-auth"
 CAPABILITY_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/capability-client-auth"
 TELEGRAM_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-client-auth"
+TELEGRAM_SYSTEM_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-system-auth"
 PROVIDER_CLIENT_AUTH_TOKEN="$(create_broker_client_auth provider-client-auth)"
 CAPABILITY_CLIENT_AUTH_TOKEN="$(create_broker_client_auth capability-client-auth)"
 TELEGRAM_CLIENT_AUTH_TOKEN="$(create_broker_client_auth telegram-client-auth)"
+TELEGRAM_SYSTEM_AUTH_TOKEN="$(create_root_client_auth telegram-system-auth)"
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     # Native ZeroClaw sends ZEROCLAW_API_KEY as the Authorization bearer on
     # its OpenAI-compatible provider request. In broker mode that value is a
@@ -1042,7 +1087,7 @@ TELEGRAM_PORT=42619
         unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
             ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
-        export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN
+        export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
         export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
         while true; do
             if ! /bin/busybox nc -l -p "${TELEGRAM_PORT}" -s 127.0.0.1 \
@@ -1071,6 +1116,32 @@ TICKET="/data/pending/\${SHORT}.json"
 RESP=\$(/usr/local/bin/tg-capability send_approval "\$SHORT" "${FIRST_USER}" "\$TEXT")
 
 SCRIPT
+
+# tg-system-notify is root-only and uses a separate credential that the planner
+# cannot read. It is reserved for fixed, root-generated operational notices;
+# the planner-facing tg-capability client has no arbitrary send-text operation.
+cat > /usr/local/bin/tg-system-notify << 'SCRIPT'
+#!/bin/sh
+set -eu
+[ "$(id -u)" -eq 0 ] || { echo "system Telegram notices are root-only" >&2; exit 1; }
+[ "$#" -eq 1 ] || { echo "Usage: tg-system-notify <text>" >&2; exit 1; }
+[ "${#1}" -ge 1 ] && [ "${#1}" -le 512 ] || { echo "system notice is too long" >&2; exit 1; }
+AUTH_FILE=/run/zeroclaw/telegram-system-auth
+[ -r "$AUTH_FILE" ] || { echo "system Telegram credential is unavailable" >&2; exit 1; }
+AUTH=$(tr -d '\r\n' < "$AUTH_FILE")
+[ -n "$AUTH" ] || { echo "system Telegram credential is empty" >&2; exit 1; }
+REQUEST=$(jq -nc --arg auth "$AUTH" --arg text "$1" \
+    '{operation:"send_system_notice",auth:$auth,text:$text}')
+RESPONSE=$(/bin/busybox nc -w 40 127.0.0.1 42619 <<EOF
+$REQUEST
+EOF
+) || { echo "Telegram broker unavailable" >&2; exit 1; }
+[ -n "$RESPONSE" ] || { echo "Telegram broker returned no response" >&2; exit 1; }
+jq -e '.ok == true' >/dev/null <<EOF
+$RESPONSE
+EOF
+SCRIPT
+chmod 0700 /usr/local/bin/tg-system-notify
 
 # ==============================================================
 # tg-callback-watcher — single owner of the Telegram bot socket.
@@ -1467,10 +1538,10 @@ apply_approved_ticket() {
 # Forward an inbound text message to the gateway and relay the response.
 handle_message() {
     chat_id="\$1"; from_id="\$2"; chat_type="\$3"; text="\$4"; update_id="\$5"
-    valid_chat_id "\$chat_id" || return 1
-    valid_positive_id "\$from_id" || return 1
+    valid_chat_id "\$chat_id" || return 0
+    valid_positive_id "\$from_id" || return 0
     case "\$update_id" in
-        ''|*[!0-9]*) return 1 ;;
+        ''|*[!0-9]*) return 0 ;;
     esac
     # Ordinary messages are private-chat only.  An allowlisted user must not
     # cause private household state or planner responses to be posted into a
@@ -1490,7 +1561,8 @@ handle_message() {
         # Do not persist replies for untrusted senders. A public bot can
         # receive arbitrarily many unique update IDs, and caching each denial
         # would turn Telegram traffic into an unbounded disk-write primitive.
-        if ! send_msg "\$chat_id" "Not authorized."; then return 1; fi
+        # Silently drop the message so an attacker cannot hold the sequential
+        # update cursor hostage by making Telegram reject a denial response.
         return 0
     fi
     [ -z "\$text" ] && return
@@ -1725,16 +1797,16 @@ while true; do
 
         if ! valid_positive_id "\$FROM" || ! valid_chat_id "\$CHAT_ID" || ! valid_positive_id "\$MSG_ID"; then
             printf '%s\n' "Telegram callback update \$UPDATE_ID had invalid actor or chat identifiers" >>/data/logs/telegram-broker.log
-            if ! answer_cb "\$CB_ID" "Invalid callback."; then BATCH_OK=false; break; fi
+            answer_cb "\$CB_ID" "Invalid callback." || true
             continue
         fi
         if ! telegram_message_destination_allowed "\$CHAT_TYPE" "\$CHAT_ID" "\$FROM"; then
-            if ! answer_cb "\$CB_ID" "Private chat required."; then BATCH_OK=false; break; fi
+            answer_cb "\$CB_ID" "Private chat required." || true
             continue
         fi
 
         if ! is_allowed_user "\$FROM"; then
-            if ! answer_cb "\$CB_ID" "Not authorized."; then BATCH_OK=false; break; fi
+            answer_cb "\$CB_ID" "Not authorized." || true
             continue
         fi
         if [ "\$FROM" != "\$APPROVAL_USER" ] || [ "\$CHAT_ID" != "\$APPROVAL_CHAT" ]; then
@@ -1890,6 +1962,75 @@ EXTRA_ALLOW=\$(jq -er '.extra_allow | select(type == "string")' "\$POLICY_RUNTIM
 export POLICY_MODE POLICY_QUIET_CONFIRM POLICY_BULK_THRESHOLD POLICY_CLIMATE_DELTA
 export POLICY_REQUIRE_APPROVAL QUIET_HOURS EXTRA_DENY EXTRA_CONFIRM EXTRA_ALLOW
 
+snapshot_undo_state() {
+    undo_entity="\$1"
+    UNDO_SNAPSHOT_COUNTER=\$((\${UNDO_SNAPSHOT_COUNTER:-0} + 1))
+    undo_timestamp=\$(date -u +%s)
+    undo_tmp=\$(mktemp "/data/undo/\${undo_timestamp}-\$\$-\${UNDO_SNAPSHOT_COUNTER}.XXXXXX") || return 1
+    undo_file="\${undo_tmp}.json"
+    [ ! -e "\$undo_file" ] && [ ! -L "\$undo_file" ] || {
+        rm -f -- "\$undo_tmp"
+        return 1
+    }
+    if ! /usr/local/bin/ha-capability get_state "\$undo_entity" > "\$undo_tmp"; then
+        rm -f -- "\$undo_tmp"
+        return 1
+    fi
+    jq -e --arg entity "\$undo_entity" \
+        'type == "object" and .entity_id == \$entity' "\$undo_tmp" >/dev/null 2>&1 || {
+        rm -f -- "\$undo_tmp"
+        return 1
+    }
+    chmod 0600 "\$undo_tmp" || {
+        rm -f -- "\$undo_tmp"
+        return 1
+    }
+    if [ "\$(id -u)" -eq 0 ]; then
+        chown zeroclaw:zeroclaw "\$undo_tmp" || {
+            rm -f -- "\$undo_tmp"
+            return 1
+        }
+    fi
+    # Link into the final .json name without an overwrite window. The undo
+    # directory is planner-writable, so a privileged mv -f would let an
+    # untrusted process replace a pre-existing snapshot.
+    ln "\$undo_tmp" "\$undo_file" || {
+        rm -f -- "\$undo_tmp"
+        return 1
+    }
+    rm -f -- "\$undo_tmp"
+    sync || {
+        rm -f -- "\$undo_file"
+        return 1
+    }
+    printf '%s\n' "\$undo_file"
+}
+
+capture_undo_snapshots() {
+    undo_body="\$1"
+    undo_entities=\$(printf '%s' "\$undo_body" | jq -r '
+        if (.entity_id? | type) == "string" then .entity_id
+        elif (.entity_id? | type) == "array" then .entity_id[]
+        else empty end
+    ' 2>/dev/null) || return 1
+    [ -n "\$undo_entities" ] || return 2
+    undo_created_files=""
+    while IFS= read -r undo_entity; do
+        [ -n "\$undo_entity" ] || continue
+        undo_file=\$(snapshot_undo_state "\$undo_entity") || {
+            for undo_created_file in \$undo_created_files; do
+                rm -f -- "\$undo_created_file"
+            done
+            return 1
+        }
+        undo_created_files="\$undo_created_files \$undo_file"
+    done <<EOF
+\$undo_entities
+EOF
+    [ -n "\$undo_created_files" ] || return 2
+    return 0
+}
+
 # --- Apply-ticket short circuit ---
 if [ "\$1" = "--apply-ticket" ]; then
     [ "\$(id -u)" -eq 0 ] || { echo "ERROR: ticket application is Telegram-adapter-only" >&2; exit 1; }
@@ -1898,6 +2039,19 @@ if [ "\$1" = "--apply-ticket" ]; then
     [ ! -f "\$TICKET" ] && { echo "ERROR: ticket \${UUID} missing"; exit 1; }
     SVC=\$(jq -r .service "\$TICKET")
     BODY=\$(jq -c .payload "\$TICKET")
+    if [ "${ENABLE_UNDO}" = "true" ]; then
+        if capture_undo_snapshots "\$BODY"; then
+            :
+        else
+            SNAPSHOT_STATUS=\$?
+            if [ "\$SNAPSHOT_STATUS" -ne 2 ]; then
+                /usr/local/bin/zc-audit-write undo_unavailable "\$SVC" "\$BODY" \
+                    "ticket=\${UUID};before_execution" || true
+                echo "ERROR: approved action was not executed because its undo snapshot could not be captured" >&2
+                exit 1
+            fi
+        fi
+    fi
     # The root broker verifies and consumes the sealed ticket transactionally.
     # Claim state is carried by root-owned state, never by an environment
     # variable that would stop at the local TCP boundary.
@@ -1949,10 +2103,18 @@ KIND=\${VERDICT%%:*}
 # --- Audit row + execute ---
 case "\$KIND" in
     allow)
-        # Snapshot prev state for undo
-        if [ -n "\$ENTITY" ] && [ "${ENABLE_UNDO}" = "true" ]; then
-            /usr/local/bin/ha-capability get_state "\$ENTITY" \
-                > "/data/undo/\$(date -u +%s)-\${ENTITY//./_}.json" 2>/dev/null || true
+        if [ "${ENABLE_UNDO}" = "true" ]; then
+            if capture_undo_snapshots "\$BODY"; then
+                :
+            else
+                SNAPSHOT_STATUS=\$?
+                if [ "\$SNAPSHOT_STATUS" -ne 2 ]; then
+                    /usr/local/bin/zc-audit-write undo_unavailable "\$SERVICE" "\$BODY" \
+                        "before_execution" || true
+                    echo "ERROR: action was not executed because its undo snapshot could not be captured" >&2
+                    exit 1
+                fi
+            fi
         fi
         if OUT=\$(/usr/local/bin/ha-action-raw "\$SERVICE" "\$BODY"); then
             echo "\$OUT"
@@ -2474,6 +2636,49 @@ chmod +x /usr/local/bin/ha-* /usr/local/bin/zc-* /usr/local/bin/tg-*
 # ==============================================================
 # config.toml
 # ==============================================================
+install_generated_file() {
+    generated_target="$1"
+    generated_owner="$2"
+    generated_mode="$3"
+    generated_tmp="$4"
+    generated_dir=$(dirname -- "$generated_target")
+    [ -d "$generated_dir" ] && [ ! -L "$generated_dir" ] || {
+        rm -f "$generated_tmp"
+        bashio::log.fatal "generated-file directory is not a regular directory: ${generated_dir}"
+        exit 1
+    }
+    if [ -e "$generated_target" ] || [ -L "$generated_target" ]; then
+        [ -f "$generated_target" ] && [ ! -L "$generated_target" ] || {
+            rm -f "$generated_tmp"
+            bashio::log.fatal "generated-file target is not a regular file: ${generated_target}"
+            exit 1
+        }
+    fi
+    chown "$generated_owner" "$generated_tmp"
+    chmod "$generated_mode" "$generated_tmp"
+    mv -f "$generated_tmp" "$generated_target" || {
+        rm -f "$generated_tmp"
+        bashio::log.fatal "could not install generated file: ${generated_target}"
+        exit 1
+    }
+}
+
+write_generated_file() {
+    generated_target="$1"
+    generated_owner="$2"
+    generated_mode="$3"
+    generated_tmp=$(mktemp /run/zeroclaw/.generated.XXXXXX) || {
+        bashio::log.fatal "could not stage generated file: ${generated_target}"
+        exit 1
+    }
+    if ! cat > "$generated_tmp"; then
+        rm -f "$generated_tmp"
+        bashio::log.fatal "could not render generated file: ${generated_target}"
+        exit 1
+    fi
+    install_generated_file "$generated_target" "$generated_owner" "$generated_mode" "$generated_tmp"
+}
+
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     PROVIDER_NAME="custom:http://127.0.0.1:42620/v1"
     PROVIDER_BASE_URL="http://127.0.0.1:42620/v1"
@@ -2484,7 +2689,7 @@ else
     PROVIDER_NAME="custom:https://openrouter.ai/api/v1"
     PROVIDER_BASE_URL="https://openrouter.ai/api/v1"
 fi
-cat > "${CONFIG_DIR}/config.toml" << TOMLEOF
+write_generated_file "${CONFIG_DIR}/config.toml" root:zeroclaw 0640 << TOMLEOF
 schema_version = 2
 
 [providers]
@@ -2588,7 +2793,11 @@ TOMLEOF
 # ==============================================================
 # SOUL.md — behavior, policy literacy, world-state respect
 # ==============================================================
-cat > "${WS}/SOUL.md" << SOULEOF
+SOUL_TMP=$(mktemp /run/zeroclaw/.generated.XXXXXX) || {
+    bashio::log.fatal "could not stage SOUL.md"
+    exit 1
+}
+cat > "$SOUL_TMP" << SOULEOF
 Role: Home automation executor for ${HOME_LOCATION}.
 Languages: ${HOME_LANGUAGES} — match the user's language exactly.
 Output: 1-2 lines max. No preamble. No "Done." No "Sure!" / "I'll" / "Let me".
@@ -2719,7 +2928,7 @@ SOULEOF
 
 # v3.1: Creation skill paragraph appended only when enabled
 if [ "${ENABLE_CREATION}" = "true" ]; then
-cat >> "${WS}/SOUL.md" << 'SOULEXT'
+cat >> "$SOUL_TMP" << 'SOULEXT'
 
 ## Creation skill (v3.1, enabled)
 You can propose new HA objects. Every creation is approval-gated and persistent
@@ -2735,10 +2944,11 @@ reports success.
 See CREATION.md for templates and validation rules.
 SOULEXT
 fi
+install_generated_file "${WS}/SOUL.md" zeroclaw:zeroclaw 0600 "$SOUL_TMP"
 
 # v3.1: CREATION.md skill doc (only when enabled — keeps prompt small otherwise)
 if [ "${ENABLE_CREATION}" = "true" ]; then
-cat > "${WS}/CREATION.md" << 'CREATEEOF'
+write_generated_file "${WS}/CREATION.md" zeroclaw:zeroclaw 0600 << 'CREATEEOF'
 # Creation Skill (v3.1)
 
 You may draft three kinds of HA objects. All go through the standard approval
@@ -2838,16 +3048,23 @@ CREATEEOF
 fi
 
 # Empty LESSONS.md (auto-hydrated by ZeroClaw on startup)
-[ ! -f "${WS}/LESSONS.md" ] && cat > "${WS}/LESSONS.md" << 'LESSEOF'
+if [ -e "${WS}/LESSONS.md" ] || [ -L "${WS}/LESSONS.md" ]; then
+    [ -f "${WS}/LESSONS.md" ] && [ ! -L "${WS}/LESSONS.md" ] || {
+        bashio::log.fatal "LESSONS.md is not a regular file"
+        exit 1
+    }
+else
+    write_generated_file "${WS}/LESSONS.md" zeroclaw:zeroclaw 0600 << 'LESSEOF'
 # Lessons Learned (auto-prepended to every prompt)
 # This file grows over time as the user corrects mistakes.
 # Format: one short rule per line. Pinned lessons start with [PIN].
 LESSEOF
+fi
 
 # ==============================================================
 # TOOLS.md
 # ==============================================================
-cat > "${WS}/TOOLS.md" << 'TOOLSEOF'
+write_generated_file "${WS}/TOOLS.md" zeroclaw:zeroclaw 0600 << 'TOOLSEOF'
 ## Home Assistant command reference
 
 The entries below are command aliases, not function-call names. Invoke every
@@ -2885,7 +3102,7 @@ TOOLSEOF
 # ==============================================================
 # USER.md (parameterized from add-on config)
 # ==============================================================
-cat > "${WS}/USER.md" << USEREOF
+write_generated_file "${WS}/USER.md" zeroclaw:zeroclaw 0600 << USEREOF
 ## Home context
 - Location: ${HOME_LOCATION:-not configured}
 - Languages: ${HOME_LANGUAGES:-en}
@@ -2900,7 +3117,11 @@ USEREOF
 # ==============================================================
 # SKILL.md — ha skill, all actions go through ha-action-guarded
 # ==============================================================
-cat > "${WS}/skills/ha/SKILL.md" << 'SKILLEOF'
+SKILL_TMP=$(mktemp /run/zeroclaw/.generated.XXXXXX) || {
+    bashio::log.fatal "could not stage HA SKILL.md"
+    exit 1
+}
+cat > "$SKILL_TMP" << 'SKILLEOF'
 ---
 name: "ha"
 description: "Home Assistant device control — read-only queries and policy-gated actions"
@@ -2940,7 +3161,7 @@ SKILLEOF
 
 # v3.1: append creation tools to the ha skill only when the feature is on
 if [ "${ENABLE_CREATION}" = "true" ]; then
-cat >> "${WS}/skills/ha/SKILL.md" << 'CRSKILLEOF'
+cat >> "$SKILL_TMP" << 'CRSKILLEOF'
 
 - ha-create-scene <scene_id> '<friendly name>' '<json entity_states>' —
   draft a scene and return a confirmation ticket.
@@ -2951,11 +3172,12 @@ cat >> "${WS}/skills/ha/SKILL.md" << 'CRSKILLEOF'
 - ha-apply-creation <id8> — apply an approved creation ticket.
 CRSKILLEOF
 fi
+install_generated_file "${WS}/skills/ha/SKILL.md" zeroclaw:zeroclaw 0600 "$SKILL_TMP"
 
 # ==============================================================
 # MEMORY_SNAPSHOT.md — privacy-preserving runtime note
 # ==============================================================
-cat > "${WS}/MEMORY_SNAPSHOT.md" << 'MEMEOF'
+write_generated_file "${WS}/MEMORY_SNAPSHOT.md" zeroclaw:zeroclaw 0600 << 'MEMEOF'
 # Entity IDs, room names, device topology, and personal preferences are not
 # shipped in the image. They are resolved from the live Home Assistant instance
 # through typed read capabilities and may be persisted only after an explicit
@@ -2974,7 +3196,7 @@ scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY \
-        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
+        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
 }
 
 # ==============================================================
@@ -3039,7 +3261,7 @@ fi
         if [ "$OVER" = "1" ] && [ ! -f /run/zeroclaw/cost-degraded ]; then
             touch /run/zeroclaw/cost-degraded
             if [ "${TELEGRAM_ENABLED}" = "true" ]; then
-                /usr/local/bin/tg-capability send_text "${FIRST_USER}" \
+                /usr/local/bin/tg-system-notify \
                     "⚠️ Cost watchdog: today's spend \$${TODAY} > 80% of \$${LIMIT}. Routing to cheap model only." >/dev/null 2>&1 || true
             fi
         fi
@@ -3060,8 +3282,8 @@ fi
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
- unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
-    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN
+unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
+    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from

@@ -34,11 +34,6 @@ case "$OP" in
             --arg text "$3" --arg ticket_json "$ticket_json" \
             '{operation:$operation,ticket:$ticket,chat_id:$chat_id,text:$text,ticket_json:$ticket_json}')
         ;;
-    send_text)
-        [ "$#" -eq 2 ] || { echo "Usage: tg-capability send_text <chat_id> <text>" >&2; exit 1; }
-        REQUEST=$(jq -nc --arg operation "$OP" --arg chat_id "$1" --arg text "$2" \
-            '{operation:$operation,chat_id:$chat_id,text:$text}')
-        ;;
     *)
         echo "Telegram capability is not available for this operation" >&2
         exit 1

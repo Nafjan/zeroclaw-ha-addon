@@ -35,6 +35,14 @@ state_inventory_validate_tree() {
         echo "ERROR: persistent state tree contains a symlink: $source_path" >&2
         return 1
     fi
+    special_path=$(find "$source_path" ! -type f ! -type d -print -quit 2>/dev/null) || {
+        echo "ERROR: persistent state tree could not be inspected: $source_path" >&2
+        return 1
+    }
+    [ -z "$special_path" ] || {
+        echo "ERROR: persistent state tree contains a non-regular entry: $special_path" >&2
+        return 1
+    }
     node_count=$(find "$source_path" -print 2>/dev/null | wc -l | tr -d ' ')
     case "$node_count" in
         ''|*[!0-9]*)

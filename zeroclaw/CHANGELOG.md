@@ -31,6 +31,10 @@
 - Raise the default profile reservation budgets to 200000 tokens so a
   full-context primary reservation can fail safely while one same-profile free
   fallback remains admissible; independent dollar caps still limit spend.
+- Raise the default daily/monthly cost ceilings to $10/$40 because the
+  conservative maximum 65536-input/2048-output reservation is about $6.76 at
+  the broker's $0.10/1K-token safety ceiling; the caps remain configurable and
+  are enforced before provider contact.
 - Add arm64 profile/fallback, migration, credential-isolation, and real
   ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
   disabled until their provider contract has been exercised.
@@ -63,6 +67,18 @@
   generated 16k-token planner context can reach the broker under its
   conservative byte-for-token reservation; oversized requests remain rejected
   before any provider contact.
+- Charge successful provider calls at least their durable input/output
+  reservations even when upstream usage telemetry under-reports, and project
+  responses to a bounded OpenAI-compatible shape before returning them to the
+  planner.
+- Count authenticated client churn and all provider profiles against global
+  hourly/daily admission ceilings; encoded, escaped, or split provider
+  credential reflections are rejected before crossing the planner boundary.
+- Reject FIFOs and other special files in persistent state, capture undo state
+  transactionally before every entity-backed approved action, and make
+  untrusted Telegram traffic best-effort so it cannot stall the update cursor.
+- Remove arbitrary planner-directed Telegram messages; operational notices use
+  a separate root-only notifier credential and fixed approval-owner routing.
 
 ## 3.1.3.5 (August 2026) — ZeroClaw 0.7.5 and native provider configuration
 
