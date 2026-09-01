@@ -64,7 +64,7 @@ cat > /data/options.json <<'JSON'
   "policy_extra_deny": [],
   "policy_extra_confirm": [],
   "policy_extra_allow": [],
-  "policy_trust_enabled": true,
+  "policy_trust_enabled": false,
   "policy_trust_promote_after": 5
 }
 JSON

@@ -26,9 +26,9 @@ configuration:
   ha_token:
     name: "Home Assistant long-lived token"
     description: >-
-      Deprecated migration option. The add-on uses the Supervisor-provided
-      token automatically; leave this blank unless completing a controlled
-      legacy-token migration.
+      Deprecated migration-only option. It cannot replace the Supervisor token;
+      leave it blank. The app refuses to start without the Supervisor-provided
+      credential.
   telegram_bot_token:
     name: "Telegram bot token"
     description: >-
@@ -236,19 +236,21 @@ configuration:
   daily_report_time:
     name: "Daily report time (UTC, HH:MM)"
     description: >-
-      What time the agent sends the daily summary. The current release interprets
-      this value as UTC; configure the schedule explicitly for your home offset.
+      Retained for migration compatibility only. This release does not schedule
+      reports; create a Home Assistant automation with the desired time zone.
   daily_report_enabled:
     name: "Send daily report"
-    description: "Disable if you don't want the daily summary."
+    description: >-
+      Reserved and ignored in this supervised release. Create a Home Assistant
+      automation for a recurring report instead.
   observer_enabled:
     name: "Enable proactive observer"
     description: >-
-      Periodic check that lets the agent flag anomalies, repeating patterns,
-      and forgotten devices. Suppresses NOOP responses so it doesn't spam.
+      Reserved and ignored in this supervised release. Use a Home Assistant
+      automation if you want a periodic check.
   observer_interval_minutes:
     name: "Observer interval (minutes)"
-    description: "How often the observer runs. 15 is a good balance."
+    description: "Migration-only; no ZeroClaw observer schedule is started."
 
   # ─────── Phase switches ───────
   enable_creation_skill:
@@ -309,12 +311,12 @@ configuration:
     description: >-
       Patterns to auto-allow even if the preset would have asked. Use sparingly.
   policy_trust_enabled:
-    name: "Enable trust promotion"
+    name: "Trust promotion (reserved)"
     description: >-
-      After you approve the same action shape N times, the policy auto-promotes
-      it to allow. You get a notification and can demote it from Telegram.
+      Reserved for a future broker-owned trust ledger. It is disabled in this
+      release; every write still requires a root-sealed Telegram approval.
   policy_trust_promote_after:
-    name: "Trust promote after N approvals"
-    description: "How many approvals it takes to auto-promote a confirm to allow."
+    name: "Reserved trust threshold"
+    description: "Compatibility setting; trust promotion is disabled in this release."
 
 network: {}

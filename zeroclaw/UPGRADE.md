@@ -10,6 +10,13 @@ replays produced the same ZeroClaw 0.7.5 SHA (`1a3911d3…`). The signed CI work
 result before publication; do not deploy an untagged working tree or bypass the
 candidate/canary gates.
 
+The legacy `ha_token` option is retained only so older options objects migrate
+cleanly. It cannot replace the Supervisor-issued `SUPERVISOR_TOKEN`; without
+that runtime credential the app refuses its startup preflight. Likewise,
+`daily_report_*` and `observer_*` settings remain schema-compatible but are
+ignored in this supervised release. Create any recurring report or observer
+behavior as a Home Assistant automation.
+
 ## Before installing
 
 1. Treat the currently configured Home Assistant token, Telegram bot token, and
@@ -66,6 +73,8 @@ byte-for-byte, preserves secret-file mode, and excludes ephemeral `/run` state.
 The app deliberately does not map `addon_config`: its state and Supervisor
 options are already under `/data`, so the planner has no unnecessary host
 configuration tree to read or modify.
+The legacy ZeroClaw scheduler is not started or mutated; old schedule options
+are retained for migration only and should remain disabled.
 The provider broker owns profile-bound model routes and per-profile budgets in
 root-owned state. OpenRouter remains the default profile. NVIDIA and BytePlus
 ModelArk are optional, disabled-by-default edges that require both a separate
@@ -134,8 +143,11 @@ enable production writes while it is selected.
 If any canary gate fails, disable writes, stop the app, preserve the migration
 snapshot and audit files, and return to the previously known-good app image.
 Restore state only from the matching migration manifest after validating the
-backup. With the app stopped, the installed helper moves the current state to
-a recoverable rollback snapshot before restoring the selected backup:
+backup. The launcher and restore helper take a root-only runtime lock for the
+whole state transition; restore refuses to run while the app or another
+maintenance operation is live. With the app stopped, the installed helper
+moves the current state to a recoverable rollback snapshot before restoring the
+selected backup:
 
 ```sh
 state-restore /data /data/migrations/<legacy-or-schema>-to-schema-<new-schema>-<timestamp>-<pid>
