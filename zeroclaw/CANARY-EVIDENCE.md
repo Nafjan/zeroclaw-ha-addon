@@ -117,7 +117,12 @@ to the evidence commit and the six URL/SHA256 fields, for example:
 
 when dispatching `.github/workflows/promote-existing.yml`. The promotion workflow verifies the
 descriptor content, its SHA256, the isolated `zeroclaw_canary` slug, and the
-`tag@digest` image reference before it accepts the evidence.
+resolved `tag@digest` identity recorded alongside the Supervisor-compatible
+bare image repository before it accepts the evidence. Supervisor app
+configuration does not accept a tag or digest in `image:`; it derives the
+image tag from `version:`. The descriptor therefore carries the exact
+canary tag in `version:`, the bare repository in `image:`, and the exact
+resolved `repository:tag@digest` in its comments and identity file.
 That workflow verifies the signed candidate tag, exact canary alias digest,
 attestations, evidence hash, candidate run/commit binding, the provider report
 contract, explicit operator attestation, and every listed gate before creating
@@ -130,8 +135,9 @@ that the candidate is the successful `workflow_dispatch` run on `master` using
 the `zeroclaw-release-linux-x64` trusted builder, then verifies the candidate
 signature and provenance/SBOM attestations before writing the alias. It uploads
 the mandatory side-load descriptor artifact. Copy its
-`config.yaml` into a local app directory such as `/addons/zeroclaw_canary/`
-before installing the canary; use a separate Telegram bot from production.
+`config.yaml` into a local app directory such as
+`/addons/local/zeroclaw_canary/` before installing the canary; use a separate
+Telegram bot from production.
 
 ## Telegram canary procedure
 
