@@ -28,6 +28,9 @@
   those explicitly configured free routes on the same profile, while keeping
   invalid credentials, transient failures, local budget exhaustion, and
   tool-capable turns fail-closed.
+- Raise the default profile reservation budgets to 200000 tokens so a
+  full-context primary reservation can fail safely while one same-profile free
+  fallback remains admissible; independent dollar caps still limit spend.
 - Add arm64 profile/fallback, migration, credential-isolation, and real
   ZeroClaw round-trip smoke coverage. NVIDIA and Ark edges remain explicitly
   disabled until their provider contract has been exercised.

@@ -60,7 +60,7 @@ cat > /data/options.json <<'JSON'
   "monthly_cost_limit_usd": 20.0,
   "max_actions_per_hour": 200,
   "provider_max_requests_per_hour": 120,
-  "provider_daily_token_budget": 100000,
+  "provider_daily_token_budget": 200000,
   "max_tool_iterations": 8,
   "max_history_messages": 30,
   "max_context_tokens": 16000,

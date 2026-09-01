@@ -68,13 +68,16 @@ options:
   # Root provider broker admission limits; these are independent of planner
   # settings and remain enforced when a client calls the local gateway.
   provider_max_requests_per_hour: 120
-  provider_daily_token_budget: 100000
+  # A full 65536-input/2048-output reservation is 67584 tokens. Keep enough
+  # room for a failed primary reservation plus one same-profile free fallback;
+  # the separate dollar caps remain the spend control.
+  provider_daily_token_budget: 200000
   provider_openrouter_max_requests_per_hour: 120
-  provider_openrouter_daily_token_budget: 100000
+  provider_openrouter_daily_token_budget: 200000
   provider_nvidia_max_requests_per_hour: 60
-  provider_nvidia_daily_token_budget: 100000
+  provider_nvidia_daily_token_budget: 200000
   provider_ark_max_requests_per_hour: 60
-  provider_ark_daily_token_budget: 100000
+  provider_ark_daily_token_budget: 200000
 
   # --- Agent runtime budgets ---
   max_tool_iterations: 8
