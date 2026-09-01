@@ -326,8 +326,6 @@ set +e
 PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/bashio-test.sh >/tmp/zeroclaw-startup.log 2>&1
 run_status=$?
 set -e
-printf 'startup smoke run_status=%s\n' "$run_status" >&2
-set -x
 
 if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
     [ "$run_status" -ne 0 ] && [ "$run_status" -ne 124 ] || {
@@ -403,7 +401,7 @@ test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
 [ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
 /src/tests/approval_transition_smoke.sh
 /src/tests/approval_concurrency_smoke.sh
-/bin/sh -x /src/tests/telegram_broker_smoke.sh
+/src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     /src/tests/provider_broker_smoke.sh
     /src/tests/provider_profile_fallback_smoke.sh
@@ -411,4 +409,3 @@ if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     jq -e '.schema_version == 1 and .status == "passed" and (.routes | length) >= 6 and (.classification | type) == "object" and (.safety | type) == "object" and (.accounting | type) == "object"' /data/provider/provider-contract-report.json >/dev/null
     ! grep -E -i 'provider-secret|telegram-secret|supervisor-secret|legacy-secret' /data/provider/provider-contract-report.json >/dev/null 2>&1
 fi
-set +x

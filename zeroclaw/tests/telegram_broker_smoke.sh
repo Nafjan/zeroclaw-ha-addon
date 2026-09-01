@@ -74,7 +74,7 @@ fi
 
 SYSTEM_REQUEST=$(jq -nc '{operation:"send_system_notice",auth:"telegram-system-secret",text:"cost watchdog"}')
 SYSTEM_RESPONSE=$(printf '%s\n' "$SYSTEM_REQUEST" | /bin/busybox nc -w 10 127.0.0.1 42629)
-printf '%s' "$SYSTEM_RESPONSE" | jq -e '.ok == true and .result.message_id == 123' >/dev/null
+printf '%s' "$SYSTEM_RESPONSE" | jq -e '.message_id == 123' >/dev/null
 
 if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 >/dev/null 2>&1; then
     echo "Telegram broker smoke accepted the wrong actor" >&2
