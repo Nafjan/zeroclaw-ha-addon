@@ -113,7 +113,9 @@ jobs:
           test "$candidate_run_id" = "$target_run_id"
           # A signed image and valid attestations are not sufficient for the
           # canary alias. Require the exact candidate to have completed on
-          # master using the dedicated reproducible release runner.
+          # master using one of the repository's approved reproducible builder
+          # labels. The cross builder is pinned and reproducible on
+          # ubuntu-latest; trusted-aa uses the dedicated release runner.
           candidate_run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}")"
           printf '%s' "$candidate_run_json" | jq -e \
             --arg commit "$CANDIDATE_COMMIT" \
@@ -129,7 +131,8 @@ jobs:
              ([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")][0] |
               (.status == "completed") and
               (.conclusion == "success") and
-              (.labels | index("zeroclaw-release-linux-x64") != null))' >/dev/null
+              ((.labels | index("ubuntu-latest") != null) or
+               (.labels | index("zeroclaw-release-linux-x64") != null)))' >/dev/null
           candidate_digest="$(docker buildx imagetools inspect "${IMAGE}:${CANDIDATE_TAG}" --format '{{.Manifest.Digest}}')"
           test "$candidate_digest" = "$SOURCE_DIGEST"
           image_ref="${IMAGE}@${SOURCE_DIGEST}"
