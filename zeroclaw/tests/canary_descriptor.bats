@@ -17,7 +17,7 @@ teardown() {
     rm -rf "$TMP_DIR"
 }
 
-@test "renderer creates a pinned isolated Supervisor descriptor and identity" {
+@test "renderer creates a Supervisor-compatible isolated descriptor and identity" {
     run bash "$RENDERER" "$CANONICAL_CONFIG" "$IMAGE" "$TAG" "$DIGEST" "$COMMIT" "$DESCRIPTOR_DIR"
     [ "$status" -eq 0 ]
     [ -f "$DESCRIPTOR_DIR/config.yaml" ]
@@ -25,16 +25,22 @@ teardown() {
     config_sha256="$(sha256sum "$DESCRIPTOR_DIR/config.yaml" | awk '{print $1}')"
     run bash "$VERIFIER" "$DESCRIPTOR_DIR/config.yaml" "$IMAGE" "$TAG" "$DIGEST" "$COMMIT" "$config_sha256"
     [ "$status" -eq 0 ]
-    jq -e --arg digest "$DIGEST" --arg commit "$COMMIT" --arg sha "$config_sha256" '
-        .schema_version == 1 and
+    jq -e --arg image "$IMAGE" --arg tag "$TAG" --arg digest "$DIGEST" --arg commit "$COMMIT" --arg sha "$config_sha256" '
+        .schema_version == 2 and
         .descriptor_kind == "homeassistant_local_app" and
         .app_slug == "zeroclaw_canary" and
+        .version == $tag and
+        .image == $image and
+        .image_tag == $tag and
+        .resolved_image == ($image + ":" + $tag + "@" + $digest) and
         .candidate_digest == $digest and
         .candidate_commit == $commit and
         .config_sha256 == $sha and
         .minimum_supervisor_version == "2026.04.0"
     ' "$DESCRIPTOR_DIR/canary-identity.json" >/dev/null
-    grep -F "image: \"${IMAGE}:${TAG}@${DIGEST}\"" "$DESCRIPTOR_DIR/config.yaml" >/dev/null
+    grep -F -x "image: \"${IMAGE}\"" "$DESCRIPTOR_DIR/config.yaml" >/dev/null
+    grep -F -x "version: ${TAG}" "$DESCRIPTOR_DIR/config.yaml" >/dev/null
+    grep -F -x "# resolved_image: ${IMAGE}:${TAG}@${DIGEST}" "$DESCRIPTOR_DIR/config.yaml" >/dev/null
     grep -F 'slug: zeroclaw_canary' "$DESCRIPTOR_DIR/config.yaml" >/dev/null
 }
 
