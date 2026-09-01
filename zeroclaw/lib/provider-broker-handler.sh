@@ -321,7 +321,16 @@ write_ledger() {
     ledger_tmp="${LEDGER_FILE}.tmp.$$"
     printf '%s\n' "$1" > "$ledger_tmp" || return 1
     chmod 0600 "$ledger_tmp"
-    mv -f "$ledger_tmp" "$LEDGER_FILE"
+    # A reservation must survive a broker restart or host power loss before
+    # the upstream request is attempted. Flush both the file and the parent
+    # directory around the atomic rename; otherwise the durable ledger can
+    # lag behind provider spend even though the request itself succeeded.
+    sync -f "$ledger_tmp" || {
+        rm -f "$ledger_tmp"
+        return 1
+    }
+    mv -f "$ledger_tmp" "$LEDGER_FILE" || return 1
+    sync -f "$(dirname -- "$LEDGER_FILE")" || return 1
 }
 
 acquire_ledger_lock() {

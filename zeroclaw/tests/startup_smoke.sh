@@ -6,6 +6,11 @@
 
 set -eu
 
+# The image test provides a synthetic Supervisor credential so the entrypoint
+# exercises its real fail-closed preflight against the fake Supervisor below.
+: "${SUPERVISOR_TOKEN:=supervisor-secret}"
+export SUPERVISOR_TOKEN
+
 cat > /data/options.json <<'JSON'
 {
   "openrouter_api_key": "provider-secret",
@@ -139,12 +144,15 @@ trap cleanup EXIT
 
 # Minimal local HA endpoint so the smoke test exercises the broker transport
 # without contacting the real Supervisor.
+SMOKE_SUPERVISOR_VERSION="${SMOKE_SUPERVISOR_VERSION:-2026.8.2}"
+export SMOKE_SUPERVISOR_VERSION
 printf '%s\n' '127.0.0.1 supervisor' >> /etc/hosts
 cat > /tmp/fake-ha-handler <<'FAKE_HA'
 #!/bin/sh
 IFS= read -r request_line || exit 0
 printf '%s\n' "$request_line" >> /tmp/zeroclaw-ha-debug
 case "$request_line" in
+    *" /supervisor/info "*) body=$(printf '{"result":"ok","data":{"version":"%s"}}' "$SMOKE_SUPERVISOR_VERSION") ;;
     *" /core/api/states/"*)
         body='{"entity_id":"light.kitchen","state":"on","attributes":{"friendly_name":"Kitchen","current_temperature":24}'
         body="${body}}"
@@ -279,6 +287,20 @@ PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/ba
 run_status=$?
 set -e
 
+if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
+    [ "$run_status" -ne 0 ] && [ "$run_status" -ne 124 ] || {
+        echo "startup unexpectedly succeeded while testing a fail-closed preflight" >&2
+        cat /tmp/zeroclaw-startup.log >&2
+        exit 1
+    }
+    grep -F "${SMOKE_EXPECTED_FAILURE:-Supervisor version preflight}" /tmp/zeroclaw-startup.log >/dev/null || {
+        echo "startup failed for an unexpected reason" >&2
+        cat /tmp/zeroclaw-startup.log >&2
+        exit 1
+    }
+    exit 0
+fi
+
 [ "$run_status" -eq 124 ]
 [ "$(cat /tmp/zeroclaw-helper-token-scan)" = CLEAN ]
 if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
@@ -343,4 +365,7 @@ test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
     /src/tests/provider_broker_smoke.sh
     /src/tests/provider_profile_fallback_smoke.sh
+    test -s /data/provider/provider-contract-report.json
+    jq -e '.schema_version == 1 and .status == "passed" and (.routes | length) >= 6 and (.classification | type) == "object" and (.safety | type) == "object" and (.accounting | type) == "object"' /data/provider/provider-contract-report.json >/dev/null
+    ! grep -E -i 'provider-secret|telegram-secret|supervisor-secret|legacy-secret' /data/provider/provider-contract-report.json >/dev/null 2>&1
 fi

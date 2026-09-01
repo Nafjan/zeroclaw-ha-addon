@@ -8,6 +8,7 @@ EXPECTED_RUN_ID="${4:?candidate workflow run id is required}"
 EXPECTED_COMMIT="${5:?candidate commit is required}"
 EXPECTED_SHA256="${6:?evidence SHA256 is required}"
 EXPECTED_DESCRIPTOR_SHA256="${7:?canary descriptor SHA256 is required}"
+EXPECTED_PROVIDER_REPORT_SHA256="${8:?provider contract report SHA256 is required}"
 
 [ -s "$EVIDENCE_FILE" ] || {
     echo "canary evidence file is missing or empty" >&2
@@ -44,9 +45,15 @@ printf '%s' "$EXPECTED_DESCRIPTOR_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
     exit 1
 }
 
+printf '%s' "$EXPECTED_PROVIDER_REPORT_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+    echo "provider contract report SHA256 has an invalid format" >&2
+    exit 1
+}
+
 jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" \
   --arg run_id "$EXPECTED_RUN_ID" --arg commit "$EXPECTED_COMMIT" \
-  --arg descriptor_sha256 "$EXPECTED_DESCRIPTOR_SHA256" '
+  --arg descriptor_sha256 "$EXPECTED_DESCRIPTOR_SHA256" \
+  --arg provider_report_sha256 "$EXPECTED_PROVIDER_REPORT_SHA256" '
   def hash256: if type == "string" then test("^[0-9a-f]{64}$") else false end;
   def nonempty_text: if type == "string" then (length > 0 and length <= 256) else false end;
   def supervisor_version_ok:
@@ -55,7 +62,7 @@ jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" \
       (.minor | tonumber) as $minor |
       ($major > 2026 or ($major == 2026 and $minor >= 4)))
     catch false;
-  (.schema_version == 1)
+  (.schema_version == 2)
   and (.candidate_digest == $digest)
   and (.canary_tag == $tag)
   and ((.candidate_run_id | tostring) == $run_id)
@@ -63,6 +70,11 @@ jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" \
   and (.tested_at | if type == "string" then test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") else false end)
   and (.ha_version | nonempty_text)
   and (.supervisor_version | supervisor_version_ok)
+  and (.supervisor_preflight | type == "object")
+  and (.supervisor_preflight.api_endpoint == "/supervisor/info")
+  and (.supervisor_preflight.version == .supervisor_version)
+  and (.supervisor_preflight.minimum_version == "2026.04.0")
+  and (.supervisor_preflight.verified_before_install == true)
   and (.descriptor.side_loaded == true)
   and (.descriptor.app_slug == "zeroclaw_canary")
   and (.descriptor.artifact_sha256 == $descriptor_sha256)
@@ -97,6 +109,16 @@ jq -e --arg digest "$EXPECTED_DIGEST" --arg tag "$EXPECTED_TAG" \
       .write_canary.outcome_audited,
       .write_canary.writes_disabled_after
     ][]; . == true)
+  and (.provider_contract | type == "object")
+  and (.provider_contract.report_schema_version == 1)
+  and (.provider_contract.report_sha256 == $provider_report_sha256)
+  and (.operator_attestation | type == "object")
+  and (.operator_attestation.operator_ref | nonempty_text)
+  and (.operator_attestation.attested_at | if type == "string" then test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") else false end)
+  and (.operator_attestation.method == "canary-runbook-v2")
+  and (.operator_attestation.automated_reports_verified == true)
+  and (.operator_attestation.gate_groups_attested | type == "array")
+  and ((["descriptor","backup","rollback","supervisor","read_only","approval","write_canary","provider_contract"] - .operator_attestation.gate_groups_attested) | length == 0)
 ' "$EVIDENCE_FILE" >/dev/null || {
     echo "canary evidence does not satisfy the required schema or gates" >&2
     exit 1
