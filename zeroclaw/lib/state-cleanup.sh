@@ -59,8 +59,7 @@ remove_expired_ticket() {
     fi
 
     rm -f "$ticket" "${MARKER_DIR}/${short}.marker" \
-        "${RECEIPT_DIR}/${short}.sha256" \
-        "${DATA_DIR}/pending/${short}.json"
+        "${RECEIPT_DIR}/${short}.sha256"
     if [ -d "$claim" ]; then
         rmdir "$claim" 2>/dev/null || true
     fi

@@ -25,6 +25,49 @@ die() {
     exit 1
 }
 
+runtime_lock_held=0
+runtime_lock_dir=""
+release_runtime_lock() {
+    if [ "$runtime_lock_held" -eq 1 ]; then
+        rm -f -- "$runtime_lock_dir/pid"
+        rmdir "$runtime_lock_dir" 2>/dev/null || true
+        runtime_lock_held=0
+    fi
+}
+
+acquire_runtime_lock() {
+    runtime_lock_dir="$1/.state-runtime-lock"
+    if [ "${STATE_MIGRATION_LOCK_HELD:-false}" = "true" ]; then
+        [ -d "$runtime_lock_dir" ] && [ ! -L "$runtime_lock_dir" ] &&
+            [ -f "$runtime_lock_dir/pid" ] || die "inherited persistent-state runtime lock is missing"
+        inherited_pid=$(cat "$runtime_lock_dir/pid" 2>/dev/null || true)
+        case "$inherited_pid" in
+            ''|0|*[!0-9]*) die "inherited persistent-state runtime lock owner is invalid" ;;
+        esac
+        kill -0 "$inherited_pid" 2>/dev/null ||
+            die "inherited persistent-state runtime lock owner is not live"
+        return 0
+    fi
+    if [ -e "$runtime_lock_dir" ]; then
+        [ -d "$runtime_lock_dir" ] && [ ! -L "$runtime_lock_dir" ] &&
+            [ -f "$runtime_lock_dir/pid" ] || die "persistent-state runtime lock is malformed"
+        runtime_pid=$(cat "$runtime_lock_dir/pid" 2>/dev/null || true)
+        case "$runtime_pid" in
+            ''|0|*[!0-9]*) die "persistent-state runtime lock owner is invalid" ;;
+        esac
+        kill -0 "$runtime_pid" 2>/dev/null &&
+            die "persistent-state migration is already running"
+        rm -f -- "$runtime_lock_dir/pid"
+        rmdir "$runtime_lock_dir" 2>/dev/null ||
+            die "stale persistent-state runtime lock could not be cleared"
+    fi
+    mkdir "$runtime_lock_dir" || die "could not acquire persistent-state runtime lock"
+    printf '%s\n' "$$" > "$runtime_lock_dir/pid"
+    chmod 0600 "$runtime_lock_dir/pid"
+    runtime_lock_held=1
+    trap release_runtime_lock EXIT
+}
+
 validate_schema() {
     schema_value="$1"
     printf '%s' "$schema_value" | grep -Eq '^(0|[1-9][0-9]{0,2})$' ||
@@ -85,6 +128,7 @@ state_migrate() {
         [ -f "$schema_file" ] || die "state schema marker is not a regular file"
     fi
     validate_new_schema "$new_schema"
+    acquire_runtime_lock "$data_dir"
 
     old_schema=0
     if [ -f "$schema_file" ]; then
@@ -113,6 +157,8 @@ state_migrate() {
         # transition or restored pre-schema snapshot; run.sh will recreate
         # only its root-owned tombstone for the reserved root-level name.
         rm -f -- "$data_dir/.state-version" "$workspace_dir/.last_version" || true
+        release_runtime_lock
+        trap - EXIT
         return 0
     fi
 
@@ -140,6 +186,7 @@ state_migrate() {
             [ -n "${backup_dir:-}" ] && [ -d "$backup_dir" ] && [ ! -L "$backup_dir" ]; then
             rm -rf -- "$backup_dir"
         fi
+        release_runtime_lock
         exit "$status"
     }
     trap cleanup_failed_backup EXIT
@@ -185,6 +232,7 @@ state_migrate() {
     # checksummed snapshot, but remove active compatibility markers so a
     # planner-writable legacy path cannot create ambiguity on a later start.
     rm -f -- "$data_dir/.state-version" "$workspace_dir/.last_version" || true
+    release_runtime_lock
     trap - EXIT
     printf 'STATE_MIGRATION snapshot=%s old_schema=%s new_schema=%s legacy=%s\n' \
         "$backup_dir" "$old_schema" "$new_schema" "$legacy_value"

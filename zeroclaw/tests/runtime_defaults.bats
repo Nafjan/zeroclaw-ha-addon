@@ -324,6 +324,36 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "HA error-log capability never forwards raw diagnostic contents" {
+    capability_file="$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    run grep -F 'json_value '\''{available:true,detail:"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'\''' "$capability_file"
+    [ "$status" -eq 0 ]
+    run awk '
+        /^    get_error_log\)/ { inside=1 }
+        inside && /json_text "\$result"/ { found=1 }
+        inside && /^    pending_count\)/ { inside=0 }
+        END { exit (found ? 1 : 0) }
+    ' "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'RESULT=$(/usr/local/bin/ha-capability get_error_log)' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "privileged persistent state uses bounded, serialized maintenance" {
+    inventory_file="$BATS_TEST_DIRNAME/../lib/state-inventory.sh"
+    migrate_file="$BATS_TEST_DIRNAME/../lib/state-migrate.sh"
+    run grep -F 'STATE_INVENTORY_MAX_NODES=40000' "$inventory_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'STATE_INVENTORY_MAX_BYTES=268435456' "$inventory_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'acquire_runtime_lock' "$migrate_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'STATE_MIGRATION_LOCK_HELD=true /opt/zeroclaw/lib/state-migrate.sh' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'backup new_version does not match new_schema' "$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "provider fallback is root-owned, profile-bound, and safely enabled by default" {
     run grep -F 'default_model: "~deepseek/deepseek-v4-flash-latest"' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
@@ -777,7 +807,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F '(.head_sha == $commit)' "$promote_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Rebuild, attest, and sign candidate digest' "$promote_file"
+    run grep -F 'Reproducible candidate build' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Rebuild twice with isolated direct pinned builders' "$promote_file"
     [ "$status" -eq 0 ]
     run grep -F 'zeroclaw-release-linux-x64' "$promote_file"
     [ "$status" -eq 0 ]

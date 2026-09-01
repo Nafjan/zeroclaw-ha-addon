@@ -98,6 +98,7 @@ grep -F 'HTTP/1.1 200 OK' /data/provider-response >/dev/null
 grep -F '"broker-ok"' /data/provider-response >/dev/null
 grep -F 'Authorization: Bearer provider-secret' /data/provider-upstream-request >/dev/null
 grep -F '"model":"deepseek/deepseek-v4-flash"' /data/provider-upstream-request >/dev/null
+grep -F '"max_tokens":2048' /data/provider-upstream-request >/dev/null
 ! grep -F 'provider-secret' /data/provider-response >/dev/null 2>&1
 
 # A process that only discovers the loopback port must not be able to invoke

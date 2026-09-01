@@ -125,9 +125,9 @@ that the ticket is sealed and that a second approval cannot replay it.
 Do not enable NVIDIA or Ark fallback in the same canary as writes. First run
 the provider profile contract smoke with the exact configured model IDs and
 observe one forced OpenRouter 402/timeout path, then enable the relevant
-profile switch and repeat the canary. Keep free-tier fallback disabled unless
-you have intentionally configured a current model slug and accepted the
-no-tools-only behavior.
+  profile switch and repeat the canary. The shipped free-tier routes are
+  intentionally enabled by default; keep their explicit model slugs current
+  and accept that they are limited to no-tools-only turns.
 
 Do not enable creation, scheduling, observer reports, or broad HTTP access in
 the same change. Creation is explicitly blocked in this release because the
