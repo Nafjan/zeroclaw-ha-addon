@@ -200,9 +200,18 @@ jobs:
           RUST_TOOLCHAIN: ${{ steps.metadata.outputs.rust_toolchain }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/master"
-          test "$RUNNER_OS" = "Linux"
-          test "$RUNNER_ARCH" = "X64"
+          test "$GITHUB_REF" = "refs/heads/master" || {
+            echo "trusted release builder requires refs/heads/master" >&2
+            exit 1
+          }
+          test "$RUNNER_OS" = "Linux" || {
+            echo "trusted release builder requires RUNNER_OS=Linux; got $RUNNER_OS" >&2
+            exit 1
+          }
+          test "$RUNNER_ARCH" = "X64" || {
+            echo "trusted release builder requires RUNNER_ARCH=X64; got $RUNNER_ARCH" >&2
+            exit 1
+          }
           docker_config="$RUNNER_TEMP/zeroclaw-docker-config"
           mkdir -p "$docker_config"
           printf '%s\n' '{"auths":{}}' > "$docker_config/config.json"
@@ -210,13 +219,38 @@ jobs:
           chmod 600 "$docker_config/config.json"
           export DOCKER_CONFIG="$docker_config"
           printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
+          missing_commands=()
           for command in bash cargo docker git jq rustc rustup sha256sum stat; do
-            command -v "$command" >/dev/null
+            if ! command -v "$command" >/dev/null 2>&1; then
+              missing_commands+=("$command")
+            fi
           done
-          test "$(docker info --format '{{.OSType}}')" = "linux"
-          test -d "$HOME/.cargo"
-          toolchain_rustc="$(rustup which --toolchain "$RUST_TOOLCHAIN" rustc)"
-          test -x "$toolchain_rustc"
+          if ((${#missing_commands[@]} != 0)); then
+            printf 'trusted release builder missing required command(s): %s\n' \
+              "${missing_commands[*]}" >&2
+            exit 1
+          fi
+          docker_os="$(docker info --format '{{.OSType}}' 2>&1)" || {
+            printf 'trusted release builder cannot query Docker: %s\n' "$docker_os" >&2
+            exit 1
+          }
+          test "$docker_os" = "linux" || {
+            printf 'trusted release builder requires Linux-container Docker mode; got %s\n' "$docker_os" >&2
+            exit 1
+          }
+          test -d "$HOME/.cargo" || {
+            printf 'trusted release builder requires Cargo home at %s\n' "$HOME/.cargo" >&2
+            exit 1
+          }
+          if ! toolchain_rustc="$(rustup which --toolchain "$RUST_TOOLCHAIN" rustc 2>&1)"; then
+            printf 'trusted release builder lacks pinned Rust toolchain %s: %s\n' \
+              "$RUST_TOOLCHAIN" "$toolchain_rustc" >&2
+            exit 1
+          fi
+          test -x "$toolchain_rustc" || {
+            printf 'trusted release builder Rust compiler is not executable: %s\n' "$toolchain_rustc" >&2
+            exit 1
+          }
           printf 'trusted release builder contract: %s/%s\n' "$RUNNER_OS" "$RUNNER_ARCH"
           printf 'toolchain rustc: %s\n' "$toolchain_rustc"
 
