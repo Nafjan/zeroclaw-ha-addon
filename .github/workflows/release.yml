@@ -47,8 +47,8 @@ jobs:
     permissions:
       contents: read
 
-  candidate:
-    name: Rebuild, attest, and sign candidate digest
+  candidate_build:
+    name: Reproducible candidate build
     needs: acceptance
     runs-on: ${{ inputs.builder_mode == 'trusted-aa' && 'zeroclaw-release-linux-x64' || 'ubuntu-latest' }}
     environment:
@@ -58,14 +58,22 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-      id-token: write
-      packages: write
-      attestations: write
     outputs:
       image: ${{ steps.metadata.outputs.image }}
       candidate_tag: ${{ steps.metadata.outputs.candidate_tag }}
       canary_tag: ${{ steps.metadata.outputs.canary_tag }}
-      digest: ${{ steps.build.outputs.digest }}
+      builder_mode: ${{ steps.metadata.outputs.builder_mode }}
+      source_commit: ${{ steps.metadata.outputs.source_commit }}
+      source_date_epoch: ${{ steps.metadata.outputs.source_date_epoch }}
+      source_lockfile_sha256: ${{ steps.metadata.outputs.source_lockfile_sha256 }}
+      llvm_rng_seed: ${{ steps.metadata.outputs.llvm_rng_seed }}
+      target: ${{ steps.metadata.outputs.target }}
+      rust_toolchain: ${{ steps.metadata.outputs.rust_toolchain }}
+      cross_version: ${{ steps.metadata.outputs.cross_version }}
+      cross_image_digest: ${{ steps.metadata.outputs.cross_image_digest }}
+      cargo_incremental: ${{ steps.metadata.outputs.cargo_incremental }}
+      rustflags: ${{ steps.metadata.outputs.rustflags }}
+      binary_sha: ${{ steps.metadata.outputs.binary_sha }}
       version: ${{ steps.metadata.outputs.version }}
       build_arch: ${{ steps.metadata.outputs.build_arch }}
       state_schema: ${{ steps.metadata.outputs.state_schema }}
@@ -75,6 +83,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Read and validate release metadata
         id: metadata
@@ -192,6 +202,7 @@ jobs:
           ref: ${{ steps.metadata.outputs.source_commit }}
           path: .zeroclaw-source
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up QEMU
         if: ${{ steps.metadata.outputs.builder_mode == 'cross' }}
@@ -627,6 +638,10 @@ jobs:
           rustup default "$toolchain_version"
           rustup target add --toolchain "$toolchain_version" "${{ steps.metadata.outputs.target }}"
           rustup run "$toolchain_version" cargo install cross --version "${{ steps.metadata.outputs.cross_version }}" --locked
+          # Resolve the locked dependency set while the build step still has
+          # network access. The measured Cross builds below run without a
+          # network so source-controlled build code cannot exfiltrate data.
+          cargo fetch --locked
           cross_bin="$(command -v cross)"
           test -x "$cross_bin"
           toolchain_real="$(rustup which --toolchain "$toolchain_version" rustc)"
@@ -738,7 +753,9 @@ jobs:
           # between these target-clean builds. CI exposes 4 CPUs while the
           # authoritative local replay exposed 8, so use 8/4/8 to test whether
           # Cargo's scheduler width is the remaining reproducibility variable.
-          unset RUSTUP_TOOLCHAIN CARGO_BUILD_JOBS RAYON_NUM_THREADS CROSS_CONTAINER_OPTS
+          unset RUSTUP_TOOLCHAIN CARGO_BUILD_JOBS RAYON_NUM_THREADS
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          export CROSS_CONTAINER_OPTS="--network none"
           write_cross_config
           capture_build_diagnostics 'cargo-jobs-8-first' /tmp/zeroclaw-jobs-first.txt 8
           printf 'Cargo --jobs variant=8 (first)\n'
@@ -933,6 +950,136 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      - name: Upload verified candidate binary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeroclaw-candidate-binary-${{ github.run_id }}
+          path: zeroclaw/zeroclaw-bin
+          if-no-files-found: error
+          retention-days: 3
+
+  candidate:
+    name: Publish, attest, and sign candidate digest
+    needs: [acceptance, candidate_build]
+    runs-on: ubuntu-latest
+    environment:
+      name: release-builder
+    concurrency:
+      group: zeroclaw-candidate-publish-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+      attestations: write
+    outputs:
+      image: ${{ steps.metadata.outputs.image }}
+      candidate_tag: ${{ steps.metadata.outputs.candidate_tag }}
+      canary_tag: ${{ steps.metadata.outputs.canary_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.metadata.outputs.version }}
+      build_arch: ${{ steps.metadata.outputs.build_arch }}
+      state_schema: ${{ steps.metadata.outputs.state_schema }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      candidate_commit: ${{ steps.metadata.outputs.candidate_commit }}
+      certificate_identity: ${{ steps.metadata.outputs.certificate_identity }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Bind and verify the unprivileged build result
+        id: metadata
+        shell: bash
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          PROMOTE: ${{ inputs.promote }}
+          BUILDER_MODE: ${{ needs.candidate_build.outputs.builder_mode }}
+          IMAGE: ${{ needs.candidate_build.outputs.image }}
+          CANDIDATE_TAG: ${{ needs.candidate_build.outputs.candidate_tag }}
+          CANARY_TAG: ${{ needs.candidate_build.outputs.canary_tag }}
+          VERSION: ${{ needs.candidate_build.outputs.version }}
+          BUILD_ARCH: ${{ needs.candidate_build.outputs.build_arch }}
+          STATE_SCHEMA: ${{ needs.candidate_build.outputs.state_schema }}
+          RELEASE_TAG: ${{ needs.candidate_build.outputs.release_tag }}
+          CANDIDATE_COMMIT: ${{ needs.candidate_build.outputs.candidate_commit }}
+          CERTIFICATE_IDENTITY: ${{ needs.candidate_build.outputs.certificate_identity }}
+          SOURCE_COMMIT: ${{ needs.candidate_build.outputs.source_commit }}
+          SOURCE_DATE_EPOCH: ${{ needs.candidate_build.outputs.source_date_epoch }}
+          SOURCE_LOCKFILE_SHA256: ${{ needs.candidate_build.outputs.source_lockfile_sha256 }}
+          LLVM_RNG_SEED: ${{ needs.candidate_build.outputs.llvm_rng_seed }}
+          TARGET: ${{ needs.candidate_build.outputs.target }}
+          RUST_TOOLCHAIN: ${{ needs.candidate_build.outputs.rust_toolchain }}
+          CROSS_VERSION: ${{ needs.candidate_build.outputs.cross_version }}
+          CROSS_IMAGE_DIGEST: ${{ needs.candidate_build.outputs.cross_image_digest }}
+          CARGO_INCREMENTAL: ${{ needs.candidate_build.outputs.cargo_incremental }}
+          RUSTFLAGS: ${{ needs.candidate_build.outputs.rustflags }}
+          BINARY_SHA: ${{ needs.candidate_build.outputs.binary_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
+          test "$PROMOTE" = "false"
+          test "$CANDIDATE_COMMIT" = "$GITHUB_SHA"
+          test "$RELEASE_TAG" = "$RELEASE_TAG_INPUT"
+          test "$CANDIDATE_TAG" = "candidate-${GITHUB_RUN_ID}-${GITHUB_SHA:0:12}"
+          test "$CANARY_TAG" = "${VERSION}-canary.${GITHUB_RUN_ID}"
+          test "$IMAGE" = "ghcr.io/nafjan/zeroclaw-ha-addon"
+          test "$BUILD_ARCH" = "aarch64"
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          printf '%s' "$CANDIDATE_TAG" | grep -Eq '^candidate-[0-9]+-[0-9a-f]{12}$'
+          printf '%s' "$CANARY_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-canary\.[0-9]+$'
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$SOURCE_LOCKFILE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$CROSS_IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          printf '%s' "$BINARY_SHA" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$STATE_SCHEMA" | grep -Eq '^[1-9][0-9]{0,2}$'
+          test "$LLVM_RNG_SEED" = "0"
+          test "$TARGET" = "aarch64-unknown-linux-musl"
+          test "$RUST_TOOLCHAIN" = "1.89.0"
+          test "$CROSS_VERSION" = "0.2.5"
+          test "$CARGO_INCREMENTAL" = "false"
+          test -n "$RUSTFLAGS"
+          {
+            printf 'version=%s\n' "$VERSION"
+            printf 'builder_mode=%s\n' "$BUILDER_MODE"
+            printf 'release_tag=%s\n' "$RELEASE_TAG"
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
+            printf 'source_lockfile_sha256=%s\n' "$SOURCE_LOCKFILE_SHA256"
+            printf 'llvm_rng_seed=%s\n' "$LLVM_RNG_SEED"
+            printf 'target=%s\n' "$TARGET"
+            printf 'rust_toolchain=%s\n' "$RUST_TOOLCHAIN"
+            printf 'cross_version=%s\n' "$CROSS_VERSION"
+            printf 'cross_image_digest=%s\n' "$CROSS_IMAGE_DIGEST"
+            printf 'cargo_incremental=%s\n' "$CARGO_INCREMENTAL"
+            printf 'rustflags=%s\n' "$RUSTFLAGS"
+            printf 'binary_sha=%s\n' "$BINARY_SHA"
+            printf 'image=%s\n' "$IMAGE"
+            printf 'build_arch=%s\n' "$BUILD_ARCH"
+            printf 'state_schema=%s\n' "$STATE_SCHEMA"
+            printf 'candidate_tag=%s\n' "$CANDIDATE_TAG"
+            printf 'canary_tag=%s\n' "$CANARY_TAG"
+            printf 'candidate_commit=%s\n' "$CANDIDATE_COMMIT"
+            printf 'certificate_identity=%s\n' "$CERTIFICATE_IDENTITY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the verified candidate binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zeroclaw-candidate-binary-${{ github.run_id }}
+          path: zeroclaw
+
+      - name: Verify candidate binary binding
+        shell: bash
+        env:
+          BINARY_SHA: ${{ steps.metadata.outputs.binary_sha }}
+        run: |
+          set -euo pipefail
+          test -f zeroclaw/zeroclaw-bin
+          test "$(sha256sum zeroclaw/zeroclaw-bin | awk '{print $1}')" = "$BINARY_SHA"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
 
@@ -943,7 +1090,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push signed candidate image
+      - name: Build and push candidate image
         id: build
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:

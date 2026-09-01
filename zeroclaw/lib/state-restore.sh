@@ -103,6 +103,15 @@ fi
 
 rollback_ready=0
 restore_succeeded=0
+runtime_lock_held=0
+RUNTIME_LOCK_DIR="$MIGRATIONS_DIR/.runtime-lock"
+release_runtime_lock() {
+    if [ "$runtime_lock_held" -eq 1 ]; then
+        rm -f -- "$RUNTIME_LOCK_DIR/pid"
+        rmdir "$RUNTIME_LOCK_DIR" 2>/dev/null || true
+        runtime_lock_held=0
+    fi
+}
 recover_on_failure() {
     status=$?
     if [ "$restore_succeeded" -ne 1 ] && [ "$status" -ne 0 ]; then
@@ -119,8 +128,31 @@ recover_on_failure() {
     if [ "$rollback_ready" -eq 0 ] && [ "$status" -ne 0 ]; then
         rm -rf -- "$ROLLBACK_DIR" 2>/dev/null || true
     fi
+    release_runtime_lock
     exit "$status"
 }
+
+# The launcher holds this root-only lock for the entire lifetime of the app.
+# Restore takes the same lock, so validation, snapshot, removal, and install
+# cannot race a planner/broker process or a concurrent restore.  A stale lock
+# from a terminated app is cleared only after confirming its recorded PID is no
+# longer live; malformed locks fail closed.
+if [ -e "$RUNTIME_LOCK_DIR" ]; then
+    [ ! -L "$RUNTIME_LOCK_DIR" ] && [ -d "$RUNTIME_LOCK_DIR" ] && \
+        [ -f "$RUNTIME_LOCK_DIR/pid" ] || die "persistent-state runtime lock is malformed"
+    runtime_pid=$(cat "$RUNTIME_LOCK_DIR/pid" 2>/dev/null || true)
+    case "$runtime_pid" in
+        ''|*[!0-9]*) die "persistent-state runtime lock owner is invalid" ;;
+    esac
+    kill -0 "$runtime_pid" 2>/dev/null && \
+        die "the app or another maintenance operation is still running; stop it before restore"
+    rm -f -- "$RUNTIME_LOCK_DIR/pid"
+    rmdir "$RUNTIME_LOCK_DIR" 2>/dev/null || die "stale persistent-state runtime lock could not be cleared"
+fi
+mkdir "$RUNTIME_LOCK_DIR" || die "could not acquire persistent-state runtime lock"
+printf '%s\n' "$$" > "$RUNTIME_LOCK_DIR/pid"
+chmod 0600 "$RUNTIME_LOCK_DIR/pid"
+runtime_lock_held=1
 trap recover_on_failure EXIT
 
 state_inventory_copy "$DATA_DIR" "$ROLLBACK_DIR" || die "current state could not be snapshotted"

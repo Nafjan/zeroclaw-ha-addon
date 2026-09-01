@@ -444,7 +444,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "Telegram commits its cursor only after processing the batch" {
     run grep -F 'Process the complete batch before committing its cursor' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" "\$UPDATE_ID"' "$run_file"
+    run grep -F 'handle_message "\$M_CHAT" "\$M_FROM" "\$M_CHAT_TYPE" "\$MSG_TEXT" "\$UPDATE_ID"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'done <"\$BATCH_FILE"' "$run_file"
     [ "$status" -eq 0 ]
@@ -469,9 +469,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'telegram_call_ok sendMessage' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'cache_reply "\$update_id" "\$REPLY"' "$run_file"
+    run grep -F 'cache_reply "\$update_id" "\$chat_id" "\$from_id" "\$REPLY"' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'send_and_cache "\$update_id" "\$chat_id"' "$run_file"
+    run grep -F 'send_and_cache "\$update_id" "\$chat_id" "\$from_id"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'telegram_curl sendMessage' "$run_file"
     [ "$status" -ne 0 ]
@@ -517,7 +517,6 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
     for marker in \
         'state-cleanup.sh /data' \
-        'bashio::log.info "Cron seeder waiting for gateway..."' \
         '/usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do' \
         'TODAY=$(curl -s "${GW}/api/cost"'; do
         run grep -F -B 3 "$marker" "$run_file"
@@ -552,6 +551,15 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "legacy HA token cannot become the broker credential" {
+    run grep -F 'HA_TOKEN="${SUPERVISOR_TOKEN:-}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'SUPERVISOR_TOKEN is required for the Supervisor version preflight; refusing to start' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Ignoring deprecated ha_token; the Supervisor token is required for startup.' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "policy options default safely and reject malformed gates" {
     run grep -F 'POLICY_MODE="${POLICY_MODE:-balanced}"' "$run_file"
     [ "$status" -eq 0 ]
@@ -560,6 +568,45 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'policy_climate_delta_confirm_c is outside the safe range; refusing to start' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'POLICY_REQUIRE_APPROVAL=true' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'POLICY_TRUST_ENABLED=false' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'trust promotion is reserved and disabled in this release' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'policy_trust_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+}
+
+@test "self-scheduling is disabled without an internal REST path" {
+    run grep -F 'Scheduling is disabled in the supervised release; create scheduled automations in Home Assistant.' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '/api/cron' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F 'Cron seeder' "$run_file"
+    [ "$status" -ne 0 ]
+    run grep -F 'allowed_commands = [' "$run_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"zc-schedule"'* ]]
+}
+
+@test "candidate build cannot publish and publish job consumes its verified artifact" {
+    release_file="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    run grep -F 'candidate_build:' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'name: Reproducible candidate build' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'name: Publish, attest, and sign candidate digest' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' "$release_file"
+    [ "$status" -eq 0 ]
+    run awk '
+        /^  candidate_build:/ { job="build"; next }
+        /^  candidate:/ { job="publish"; next }
+        job == "build" && /packages: write|id-token: write|attestations: write/ { bad=1 }
+        job == "publish" && /packages: write|id-token: write|attestations: write/ { found++ }
+        job == "publish" && /^  [A-Za-z0-9_-]+:/ && $0 !~ /^  candidate:/ { job="other" }
+        END { exit (bad || found != 3) ? 1 : 0 }
+    ' "$release_file"
     [ "$status" -eq 0 ]
 }
 

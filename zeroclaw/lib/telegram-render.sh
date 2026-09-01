@@ -33,6 +33,25 @@ function contains_internal_command(line) {
     return line ~ /(^|[^[:alnum:]_.-])(ha[.]action_guarded|memory_recall|zc[.][a-z0-9_]+|zc-[a-z0-9-]+|ha-[a-z0-9-]+)([^[:alnum:]_.-]|$)/
 }
 
+function contains_internal_envelope(line) {
+    # A provider may return a generic tool/function envelope even when it does
+    # not name one of our helpers.  Treat JSON-ish tool/function envelopes as
+    # internal protocol, never as user-facing prose.
+    return line ~ /^[[:space:]]*(\{|\[)/ &&
+      ((line ~ /"tool(_call|_name)?"[[:space:]]*:/) ||
+       (line ~ /"function(_call)?"[[:space:]]*:/) ||
+       (line ~ /"name"[[:space:]]*:/ && line ~ /"arguments?"[[:space:]]*:/))
+}
+
+function contains_credential(line) {
+    # Reject common bearer/key forms rather than attempting lossy redaction.
+    # The broker already prevents configured credentials from entering normal
+    # model output; this is a final Telegram-boundary defense-in-depth check.
+    return line ~ /(^|[^[:alnum:]])Bearer[[:space:]]+[A-Za-z0-9._~+\/-]{16,}/ ||
+      line ~ /(^|[^[:alnum:]])(sk-|nvapi-|ark-)[A-Za-z0-9_-]{12,}/ ||
+      line ~ /"(authorization|api[_-]?key|access[_-]?token|secret[_-]?key)"[[:space:]]*:[[:space:]]*"[^"]{12,}"/
+}
+
 BEGIN {
     internal = 0
     in_fence = 0
@@ -67,6 +86,11 @@ BEGIN {
     }
 
     if (contains_internal_command(line)) {
+        internal = 1
+        next
+    }
+
+    if (contains_internal_envelope(line) || contains_credential(line)) {
         internal = 1
         next
     }

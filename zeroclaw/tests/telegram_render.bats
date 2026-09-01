@@ -87,3 +87,33 @@ render_file="$BATS_TEST_DIRNAME/../lib/telegram-render.sh"
     [ "$status" -eq 2 ]
     [ -z "$output" ]
 }
+
+@test "Telegram renderer blocks generic JSON tool envelopes" {
+    set +e
+    output=$(printf '%s\n' '{"tool":"shell","arguments":{"command":"echo unsafe"}}' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
+@test "Telegram renderer blocks generic function envelopes" {
+    set +e
+    output=$(printf '%s\n' '{"function":"call_service","arguments":{"domain":"light"}}' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
+@test "Telegram renderer blocks credential-like output" {
+    set +e
+    output=$(printf '%s\n' 'Authorization: Bearer abcdefghijklmnop1234567890' | "$render_file")
+    status=$?
+    set -e
+
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
