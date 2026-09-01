@@ -23,6 +23,14 @@ on:
         description: "Temporary canary tag"
         required: true
         type: string
+      builder_mode:
+        description: "Exact reproducible builder mode used by the candidate"
+        required: false
+        default: cross
+        type: choice
+        options:
+          - cross
+          - trusted-aa
 
 permissions:
   contents: read
@@ -42,6 +50,13 @@ jobs:
       packages: write
       attestations: read
     steps:
+      - name: Require the trusted repository and master workflow ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
+          test "$GITHUB_REF" = "refs/heads/master"
+
       - name: Check out the workflow revision for release tooling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -51,6 +66,7 @@ jobs:
           # commit (for example, one that violates Supervisor's image schema).
           ref: ${{ github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
@@ -93,6 +109,7 @@ jobs:
           CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           VERSION: ${{ inputs.version }}
           TARGET_TAG: ${{ inputs.target_tag }}
+          BUILDER_MODE: ${{ inputs.builder_mode }}
           COSIGN_EXPERIMENTAL: "1"
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -101,6 +118,7 @@ jobs:
           printf '%s' "$CANDIDATE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$CANDIDATE_TAG" | grep -Eq '^candidate-[0-9]+-[0-9a-f]{12}$'
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          case "$BUILDER_MODE" in cross|trusted-aa) ;; *) echo "unsupported builder_mode=$BUILDER_MODE" >&2; exit 1 ;; esac
           version_regex="$(printf '%s' "$VERSION" | sed 's/\./\\./g')"
           printf '%s' "$TARGET_TAG" | grep -Eq "^${version_regex}-canary\.[0-9]+$"
           candidate_suffix="${CANDIDATE_TAG#candidate-}"
@@ -113,9 +131,7 @@ jobs:
           test "$candidate_run_id" = "$target_run_id"
           # A signed image and valid attestations are not sufficient for the
           # canary alias. Require the exact candidate to have completed on
-          # master using one of the repository's approved reproducible builder
-          # labels. The cross builder is pinned and reproducible on
-          # ubuntu-latest; trusted-aa uses the dedicated release runner.
+          # master using the builder mode explicitly selected for this alias.
           candidate_run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}")"
           printf '%s' "$candidate_run_json" | jq -e \
             --arg commit "$CANDIDATE_COMMIT" \
@@ -126,13 +142,23 @@ jobs:
              (.status == "completed") and
              (.conclusion == "success")' >/dev/null
           candidate_jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}/jobs?per_page=100")"
-          printf '%s' "$candidate_jobs_json" | jq -e \
-            '([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")] | length == 1) and
-             ([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")][0] |
-              (.status == "completed") and
-              (.conclusion == "success") and
-              ((.labels | index("ubuntu-latest") != null) or
-               (.labels | index("zeroclaw-release-linux-x64") != null)))' >/dev/null
+          printf '%s' "$candidate_jobs_json" | jq -e --arg mode "$BUILDER_MODE" \
+            '([.jobs[] | select(.name == "Publish, attest, and sign candidate digest")] | length == 1) and
+             ([.jobs[] | select(.name == "Publish, attest, and sign candidate digest")][0] |
+              (.status == "completed") and (.conclusion == "success") and
+              (.labels | index("ubuntu-latest") != null)) and
+             ([.jobs[] | select(.name == "Reproducible candidate build")] | length == 1) and
+             ([.jobs[] | select(.name == "Reproducible candidate build")][0] |
+              (.status == "completed") and (.conclusion == "success") and
+              (if $mode == "cross" then
+                 ((.labels | index("ubuntu-latest") != null) and
+                  ([.steps[] | select(.name == "Rebuild and verify the recorded ZeroClaw artifact")][0].conclusion == "success") and
+                  ([.steps[] | select(.name == "Rebuild twice with isolated direct pinned builders")][0].conclusion == "skipped"))
+               else
+                 ((.labels | index("zeroclaw-release-linux-x64") != null) and
+                  ([.steps[] | select(.name == "Rebuild twice with isolated direct pinned builders")][0].conclusion == "success") and
+                  ([.steps[] | select(.name == "Rebuild and verify the recorded ZeroClaw artifact")][0].conclusion == "skipped"))
+               end))' >/dev/null
           candidate_digest="$(docker buildx imagetools inspect "${IMAGE}:${CANDIDATE_TAG}" --format '{{.Manifest.Digest}}')"
           test "$candidate_digest" = "$SOURCE_DIGEST"
           image_ref="${IMAGE}@${SOURCE_DIGEST}"

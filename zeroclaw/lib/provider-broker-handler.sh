@@ -21,6 +21,7 @@ fi
 UPSTREAM_URL="${PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
 MAX_BODY=262144
 MAX_RESPONSE=1048576
+MAX_RESPONSE_BLOCKS=$(( (MAX_RESPONSE + 511) / 512 ))
 MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
 MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-32768}"
 MAX_INPUT_CHARS="${PROVIDER_MAX_INPUT_CHARS:-65536}"
@@ -132,8 +133,9 @@ read_http_line() {
             respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}"
         HTTP_LINE="$BOUNDED_READ_LINE"
         return 0
+    else
+        read_status=$?
     fi
-    read_status=$?
     case "$read_status" in
         2) respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}" ;;
         *) respond 408 "Request Timeout" "{\"error\":\"${line_label} timed out\"}" ;;
@@ -197,7 +199,17 @@ attempt_body=$(mktemp)
 quota_lock_held=0
 trap 'rm -f "$body_file" "$response_file" "$attempt_body" "$response_file.attempt"; [ "$quota_lock_held" -eq 1 ] && rmdir "$LEDGER_LOCK" 2>/dev/null || true' EXIT
 
-dd of="$body_file" bs=1 count="$content_length" 2>/dev/null || \
+body_timeout=$((READ_DEADLINE - SECONDS))
+[ "$body_timeout" -gt 0 ] || \
+    respond 408 "Request Timeout" '{"error":"request body timed out"}'
+set +e
+timeout "$body_timeout" dd of="$body_file" bs=1 count="$content_length" 2>/dev/null
+body_read_status=$?
+set -e
+if [ "$body_read_status" -eq 124 ] || [ "$body_read_status" -eq 137 ]; then
+    respond 408 "Request Timeout" '{"error":"request body timed out"}'
+fi
+[ "$body_read_status" -eq 0 ] || \
     respond 400 "Bad Request" '{"error":"request body could not be read"}'
 [ "$(wc -c < "$body_file" | tr -d ' ')" = "$content_length" ] || \
     respond 400 "Bad Request" '{"error":"request body is incomplete"}'
@@ -351,7 +363,9 @@ decimal_cost_to_micros() {
     cost_value="$1"
     awk -v value="$cost_value" 'BEGIN {
         if (value !~ /^[0-9]+([.][0-9]{1,6})?$/) exit 1
+        if (length(value) > 15) exit 1
         scaled = value * 1000000
+        if (scaled > 1000000000000) exit 1
         printf "%.0f\n", scaled
     }'
 }
@@ -637,9 +651,20 @@ settle_attempt() {
             return 1
             ;;
     esac
+    settle_reported_tokens=0
+    settle_reported_input=0
+    settle_reported_cost=0
     case "$settle_status:$settle_value:$settle_prompt_value" in
         200:?*:?*)
-            if [ "$settle_value" -gt "$reserve_value" ] || [ "$settle_prompt_value" -gt "$reserve_input_value" ]; then
+            if [ "$settle_value" -gt "$reserve_value" ]; then
+                settle_reported_tokens="$settle_value"
+                settle_value="$reserve_value"
+                settle_reason="usage_overrun"
+                settle_hard_failure=1
+            fi
+            if [ "$settle_prompt_value" -gt "$reserve_input_value" ]; then
+                settle_reported_input="$settle_prompt_value"
+                settle_prompt_value="$reserve_input_value"
                 settle_reason="usage_overrun"
                 settle_hard_failure=1
             fi
@@ -659,6 +684,8 @@ settle_attempt() {
             *)
                 settle_cost_value="$settle_actual_cost"
                 if [ "$settle_cost_value" -gt "$reserve_cost_value" ]; then
+                    settle_reported_cost="$settle_cost_value"
+                    settle_cost_value="$reserve_cost_value"
                     settle_reason="cost_overrun"
                     settle_hard_failure=1
                 fi
@@ -670,9 +697,16 @@ settle_attempt() {
         --argjson actual "$settle_value" --argjson now "$settle_now" \
         --argjson actual_prompt "$settle_prompt_value" \
         --argjson actual_cost "$settle_cost_value" \
+        --argjson reported_tokens "$settle_reported_tokens" \
+        --argjson reported_input "$settle_reported_input" \
+        --argjson reported_cost "$settle_reported_cost" \
         '.records |= map(if .id == $id and .state == "reserved" then
             .state = "settled" | .settled_tokens = $actual | .settled_input_tokens = $actual_prompt |
             .settled_cost_micros = $actual_cost | .settlement = $reason |
+            .settlement_anomaly = (if ($reported_tokens > 0 or $reported_input > 0 or $reported_cost > 0)
+              then {reported_tokens:$reported_tokens,reported_input_tokens:$reported_input,
+                    reported_cost_micros:$reported_cost}
+              else null end) |
             .http_status = ($status | tonumber? // null) | .updated_at = $now
          else . end)') || {
         release_ledger_lock
@@ -683,7 +717,8 @@ settle_attempt() {
         return 1
     }
     release_ledger_lock
-    [ "$settle_hard_failure" -eq 0 ]
+    SETTLE_ANOMALY="$settle_hard_failure"
+    return 0
 }
 
 classify_failure() {
@@ -793,7 +828,17 @@ extract_usage() {
             return 0
             ;;
     esac
-    if ! jq -e '(.usage.total_tokens == null or ((.usage.total_tokens | type == "number") and (.usage.total_tokens >= (.usage.completion_tokens + .usage.prompt_tokens))))' \
+    if ! awk -v completion="$USAGE_COMPLETION" -v prompt="$USAGE_PROMPT" 'BEGIN {
+        exit !(length(completion) <= 10 && length(prompt) <= 10 &&
+               completion + 0 <= 1000000000 && prompt + 0 <= 1000000000)
+    }'; then
+        USAGE_STATE="invalid"
+        return 0
+    fi
+    if ! jq -e '(.usage.total_tokens == null or
+        ((.usage.total_tokens | type == "number") and
+         (.usage.total_tokens >= (.usage.completion_tokens + .usage.prompt_tokens)) and
+         (.usage.total_tokens <= 1000000000)))' \
         "$response_file" >/dev/null 2>&1; then
         USAGE_STATE="invalid"
         return 0
@@ -926,17 +971,23 @@ ${candidate_key}"
         last_failure="provider broker deadline exceeded"
         break
     fi
-    if ! http_code=$(curl -sS --connect-timeout 5 --max-time "$remaining_timeout" \
+    if ! http_code=$(
+        (
+          ulimit -f "$MAX_RESPONSE_BLOCKS" 2>/dev/null || exit 125
+          curl --max-filesize "$MAX_RESPONSE" -sS --connect-timeout 5 --max-time "$remaining_timeout" \
         -o "$response_file_tmp" -w '%{http_code}' -X POST "$PROFILE_URL" \
         --header "@${request_auth_file}" \
         -H 'Content-Type: application/json' \
         -H 'HTTP-Referer: https://github.com/Nafjan/zeroclaw-ha-addon' \
         -H 'X-Title: ZeroClaw Home Assistant app' \
-        --data-binary "@${attempt_body}" 2>/dev/null); then
+        --data-binary "@${attempt_body}" 2>/dev/null
+        )
+    ); then
         curl_status=1
     fi
     rm -f "$request_auth_file"
     if [ "$curl_status" -ne 0 ]; then
+        rm -f "$response_file_tmp"
         : > "$response_file"
         settle_attempt "$RESERVATION_ID" "0" "reserved_max_network_failure" "" || \
             respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
@@ -981,6 +1032,12 @@ ${candidate_key}"
                     fi
                     settle_attempt "$RESERVATION_ID" "$http_code" "actual_usage" "$USAGE_COMPLETION" "$USAGE_PROMPT" "$USAGE_COST_MICROS" || \
                         respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
+                    if [ "${SETTLE_ANOMALY:-0}" -eq 1 ]; then
+                        block_profile "$profile_id"
+                        last_failure="provider usage exceeded local reservation"
+                        log_event "provider route=${requested_model} profile=${profile_id} class=usage_overrun"
+                        continue
+                    fi
                     ;;
                 missing)
                     settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_missing_usage" "" || \

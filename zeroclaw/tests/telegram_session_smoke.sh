@@ -13,6 +13,7 @@ chown root:root "$SMOKE_ROOT/locks"
 chmod 0700 "$SMOKE_ROOT/locks"
 . /opt/zeroclaw/lib/telegram-session.sh
 . /opt/zeroclaw/lib/telegram-agent-turn.sh
+. /opt/zeroclaw/lib/telegram-message-guard.sh
 umask 077
 
 cat > /tmp/telegram-agent-turn <<'EOF'
@@ -46,6 +47,16 @@ AGENT_CONFIG_DIR=/data
 AGENT_WORKSPACE="$SMOKE_ROOT"
 AGENT_SESSION_LOCK_DIR="$SMOKE_ROOT/locks"
 export AGENT_BIN AGENT_CONFIG_DIR AGENT_WORKSPACE AGENT_SESSION_LOCK_DIR
+
+telegram_message_destination_allowed private 1000000001 1000000001
+if telegram_message_destination_allowed group -1001234567890 1000000001; then
+    echo 'group Telegram message was accepted' >&2
+    exit 1
+fi
+if telegram_message_destination_allowed private 1000000001 45711626; then
+    echo 'Telegram chat/actor mismatch was accepted' >&2
+    exit 1
+fi
 
 session_file="$SMOKE_ROOT/sessions/telegram_1000000001.json"
 reply=$(run_telegram_agent_turn 1000000001 'hello')

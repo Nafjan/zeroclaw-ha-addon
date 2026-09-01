@@ -24,6 +24,18 @@ ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action
 OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
 APPROVAL_OUTCOME_DIR="${ZEROCLAW_APPROVAL_OUTCOME_DIR:-/data/approval-receipts/outcomes}"
 CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
+# Read operations are intentionally bounded independently from write quotas.
+# The fixed response ceiling is applied before parsing so a hostile or noisy HA
+# endpoint cannot force an unbounded shell variable allocation.
+MAX_HA_RESPONSE_BYTES=262144
+MAX_HA_RESPONSE_BLOCKS=$(( (MAX_HA_RESPONSE_BYTES + 511) / 512 ))
+READ_LIMIT_UNITS=600
+READ_QUOTA_FILE="${CAPABILITY_READ_QUOTA_FILE:-/data/capability/read-quota.json}"
+READ_QUOTA_LOCK="${CAPABILITY_READ_QUOTA_LOCK:-/data/capability/.read-quota.lock}"
+PLANNER_AUDIT_EVENT_LIMIT=600
+PLANNER_AUDIT_BYTE_LIMIT=2097152
+PLANNER_AUDIT_QUOTA_FILE="${CAPABILITY_PLANNER_AUDIT_QUOTA_FILE:-/data/audit/planner/.quota.json}"
+PLANNER_AUDIT_QUOTA_LOCK="${CAPABILITY_PLANNER_AUDIT_QUOTA_LOCK:-/data/audit/planner/.quota.lock}"
 
 json_error() {
     error="$1"
@@ -72,9 +84,16 @@ chmod 0600 "$HA_AUTH_FILE"
 printf 'Authorization: Bearer %s\n' "$HA_TOKEN" > "$HA_AUTH_FILE"
 quota_lock_held=0
 quota_tmp=""
+read_quota_lock_held=0
+read_quota_tmp=""
+planner_audit_lock_held=0
+planner_audit_tmp=""
+HA_RESPONSE_FILE=""
 cleanup() {
-    rm -f "$HA_AUTH_FILE" "${quota_tmp:-}"
+    rm -f "$HA_AUTH_FILE" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"
     [ "$quota_lock_held" -eq 1 ] && rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+    [ "$read_quota_lock_held" -eq 1 ] && rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+    [ "$planner_audit_lock_held" -eq 1 ] && rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -96,24 +115,220 @@ get_optional_entity() {
     printf '%s' "$request" | jq -er '.entity_id // ""' 2>/dev/null || true
 }
 
+bounded_ha_curl() {
+    response_error=""
+    # The first two arguments are stable caller context used to keep the
+    # call-sites self-documenting; only the remaining arguments belong to
+    # curl.
+    shift 2
+    response_tmp=$(mktemp /data/capability/.ha-response.XXXXXX) || return 1
+    chmod 0600 "$response_tmp"
+    HA_RESPONSE_FILE="$response_tmp"
+    # curl's application-level limit handles known Content-Length values;
+    # ulimit is the defense for chunked or otherwise indefinite responses.
+    if ! (
+        ulimit -f "$MAX_HA_RESPONSE_BLOCKS" 2>/dev/null || exit 125
+        curl --max-filesize "$MAX_HA_RESPONSE_BYTES" "$@"
+    ) > "$response_tmp" 2>/dev/null; then
+        response_error="request_failed"
+        response_size=$(wc -c < "$response_tmp" 2>/dev/null | tr -d ' ' || printf '0')
+        case "$response_size" in
+            ''|*[!0-9]*) ;;
+            *) [ "$response_size" -ge "$MAX_HA_RESPONSE_BYTES" ] && response_error="response_too_large" ;;
+        esac
+        return 1
+    fi
+    response_size=$(wc -c < "$response_tmp" | tr -d ' ')
+    case "$response_size" in
+        ''|*[!0-9]*) response_error="invalid_response_size"; return 1 ;;
+    esac
+    [ "$response_size" -le "$MAX_HA_RESPONSE_BYTES" ] || {
+        response_error="response_too_large"
+        return 1
+    }
+}
+
+read_quota_release() {
+    if [ "$read_quota_lock_held" -eq 1 ]; then
+        read_quota_lock_held=0
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+    fi
+}
+
+read_quota_acquire() {
+    attempts=0
+    while ! mkdir "$READ_QUOTA_LOCK" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -le 20 ] || json_error "capability read quota is busy" "read_quota_busy"
+        sleep 0.1
+    done
+    read_quota_lock_held=1
+}
+
+reserve_read_quota() {
+    read_cost="$1"
+    case "$read_cost" in
+        ''|*[!0-9]*) json_error "capability read quota cost is invalid" "read_quota_invalid" ;;
+    esac
+    [ "$read_cost" -ge 1 ] || json_error "capability read quota cost is invalid" "read_quota_invalid"
+    now=$(date -u +%s)
+    hour_window=$((now / 3600))
+    read_quota_acquire
+    if [ -e "$READ_QUOTA_FILE" ]; then
+        [ ! -L "$READ_QUOTA_FILE" ] && [ -f "$READ_QUOTA_FILE" ] || {
+            read_quota_release
+            json_error "capability read quota state is not a regular file" "read_quota_invalid"
+        }
+        read_quota=$(cat "$READ_QUOTA_FILE") || {
+            read_quota_release
+            json_error "capability read quota state is unavailable" "read_quota_unavailable"
+        }
+    else
+        read_quota='{}'
+    fi
+    if ! printf '%s' "$read_quota" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        read_quota_release
+        json_error "capability read quota state is invalid" "read_quota_invalid"
+    fi
+    reads_hour=$(printf '%s' "$read_quota" | jq -r --argjson w "$hour_window" \
+        'if .hour_window == $w then (.units_hour // 0) else 0 end')
+    case "$reads_hour" in
+        ''|*[!0-9]*)
+            read_quota_release
+            json_error "capability read quota state is invalid" "read_quota_invalid"
+            ;;
+    esac
+    [ "$reads_hour" -le "$((READ_LIMIT_UNITS - read_cost))" ] || {
+        read_quota_release
+        json_error "capability hourly read budget exceeded" "read_quota_exceeded"
+    }
+    read_quota_tmp="${READ_QUOTA_FILE}.tmp.$$"
+    mkdir -p "$(dirname "$READ_QUOTA_FILE")"
+    if ! jq -nc --argjson hour "$hour_window" \
+        --argjson units "$((reads_hour + read_cost))" \
+        '{hour_window:$hour,units_hour:$units}' > "$read_quota_tmp"; then
+        read_quota_release
+        json_error "capability read quota state could not be prepared" "read_quota_unavailable"
+    fi
+    chmod 0600 "$read_quota_tmp"
+    mv -f "$read_quota_tmp" "$READ_QUOTA_FILE"
+    read_quota_tmp=""
+    read_quota_release
+}
+
+planner_audit_quota_release() {
+    if [ "$planner_audit_lock_held" -eq 1 ]; then
+        planner_audit_lock_held=0
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+    fi
+}
+
+planner_audit_quota_acquire() {
+    # The quota lock lives below the audit state directory, which may not
+    # exist on first use in a fresh data volume.  Create that directory before
+    # attempting the atomic mkdir lock; otherwise every first audit request is
+    # misreported as a busy quota.
+    mkdir -p "$(dirname "$PLANNER_AUDIT_QUOTA_LOCK")" ||
+        json_error "planner audit quota state is unavailable" "audit_quota_unavailable"
+    attempts=0
+    while ! mkdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -le 20 ] || json_error "planner audit quota is busy" "audit_quota_busy"
+        sleep 0.1
+    done
+    planner_audit_lock_held=1
+}
+
+reserve_planner_audit() {
+    planner_event_value="$1"
+    event_bytes=$(printf '%s\n' "$planner_event_value" | wc -c | tr -d ' ')
+    case "$event_bytes" in
+        ''|*[!0-9]*) json_error "planner audit event size is invalid" "audit_quota_invalid" ;;
+    esac
+    [ "$event_bytes" -le "$PLANNER_AUDIT_BYTE_LIMIT" ] || \
+        json_error "planner audit event is too large" "audit_quota_exceeded"
+    now=$(date -u +%s)
+    hour_window=$((now / 3600))
+    day_window=$((now / 86400))
+    planner_audit_quota_acquire
+    if [ -e "$PLANNER_AUDIT_QUOTA_FILE" ]; then
+        [ ! -L "$PLANNER_AUDIT_QUOTA_FILE" ] && [ -f "$PLANNER_AUDIT_QUOTA_FILE" ] || {
+            planner_audit_quota_release
+            json_error "planner audit quota state is not a regular file" "audit_quota_invalid"
+        }
+        planner_quota=$(cat "$PLANNER_AUDIT_QUOTA_FILE") || {
+            planner_audit_quota_release
+            json_error "planner audit quota state is unavailable" "audit_quota_unavailable"
+        }
+    else
+        planner_quota='{}'
+    fi
+    if ! printf '%s' "$planner_quota" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        planner_audit_quota_release
+        json_error "planner audit quota state is invalid" "audit_quota_invalid"
+    fi
+    events_hour=$(printf '%s' "$planner_quota" | jq -r --argjson w "$hour_window" \
+        'if .hour_window == $w then (.events_hour // 0) else 0 end')
+    bytes_day=$(printf '%s' "$planner_quota" | jq -r --argjson d "$day_window" \
+        'if .day_window == $d then (.bytes_day // 0) else 0 end')
+    case "$events_hour:$bytes_day" in
+        *[!0-9:]*)
+            planner_audit_quota_release
+            json_error "planner audit quota state is invalid" "audit_quota_invalid"
+            ;;
+    esac
+    [ "$events_hour" -lt "$PLANNER_AUDIT_EVENT_LIMIT" ] || {
+        planner_audit_quota_release
+        json_error "planner audit hourly event budget exceeded" "audit_quota_exceeded"
+    }
+    [ "$bytes_day" -le "$((PLANNER_AUDIT_BYTE_LIMIT - event_bytes))" ] || {
+        planner_audit_quota_release
+        json_error "planner audit daily byte budget exceeded" "audit_quota_exceeded"
+    }
+    planner_audit_tmp="${PLANNER_AUDIT_QUOTA_FILE}.tmp.$$"
+    mkdir -p "$(dirname "$PLANNER_AUDIT_QUOTA_FILE")"
+    if ! jq -nc --argjson hour "$hour_window" --argjson day "$day_window" \
+        --argjson events "$((events_hour + 1))" --argjson bytes "$((bytes_day + event_bytes))" \
+        '{hour_window:$hour,events_hour:$events,day_window:$day,bytes_day:$bytes}' > "$planner_audit_tmp"; then
+        planner_audit_quota_release
+        json_error "planner audit quota state could not be prepared" "audit_quota_unavailable"
+    fi
+    chmod 0600 "$planner_audit_tmp"
+    mv -f "$planner_audit_tmp" "$PLANNER_AUDIT_QUOTA_FILE"
+    planner_audit_tmp=""
+    planner_audit_quota_release
+}
+
 run_template() {
     template="$1"
     body=$(jq -nc --arg template "$template" '{template:$template}')
-    if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 -X POST \
+    if ! bounded_ha_curl "Home Assistant template request failed" "ha_response_failed" \
+        -fsS --fail-with-body --connect-timeout 5 --max-time 30 -X POST \
         --header "@${HA_AUTH_FILE}" \
         -H 'Content-Type: application/json' \
-        "${HA_URL}/template" -d "$body"); then
-        json_error "Home Assistant template request failed"
+        "${HA_URL}/template" -d "$body"; then
+        [ "$response_error" = "response_too_large" ] && \
+            json_error "Home Assistant template response is too large" "ha_response_too_large"
+        json_error "Home Assistant template request failed" "ha_response_failed"
     fi
+    result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant template response could not be read" "ha_response_failed"
+    rm -f "$HA_RESPONSE_FILE"
+    HA_RESPONSE_FILE=""
     json_text "$result"
 }
 
 run_json_get() {
     path="$1"
-    if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
-        --header "@${HA_AUTH_FILE}" "${HA_URL}/${path}"); then
-        json_error "Home Assistant read request failed"
+    if ! bounded_ha_curl "Home Assistant read request failed" "ha_response_failed" \
+        -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
+        --header "@${HA_AUTH_FILE}" "${HA_URL}/${path}"; then
+        [ "$response_error" = "response_too_large" ] && \
+            json_error "Home Assistant read response is too large" "ha_response_too_large"
+        json_error "Home Assistant read request failed" "ha_response_failed"
     fi
+    result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant read response could not be read" "ha_response_failed"
+    rm -f "$HA_RESPONSE_FILE"
+    HA_RESPONSE_FILE=""
     if ! printf '%s' "$result" | jq -e . >/dev/null 2>&1; then
         json_error "Home Assistant returned invalid JSON"
     fi
@@ -125,21 +340,30 @@ run_logbook() {
     now=$(date -u +%Y-%m-%dT%H:%M:%S)
     ago=$(awk 'BEGIN{print strftime("%Y-%m-%dT%H:%M:%S", systime()-86400)}')
     if [ -n "$entity" ]; then
-        if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 -G \
+        if ! bounded_ha_curl "Home Assistant logbook request failed" "ha_response_failed" \
+            -fsS --fail-with-body --connect-timeout 5 --max-time 30 -G \
             --header "@${HA_AUTH_FILE}" \
             --data-urlencode "entity=${entity}" \
             --data-urlencode "end_time=${now}" \
-            "${HA_URL}/logbook/${ago}"); then
-            json_error "Home Assistant logbook request failed"
+            "${HA_URL}/logbook/${ago}"; then
+            [ "$response_error" = "response_too_large" ] && \
+                json_error "Home Assistant logbook response is too large" "ha_response_too_large"
+            json_error "Home Assistant logbook request failed" "ha_response_failed"
         fi
     else
-        if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
+        if ! bounded_ha_curl "Home Assistant logbook request failed" "ha_response_failed" \
+            -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
             --header "@${HA_AUTH_FILE}" -G \
             --data-urlencode "end_time=${now}" \
-            "${HA_URL}/logbook/${ago}"); then
-            json_error "Home Assistant logbook request failed"
+            "${HA_URL}/logbook/${ago}"; then
+            [ "$response_error" = "response_too_large" ] && \
+                json_error "Home Assistant logbook response is too large" "ha_response_too_large"
+            json_error "Home Assistant logbook request failed" "ha_response_failed"
         fi
     fi
+    result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant logbook response could not be read" "ha_response_failed"
+    rm -f "$HA_RESPONSE_FILE"
+    HA_RESPONSE_FILE=""
     json_text "$result"
 }
 
@@ -385,9 +609,14 @@ authorize_service() {
     export POLICY_BULK_COUNT="$bulk_count"
     unset POLICY_CLIMATE_CURRENT
     if [ "$domain" = climate ] && [ "$action" = set_temperature ] && [ -n "$entity" ]; then
-        if ! state=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 --header "@${HA_AUTH_FILE}" "${HA_URL}/states/${entity}"); then
-            json_error "policy baseline read failed"
+        if ! bounded_ha_curl "Home Assistant policy baseline read failed" "policy_baseline_failed" \
+            -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
+            --header "@${HA_AUTH_FILE}" "${HA_URL}/states/${entity}"; then
+            json_error "policy baseline read failed" "policy_baseline_failed"
         fi
+        state=$(cat "$HA_RESPONSE_FILE") || json_error "policy baseline read failed" "policy_baseline_failed"
+        rm -f "$HA_RESPONSE_FILE"
+        HA_RESPONSE_FILE=""
         current=$(printf '%s' "$state" | jq -r '.attributes.current_temperature // .attributes.temperature // empty')
         [ -n "$current" ] && export POLICY_CLIMATE_CURRENT="$current"
     fi
@@ -439,14 +668,23 @@ run_service() {
     if [ -z "$approval_ticket" ]; then
         reserve_action_quota
     fi
-    if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 -X POST \
+    if ! bounded_ha_curl "Home Assistant service request failed" "service_request_failed" \
+        -fsS --fail-with-body --connect-timeout 5 --max-time 30 -X POST \
         --header "@${HA_AUTH_FILE}" \
         -H 'Content-Type: application/json' \
-        "${HA_URL}/services/${service}" -d "$payload"); then
+        "${HA_URL}/services/${service}" -d "$payload"; then
         audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;dispatch_outcome_unknown" || true
         json_error "execution outcome could not be confirmed; claim retained for recovery" \
             execution_outcome_unknown
     fi
+    result=$(cat "$HA_RESPONSE_FILE") || {
+        rm -f "$HA_RESPONSE_FILE"
+        HA_RESPONSE_FILE=""
+        audit_capability_outcome outcome_unknown "$service" "$payload" "source=capability_broker;response_read_failed" || true
+        json_error "execution outcome could not be confirmed; claim retained for recovery" execution_outcome_unknown
+    }
+    rm -f "$HA_RESPONSE_FILE"
+    HA_RESPONSE_FILE=""
     if [ -z "$result" ]; then
         result='[]'
     fi
@@ -509,11 +747,23 @@ run_audit() {
         '{source:"untrusted_planner",event:"audit_request",requested_kind:$requested_kind,
           requested_service:$requested_service,requested_body:$requested_body,
           requested_reason:$requested_reason}') || json_error "audit event could not be prepared"
+    reserve_planner_audit "$planner_event"
     /usr/local/bin/zc-audit-write planner_event "planner/telemetry" "$planner_event" \
         "source=untrusted_planner" || \
         json_error "audit store unavailable"
     json_value '{"recorded":true}'
 }
+
+case "$operation" in
+    read_lights|read_climate|read_covers|read_sensors|get_state)
+        reserve_read_quota 1
+        ;;
+    get_logbook|get_error_log)
+        # Logbook and error-log responses are both larger and more expensive
+        # for HA/Core to assemble, so charge them a higher bounded cost.
+        reserve_read_quota 10
+        ;;
+esac
 
 case "$operation" in
     read_lights)
@@ -541,10 +791,16 @@ case "$operation" in
         run_logbook "$entity"
         ;;
     get_error_log)
-        if ! result=$(curl -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
-            --header "@${HA_AUTH_FILE}" "${HA_URL}/error_log"); then
-            json_error "Home Assistant error log request failed"
+        if ! bounded_ha_curl "Home Assistant error log request failed" "ha_response_failed" \
+            -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
+            --header "@${HA_AUTH_FILE}" "${HA_URL}/error_log"; then
+            [ "$response_error" = "response_too_large" ] && \
+                json_error "Home Assistant error log response is too large" "ha_response_too_large"
+            json_error "Home Assistant error log request failed" "ha_response_failed"
         fi
+        result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant error log response could not be read" "ha_response_failed"
+        rm -f "$HA_RESPONSE_FILE"
+        HA_RESPONSE_FILE=""
         json_text "$result"
         ;;
     pending_count)

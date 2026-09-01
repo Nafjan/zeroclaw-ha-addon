@@ -24,7 +24,9 @@ NVIDIA_KEY="$(bashio::config 'nvidia_api_key')"
 ARK_KEY="$(bashio::config 'ark_api_key')"
 PROVIDER_KEY_MODE="$(bashio::config 'provider_key_mode')"
 LEGACY_HA_TOKEN="$(bashio::config 'ha_token')"
-HA_TOKEN="${SUPERVISOR_TOKEN:-${LEGACY_HA_TOKEN}}"
+# The legacy option is migration metadata only.  Never let a saved Core token
+# become the broker credential; the Supervisor-issued token is authoritative.
+HA_TOKEN="${SUPERVISOR_TOKEN:-}"
 TELEGRAM_TOKEN="$(bashio::config 'telegram_bot_token')"
 TELEGRAM_USERS="$(bashio::config 'telegram_allowed_users')"
 if [ -z "${PROVIDER_KEY_MODE}" ]; then
@@ -353,6 +355,8 @@ POLICY_MODE="${POLICY_MODE:-balanced}"
 POLICY_QUIET_CONFIRM="${POLICY_QUIET_CONFIRM:-true}"
 POLICY_BULK_THRESHOLD="${POLICY_BULK_THRESHOLD:-3}"
 POLICY_CLIMATE_DELTA="${POLICY_CLIMATE_DELTA:-3}"
+POLICY_TRUST_ENABLED="${POLICY_TRUST_ENABLED:-false}"
+POLICY_TRUST_PROMOTE="${POLICY_TRUST_PROMOTE:-5}"
 case "${POLICY_MODE}" in
     strict|balanced|permissive|custom) ;;
     *) bashio::log.fatal "policy_mode is invalid; refusing to start"; exit 1 ;;
@@ -375,6 +379,24 @@ esac
     bashio::log.fatal "policy_climate_delta_confirm_c is outside the safe range; refusing to start"
     exit 1
 }
+case "${POLICY_TRUST_ENABLED}" in
+    true|false) ;;
+    *) bashio::log.fatal "policy_trust_enabled is invalid; refusing to start"; exit 1 ;;
+esac
+case "${POLICY_TRUST_PROMOTE}" in
+    ''|*[!0-9]*) bashio::log.fatal "policy_trust_promote_after is invalid; refusing to start"; exit 1 ;;
+esac
+[ "${POLICY_TRUST_PROMOTE}" -ge 2 ] && [ "${POLICY_TRUST_PROMOTE}" -le 50 ] || {
+    bashio::log.fatal "policy_trust_promote_after is outside the safe range; refusing to start"
+    exit 1
+}
+# Trust promotion is retained as a schema-compatible option for migration,
+# but is not implemented in the broker-only policy runtime. Never claim that
+# repeated approvals can remove the mandatory approval gate.
+if [ "${POLICY_TRUST_ENABLED}" = "true" ]; then
+    bashio::log.warning "policy trust promotion is reserved and disabled in this release; every write still requires approval."
+fi
+POLICY_TRUST_ENABLED=false
 
 case "${PROVIDER_KEY_MODE}" in
     direct_temporary)
@@ -434,14 +456,12 @@ else
     bashio::log.info "Telegram transport disabled; no bot token or users configured."
 fi
 
-# Daily report time is stored and scheduled as UTC. A future timezone-aware
-# option can convert it explicitly; do not bake a user's location into the
-# image or entrypoint.
-REPORT_HOUR=$(echo "$DAILY_REPORT_TIME" | cut -d: -f1 | sed 's/^0*//')
-REPORT_MIN=$(echo "$DAILY_REPORT_TIME" | cut -d: -f2 | sed 's/^0*//')
-[ -z "$REPORT_HOUR" ] && REPORT_HOUR=0
-[ -z "$REPORT_MIN" ] && REPORT_MIN=0
-REPORT_UTC_HOUR="${REPORT_HOUR}"
+# These options remain schema-compatible for upgrades, but this supervised
+# release does not create or mutate ZeroClaw-owned schedules.  Home Assistant
+# automations are the only supported scheduler; keep the old switches false.
+if [ "${DAILY_REPORT_ENABLED:-false}" = "true" ] || [ "${OBSERVER_ENABLED:-false}" = "true" ]; then
+    bashio::log.warning "daily reports and observer scheduling are reserved and ignored; create a Home Assistant automation instead."
+fi
 
 CONFIG_DIR="/data"
 WS="${CONFIG_DIR}/workspace"
@@ -453,7 +473,7 @@ export HA_URL
     exit 1
 }
 if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -n "${LEGACY_HA_TOKEN}" ]; then
-    bashio::log.warning "Using deprecated ha_token option; migrate to the Supervisor token before enabling writes."
+    bashio::log.warning "Ignoring deprecated ha_token; the Supervisor token is required for startup."
 fi
 # Home Assistant app manifests have a supported Core-version field, but no
 # supported Supervisor-version minimum field.  Enforce the release floor at
@@ -496,7 +516,7 @@ supervisor_api_preflight() {
 supervisor_api_preflight
 # Supervisor exports SUPERVISOR_TOKEN into the app entrypoint environment. The
 # typed HA broker receives a private HA_TOKEN copy below; scrub the inherited
-# name before any unrelated provider, Telegram, or scheduler child is born.
+# name before any unrelated provider, Telegram, or helper child is born.
 # Keeping this in the parent as well as in the broker subshell prevents an
 # accidental future helper from retaining the Supervisor credential.
 unset SUPERVISOR_TOKEN
@@ -591,6 +611,7 @@ if ! jq -nc \
       quiet_hours:$quiet_hours,home_location:$home_location,
       extra_deny:$extra_deny,
       extra_confirm:$extra_confirm,extra_allow:$extra_allow,
+      trust_promotion:{enabled:false},
       require_approval:true}' > "${POLICY_RUNTIME_TMP}"; then
     rm -f "${POLICY_RUNTIME_TMP}"
     bashio::log.fatal "could not render the root-owned policy runtime file"
@@ -605,6 +626,50 @@ mv -f "${POLICY_RUNTIME_TMP}" "${POLICY_RUNTIME_FILE}"
 # rewrite it and suppress or fabricate an upgrade snapshot. Legacy semver
 # markers are inspected and preserved inside the migration snapshot by the
 # migration helper, then removed only after the new schema marker is committed.
+MIGRATIONS_DIR="${CONFIG_DIR}/migrations"
+mkdir -p "${MIGRATIONS_DIR}"
+chown root:root "${MIGRATIONS_DIR}"
+chmod 0700 "${MIGRATIONS_DIR}"
+RUNTIME_LOCK_DIR="${MIGRATIONS_DIR}/.runtime-lock"
+if [ -e "${RUNTIME_LOCK_DIR}" ]; then
+    if [ -L "${RUNTIME_LOCK_DIR}" ] || [ ! -d "${RUNTIME_LOCK_DIR}" ] ||
+        [ ! -f "${RUNTIME_LOCK_DIR}/pid" ]; then
+        bashio::log.fatal "persistent-state runtime lock is malformed; refusing to start"
+        exit 1
+    fi
+    runtime_lock_pid="$(cat "${RUNTIME_LOCK_DIR}/pid" 2>/dev/null || true)"
+    case "${runtime_lock_pid}" in
+        ''|*[!0-9]*)
+            bashio::log.fatal "persistent-state runtime lock has an invalid owner; refusing to start"
+            exit 1
+            ;;
+    esac
+    if kill -0 "${runtime_lock_pid}" 2>/dev/null; then
+        bashio::log.fatal "persistent-state maintenance is active; refusing to start concurrently"
+        exit 1
+    fi
+    rm -f -- "${RUNTIME_LOCK_DIR}/pid"
+    rmdir "${RUNTIME_LOCK_DIR}" 2>/dev/null || {
+        bashio::log.fatal "stale persistent-state runtime lock could not be cleared"
+        exit 1
+    }
+fi
+mkdir "${RUNTIME_LOCK_DIR}" || {
+    bashio::log.fatal "could not acquire persistent-state runtime lock"
+    exit 1
+}
+printf '%s\n' "$$" > "${RUNTIME_LOCK_DIR}/pid"
+chown root:root "${RUNTIME_LOCK_DIR}/pid"
+chmod 0600 "${RUNTIME_LOCK_DIR}/pid"
+RUNTIME_LOCK_HELD=true
+release_runtime_lock() {
+    if [ "${RUNTIME_LOCK_HELD:-false}" = true ]; then
+        rm -f -- "${RUNTIME_LOCK_DIR}/pid"
+        rmdir "${RUNTIME_LOCK_DIR}" 2>/dev/null || true
+        RUNTIME_LOCK_HELD=false
+    fi
+}
+trap release_runtime_lock EXIT
 SCHEMA_FILE="${CONFIG_DIR}/.state-schema"
 if ! /opt/zeroclaw/lib/state-migrate.sh "${CONFIG_DIR}" "$SCHEMA_FILE" "${STATE_SCHEMA}"; then
     bashio::log.fatal "State migration failed; refusing to start without a rollback snapshot."
@@ -1037,6 +1102,7 @@ APPROVAL_CHAT="${FIRST_USER}"
 [ -n "\$TOKEN" ] || exit 1
 . /opt/zeroclaw/lib/telegram-session.sh
 . /opt/zeroclaw/lib/telegram-agent-turn.sh
+. /opt/zeroclaw/lib/telegram-message-guard.sh
 [ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
 if [ ! -d "\$REPLY_CACHE_DIR" ]; then
     mkdir -m 0700 "\$REPLY_CACHE_DIR" 2>/dev/null || exit 1
@@ -1046,6 +1112,13 @@ if [ ! -d "\$CALLBACK_CACHE_DIR" ]; then
     mkdir -m 0700 "\$CALLBACK_CACHE_DIR" 2>/dev/null || exit 1
 fi
 [ ! -L "\$OFFSET_F" ] && [ -f "\$OFFSET_F" ] || exit 1
+BOT_ID_FILE="/data/capability/telegram-bot-id"
+BOT_ID=""
+BOT_ID_READY=false
+[ ! -L "\$BOT_ID_FILE" ] || exit 1
+if [ -e "\$BOT_ID_FILE" ] && [ ! -f "\$BOT_ID_FILE" ]; then
+    exit 1
+fi
 
 telegram_response_ok() {
     response="\$1"
@@ -1070,7 +1143,9 @@ telegram_call_ok() {
 commit_offset() {
     next_offset="\$1"
     case "\$next_offset" in
+        -1) ;;
         ''|*[!0-9]*) return 1 ;;
+        *) ;;
     esac
     offset_tmp="\${OFFSET_F}.tmp.\$\$"
     if ! printf '%s\n' "\$next_offset" > "\$offset_tmp"; then
@@ -1128,6 +1203,50 @@ telegram_curl() {
     return "\$rc"
 }
 
+purge_telegram_replay_state() {
+    # A bot token change is a new Telegram principal.  Never let its cursor or
+    # cached replies inherit state from the previous bot identity.
+    for cache_dir in "\$REPLY_CACHE_DIR" "\$CALLBACK_CACHE_DIR"; do
+        [ ! -L "\$cache_dir" ] && [ -d "\$cache_dir" ] || continue
+        for cache_file in "\$cache_dir"/*.json "\$cache_dir"/*.txt; do
+            [ -f "\$cache_file" ] || [ -L "\$cache_file" ] || continue
+            [ -L "\$cache_file" ] && continue
+            rm -f -- "\$cache_file"
+        done
+    done
+}
+
+load_bot_identity() {
+    bot_response=\$(telegram_curl getMe -s --max-time 15 2>/dev/null) || return 1
+    telegram_response_ok "\$bot_response" || return 1
+    new_bot_id=\$(printf '%s' "\$bot_response" | jq -r '.result.id // empty' 2>/dev/null) || return 1
+    case "\$new_bot_id" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    old_bot_id=""
+    if [ -e "\$BOT_ID_FILE" ]; then
+        [ ! -L "\$BOT_ID_FILE" ] && [ -f "\$BOT_ID_FILE" ] || return 1
+        old_bot_id=\$(cat "\$BOT_ID_FILE" 2>/dev/null) || return 1
+    fi
+    case "\$old_bot_id" in
+        ''|*[!0-9]*) old_bot_id="" ;;
+    esac
+    if [ "\$old_bot_id" != "\$new_bot_id" ]; then
+        purge_telegram_replay_state
+        commit_offset -1 || return 1
+    fi
+    bot_id_tmp="\${BOT_ID_FILE}.tmp.\$\$"
+    printf '%s\n' "\$new_bot_id" > "\$bot_id_tmp" || return 1
+    chmod 0600 "\$bot_id_tmp"
+    mv -f "\$bot_id_tmp" "\$BOT_ID_FILE" || {
+        rm -f "\$bot_id_tmp"
+        return 1
+    }
+    sync
+    BOT_ID="\$new_bot_id"
+    BOT_ID_READY=true
+}
+
 answer_cb() {
     cb_id="\$1"; text="\$2"
     telegram_call_ok answerCallbackQuery -s -X POST \\
@@ -1160,55 +1279,64 @@ send_typing() {
 }
 
 cache_reply() {
-    update_id="\$1"; reply="\$2"
+    update_id="\$1"; chat_id="\$2"; actor_user_id="\$3"; reply="\$4"
     case "\$update_id" in
         ''|*[!0-9]*) return 1 ;;
     esac
     [ ! -L "\$REPLY_CACHE_DIR" ] && [ -d "\$REPLY_CACHE_DIR" ] || return 1
     cache_tmp="\${REPLY_CACHE_DIR}/.\${update_id}.tmp.\$\$"
-    if ! printf '%s' "\$reply" > "\$cache_tmp"; then
+    if ! jq -nc --arg bot "\$BOT_ID" --arg chat "\$chat_id" \
+        --arg actor "\$actor_user_id" --arg reply "\$reply" \
+        '{bot_id:\$bot,chat_id:\$chat,actor_user_id:\$actor,reply:\$reply}' > "\$cache_tmp"; then
         rm -f "\$cache_tmp"
         return 1
     fi
     chmod 0600 "\$cache_tmp"
-    mv -f "\$cache_tmp" "\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    mv -f "\$cache_tmp" "\${REPLY_CACHE_DIR}/\${update_id}.json"
     sync
 }
 
 send_and_cache() {
-    update_id="\$1"; chat_id="\$2"; reply="\$3"
-    cache_reply "\$update_id" "\$reply" || return 1
+    update_id="\$1"; chat_id="\$2"; actor_user_id="\$3"; reply="\$4"
+    cache_reply "\$update_id" "\$chat_id" "\$actor_user_id" "\$reply" || return 1
     send_msg "\$chat_id" "\$reply"
 }
 
 send_cached_reply() {
-    update_id="\$1"; chat_id="\$2"
+    update_id="\$1"; chat_id="\$2"; actor_user_id="\$3"
     case "\$update_id" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.json"
     [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
-    cached_reply=\$(cat "\$cached_file") || return 1
+    cached_reply=\$(jq -er --arg bot "\$BOT_ID" --arg chat "\$chat_id" \
+        --arg actor "\$actor_user_id" \
+        'select(.bot_id == \$bot and .chat_id == \$chat and
+                .actor_user_id == \$actor and (.reply | type == "string")) | .reply' \
+        "\$cached_file" 2>/dev/null) || {
+        rm -f -- "\$cached_file"
+        return 1
+    }
     if sanitized_cached=\$(printf '%s' "\$cached_reply" | /usr/local/bin/telegram-render 2>/dev/null); then
         cached_reply="\$sanitized_cached"
     else
         printf '%s\n' 'blocked internal tool syntax in cached Telegram reply; replacing it with a safe status message' >>/data/logs/telegram-broker.log
         cached_reply="I couldn't confirm the result safely. Please check Home Assistant history before retrying."
-        cache_reply "\$update_id" "\$cached_reply" || true
+        cache_reply "\$update_id" "\$chat_id" "\$actor_user_id" "\$cached_reply" || true
     fi
     send_msg "\$chat_id" "\$cached_reply"
 }
 
 cache_callback_result() {
-    update_id="\$1"; chat_id="\$2"; message_id="\$3"; answer="\$4"; edit="\$5"
+    update_id="\$1"; chat_id="\$2"; message_id="\$3"; actor_user_id="\$4"; answer="\$5"; edit="\$6"
     case "\$update_id:\$message_id" in
         *[!0-9:]*|:*) return 1 ;;
     esac
     [ ! -L "\$CALLBACK_CACHE_DIR" ] && [ -d "\$CALLBACK_CACHE_DIR" ] || return 1
     cache_tmp="\${CALLBACK_CACHE_DIR}/.\${update_id}.tmp.\$\$"
-    if ! jq -nc --arg chat "\$chat_id" --argjson message "\$message_id" \
-        --arg answer "\$answer" --arg edit "\$edit" \
-        '{chat_id:\$chat,message_id:\$message,answer:\$answer,edit:\$edit}' > "\$cache_tmp"; then
+    if ! jq -nc --arg bot "\$BOT_ID" --arg chat "\$chat_id" --arg actor "\$actor_user_id" \
+        --argjson message "\$message_id" --arg answer "\$answer" --arg edit "\$edit" \
+        '{bot_id:\$bot,chat_id:\$chat,actor_user_id:\$actor,message_id:\$message,answer:\$answer,edit:\$edit}' > "\$cache_tmp"; then
         rm -f "\$cache_tmp"
         return 1
     fi
@@ -1218,12 +1346,15 @@ cache_callback_result() {
 }
 
 replay_callback_result() {
-    update_id="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    update_id="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"; actor_user_id="\$5"
     cached_file="\${CALLBACK_CACHE_DIR}/\${update_id}.json"
     [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ] || return 1
+    cached_bot=\$(jq -r '.bot_id // empty' "\$cached_file" 2>/dev/null) || return 1
     cached_chat=\$(jq -r '.chat_id // empty' "\$cached_file" 2>/dev/null) || return 1
+    cached_actor=\$(jq -r '.actor_user_id // empty' "\$cached_file" 2>/dev/null) || return 1
     cached_message=\$(jq -r '.message_id // empty' "\$cached_file" 2>/dev/null) || return 1
-    [ "\$cached_chat" = "\$chat_id" ] && [ "\$cached_message" = "\$message_id" ] || return 1
+    [ "\$cached_bot" = "\$BOT_ID" ] && [ "\$cached_chat" = "\$chat_id" ] && \
+        [ "\$cached_actor" = "\$actor_user_id" ] && [ "\$cached_message" = "\$message_id" ] || return 1
     cached_answer=\$(jq -r '.answer // empty' "\$cached_file" 2>/dev/null) || return 1
     cached_edit=\$(jq -r '.edit // empty' "\$cached_file" 2>/dev/null) || return 1
     answer_cb "\$cb_id" "\$cached_answer" || return 1
@@ -1252,19 +1383,19 @@ approval_outcome_text() {
 }
 
 replay_approval_message() {
-    short="\$1"; update_id="\$2"; chat_id="\$3"
+    short="\$1"; update_id="\$2"; chat_id="\$3"; actor_user_id="\$4"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
     outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
-    send_and_cache "\$update_id" "\$chat_id" "\$outcome_reply"
+    send_and_cache "\$update_id" "\$chat_id" "\$actor_user_id" "\$outcome_reply"
 }
 
 replay_approval_outcome() {
-    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"
+    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"; actor_user_id="\$5"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
     outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
     answer_cb "\$cb_id" "Applied." || return 1
     edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
-    cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "Applied." "\$outcome_reply"
+    cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "\$actor_user_id" "Applied." "\$outcome_reply"
 }
 
 approval_marker_ready() {
@@ -1328,24 +1459,28 @@ apply_approved_ticket() {
 
 # Forward an inbound text message to the gateway and relay the response.
 handle_message() {
-    chat_id="\$1"; from_id="\$2"; text="\$3"; update_id="\$4"
+    chat_id="\$1"; from_id="\$2"; chat_type="\$3"; text="\$4"; update_id="\$5"
     valid_chat_id "\$chat_id" || return 1
     valid_positive_id "\$from_id" || return 1
     case "\$update_id" in
         ''|*[!0-9]*) return 1 ;;
     esac
+    # Ordinary messages are private-chat only.  An allowlisted user must not
+    # cause private household state or planner responses to be posted into a
+    # group where other participants can read them.
+    telegram_message_destination_allowed "\$chat_type" "\$chat_id" "\$from_id" || return 0
 
     # Approval replies are also cached before notification.  If Telegram
     # rejects the first delivery after a successful claim, replay sends the
     # same truthful outcome instead of reporting an unrelated expired ticket.
-    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.txt"
+    cached_file="\${REPLY_CACHE_DIR}/\${update_id}.json"
     if [ ! -L "\$cached_file" ] && [ -f "\$cached_file" ]; then
-        send_cached_reply "\$update_id" "\$chat_id"
+        send_cached_reply "\$update_id" "\$chat_id" "\$from_id"
         return
     fi
 
     if ! is_allowed_user "\$from_id"; then
-        if ! send_and_cache "\$update_id" "\$chat_id" "Not authorized."; then return 1; fi
+        if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Not authorized."; then return 1; fi
         return 0
     fi
     [ -z "\$text" ] && return
@@ -1355,20 +1490,20 @@ handle_message() {
     if [ -n "\$APPROVE_ID" ] || [ -n "\$REJECT_ID" ]; then
         SHORT="\${APPROVE_ID:-\$REJECT_ID}"
         if [ "\$from_id" != "\$APPROVAL_USER" ] || [ "\$chat_id" != "\$APPROVAL_CHAT" ]; then
-            if ! send_and_cache "\$update_id" "\$chat_id" "This approval belongs to the configured approval owner."; then return 1; fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "This approval belongs to the configured approval owner."; then return 1; fi
             return 0
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
         if [ ! -f "\$TICKET" ]; then
-            if [ -n "\$APPROVE_ID" ] && replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+            if [ -n "\$APPROVE_ID" ] && replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
                 return 0
             fi
-            if ! send_and_cache "\$update_id" "\$chat_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
             return 0
         fi
         SUMMARY=\$(canonical_ticket_summary "\$TICKET") || return 1
         if [ -n "\$APPROVE_ID" ]; then
-            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id"; then
+            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
                 return 0
             fi
             # A watcher restart can occur after the durable approved_audited
@@ -1377,21 +1512,21 @@ handle_message() {
             if approval_marker_ready "\$SHORT" || \
                 ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
                 if OUT=\$(apply_approved_ticket "\$SHORT" "\$from_id" "\$chat_id"); then
-                    if ! send_and_cache "\$update_id" "\$chat_id" "✅ Approved and applied: \${SUMMARY}
+                    if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "✅ Approved and applied: \${SUMMARY}
 \${OUT}"
                     then return 1; fi
                 else
-                    if ! send_and_cache "\$update_id" "\$chat_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
+                    if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                     then return 1; fi
                 fi
             else
-                if ! send_and_cache "\$update_id" "\$chat_id" "Approval for \${SHORT} could not be applied."; then return 1; fi
+                if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Approval for \${SHORT} could not be applied."; then return 1; fi
             fi
         elif ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
-            if ! send_and_cache "\$update_id" "\$chat_id" "❌ Rejected: \${SUMMARY}"; then return 1; fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "❌ Rejected: \${SUMMARY}"; then return 1; fi
         else
-            if ! send_and_cache "\$update_id" "\$chat_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
         fi
         return 0
     fi
@@ -1476,7 +1611,7 @@ handle_message() {
     [ -z "\$REPLY" ] && REPLY="I couldn't complete that request. I did not retry it. Please check Home Assistant history before retrying."
     # Telegram message limit is 4096 chars; truncate defensively.
     REPLY=\$(printf '%s' "\$REPLY" | cut -c1-4000)
-    cache_reply "\$update_id" "\$REPLY" || return 1
+    cache_reply "\$update_id" "\$chat_id" "\$from_id" "\$REPLY" || return 1
     send_msg "\$chat_id" "\$REPLY"
     if [ -n "\${CORRECTION_PROMPT:-}" ]; then
         # The foreground turn has released the per-chat lock before this hook.
@@ -1486,6 +1621,13 @@ handle_message() {
 }
 
 while true; do
+    if [ "\$BOT_ID_READY" != true ]; then
+        if ! load_bot_identity; then
+            printf '%s\n' 'Telegram bot identity could not be verified; refusing to poll' >>/data/logs/telegram-broker.log
+            sleep 5
+            continue
+        fi
+    fi
     if ! bootstrap_offset; then
         printf '%s\n' 'Telegram cursor bootstrap failed; refusing to acknowledge queued updates' >>/data/logs/telegram-broker.log
         sleep 5
@@ -1552,7 +1694,8 @@ while true; do
         if [ -n "\$MSG_TEXT" ]; then
             M_CHAT=\$(printf '%s' "\$upd" | jq -r '.message.chat.id // empty')
             M_FROM=\$(printf '%s' "\$upd" | jq -r '.message.from.id // empty')
-            if ! handle_message "\$M_CHAT" "\$M_FROM" "\$MSG_TEXT" "\$UPDATE_ID"; then
+            M_CHAT_TYPE=\$(printf '%s' "\$upd" | jq -r '.message.chat.type // empty')
+            if ! handle_message "\$M_CHAT" "\$M_FROM" "\$M_CHAT_TYPE" "\$MSG_TEXT" "\$UPDATE_ID"; then
                 printf '%s\n' "Telegram message update \$UPDATE_ID was not fully handled; cursor retained" >>/data/logs/telegram-broker.log
                 BATCH_OK=false
                 break
@@ -1567,11 +1710,16 @@ while true; do
         FROM=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.id // empty')
         FROM_NAME=\$(printf '%s' "\$upd" | jq -r '.callback_query.from.first_name // "user"')
         CHAT_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.chat.id // empty')
+        CHAT_TYPE=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.chat.type // empty')
         MSG_ID=\$(printf '%s' "\$upd" | jq -r '.callback_query.message.message_id // empty')
 
         if ! valid_positive_id "\$FROM" || ! valid_chat_id "\$CHAT_ID" || ! valid_positive_id "\$MSG_ID"; then
             printf '%s\n' "Telegram callback update \$UPDATE_ID had invalid actor or chat identifiers" >>/data/logs/telegram-broker.log
             if ! answer_cb "\$CB_ID" "Invalid callback."; then BATCH_OK=false; break; fi
+            continue
+        fi
+        if ! telegram_message_destination_allowed "\$CHAT_TYPE" "\$CHAT_ID" "\$FROM"; then
+            if ! answer_cb "\$CB_ID" "Private chat required."; then BATCH_OK=false; break; fi
             continue
         fi
 
@@ -1583,7 +1731,7 @@ while true; do
             if ! answer_cb "\$CB_ID" "This approval belongs to the configured approval owner."; then BATCH_OK=false; break; fi
             continue
         fi
-        if replay_callback_result "\$UPDATE_ID" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+        if replay_callback_result "\$UPDATE_ID" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
             continue
         fi
         case "\$DATA" in
@@ -1599,7 +1747,7 @@ while true; do
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
         if [ ! -f "\$TICKET" ]; then
-            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
                 continue
             fi
             if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
@@ -1612,7 +1760,7 @@ while true; do
         CALLBACK_EDIT=""
         case "\$VERB" in
           approve)
-              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID"; then
+              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
                   continue
               fi
               if ! approval_marker_ready "\$SHORT" && \
@@ -1662,7 +1810,7 @@ while true; do
                CALLBACK_ANSWER="Unknown verb: \$VERB"
                ;;
         esac
-        if [ -n "\$CALLBACK_ANSWER" ] && ! cache_callback_result "\$UPDATE_ID" "\$CHAT_ID" "\$MSG_ID" "\$CALLBACK_ANSWER" "\$CALLBACK_EDIT"; then
+        if [ -n "\$CALLBACK_ANSWER" ] && ! cache_callback_result "\$UPDATE_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM" "\$CALLBACK_ANSWER" "\$CALLBACK_EDIT"; then
             BATCH_OK=false
             break
         fi
@@ -2047,33 +2195,18 @@ echo "Saved: \$TEXT"
 SCRIPT
 
 # ==============================================================
-# zc-schedule — agent self-scheduling via ZeroClaw cron API
+# zc-schedule — intentionally disabled in the supervised release
 # ==============================================================
 cat > /usr/local/bin/zc-schedule << SCRIPT
 #!/bin/sh
-# Usage: zc-schedule '<cron-expr>' '<message-to-self>' [name]
-[ "${ENABLE_WRITE_ACTIONS}" = "true" ] || { echo "Scheduling is disabled by default; enable it only with broker review."; exit 1; }
-CRON="\$1"; MSG="\$2"; NAME="\${3:-agent_self_\$(date +%s)}"
-[ -z "\$CRON" ] || [ -z "\$MSG" ] && { echo "Usage: zc-schedule '<cron>' '<msg>' [name]"; exit 1; }
-PAYLOAD=\$(jq -nc --arg n "\$NAME" --arg s "\$CRON" --arg c "\$MSG" \
-    '{name:\$n, schedule:\$s, command:\$c}')
-curl -s -X POST "${GW}/api/cron" -H "Content-Type: application/json" -d "\$PAYLOAD"
-echo
+echo "Scheduling is disabled in the supervised release; create scheduled automations in Home Assistant." >&2
+exit 1
 SCRIPT
 
 cat > /usr/local/bin/zc-schedule-once << SCRIPT
 #!/bin/sh
-# Usage: zc-schedule-once '<delay-minutes>' '<message-to-self>'
-[ "${ENABLE_WRITE_ACTIONS}" = "true" ] || { echo "Scheduling is disabled by default; enable it only with broker review."; exit 1; }
-DELAY="\$1"; MSG="\$2"
-[ -z "\$DELAY" ] || [ -z "\$MSG" ] && { echo "Usage: zc-schedule-once <minutes> <msg>"; exit 1; }
-TARGET=\$(date -u -d @\$(( \$(date +%s) + DELAY*60 )) +'%M %H %d %m *' 2>/dev/null)
-[ -z "\$TARGET" ] && { echo "ERROR: date arithmetic failed"; exit 1; }
-NAME="oneshot_\$(date +%s)"
-PAYLOAD=\$(jq -nc --arg n "\$NAME" --arg s "\$TARGET" --arg c "\$MSG" \
-    '{name:\$n, schedule:\$s, command:\$c, run_once:true}')
-curl -s -X POST "${GW}/api/cron" -H "Content-Type: application/json" -d "\$PAYLOAD"
-echo
+echo "Scheduling is disabled in the supervised release; create scheduled automations in Home Assistant." >&2
+exit 1
 SCRIPT
 
 # ==============================================================
@@ -2396,7 +2529,7 @@ max_context_tokens = ${MAX_CONTEXT_TOKENS}
 level = "supervised"
 workspace_only = true
 max_actions_per_hour = ${MAX_ACTIONS_PER_HOUR}
-allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "ha-create-scene", "ha-create-automation", "ha-create-routine", "ha-run-routine", "ha-apply-creation", "zc-schedule", "zc-schedule-once", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-set-outcome", "zc-lesson-add"]
+allowed_commands = ["ha-lights-on", "ha-ac-status", "ha-cover-status", "ha-sensors", "ha-state", "ha-all-status", "ha-logbook", "ha-errors", "ha-action-guarded", "ha-create-scene", "ha-create-automation", "ha-create-routine", "ha-run-routine", "ha-apply-creation", "zc-audit-tail", "zc-undo", "zc-cost", "zc-world-state", "zc-set-outcome", "zc-lesson-add"]
 require_approval_for_medium_risk = true
 block_high_risk_commands = true
 
@@ -2510,13 +2643,13 @@ Lights:    "Example light on."         "Example group off."    "All lights off."
 AC:        "Example AC → 24°C."        "Example AC off."       "Example AC → cool mode."
 Covers:    "Example curtains opened."   "Example cover closed."
 Sensors:   "Soil moisture: 42% (low)."
-Schedule:  "Reminder set for 23:00 — check ACs."
+Schedule:  "Use a Home Assistant automation for scheduled reminders."
 Errors:    "Failed: <exact error from tool>"
 
-## Self-scheduling
-zc-schedule '<cron>' '<message-to-self>' — recurring (e.g. '0 8 * * *').
-zc-schedule-once <minutes> '<msg>'         — one-off delay.
-The message is delivered to YOU as a normal user message at the scheduled time.
+## Scheduling
+Self-scheduling is disabled in this supervised release. For a reminder or
+recurring action, explain that it must be created as a Home Assistant
+automation and do not claim that ZeroClaw created one.
 
 ## Audit + undo
 zc-audit-tail [N]   — recent actions
@@ -2730,8 +2863,7 @@ ACTIONS (all routed through the policy gate):
 - command: ha-action-guarded --apply-ticket <id8>   — adapter-only approved-ticket path
 
 ZC. (ZeroClaw self-commands; invoke through shell):
-- zc-schedule '<cron>' '<msg-to-self>' [name]   — recurring task
-- zc-schedule-once <min> '<msg>'                — one-off delay
+- scheduling is disabled; direct the user to a Home Assistant automation
 - zc-audit-tail [N]                              — recent actions
 - zc-undo [N]                                    — revert last N actions (1h window)
 - zc-cost                                        — current spend
@@ -2787,8 +2919,7 @@ send to the user. Invoke them only inside the structured shell tool.
 - ha-action-guarded '<service_path>' '<json_body>' — policy-gated action.
 - ha-logbook [entity_id] — recent activity.
 - ha-errors — Home Assistant error log.
-- zc-schedule '<cron>' '<message>' [name] — recurring reminder.
-- zc-schedule-once <minutes> '<message>' — one-off reminder.
+- Scheduling is disabled; direct the user to a Home Assistant automation.
 - zc-audit-tail [N] — recent audit rows.
 - zc-undo [N] — revert recent actions.
 - zc-cost — current cost telemetry.
@@ -2857,47 +2988,8 @@ find /data/pending -name '*.json' -mmin +60                        -delete 2>/de
     done
 ) &
 
-# ==============================================================
-# Post-startup seeder: waits for gateway, registers crons via REST.
-# ==============================================================
-(
-    scrub_unrelated_child_credentials
-    bashio::log.info "Cron seeder waiting for gateway..."
-    for i in $(seq 1 60); do
-        if curl -sf "${GW}/health" >/dev/null 2>&1; then
-            bashio::log.info "Gateway up — seeding cron entries"
-            break
-        fi
-        sleep 2
-    done
-
-    # Idempotent: list existing cron entries and remove ours by name before re-adding.
-    EXISTING=$(curl -s "${GW}/api/cron" 2>/dev/null)
-    for NAME in zc_daily_report zc_observer zc_cost_check zc_undo_cleanup zc_pending_cleanup; do
-        ID=$(echo "$EXISTING" | jq -r ".[] | select(.name==\"$NAME\") | .id" 2>/dev/null | head -n1)
-        [ -n "$ID" ] && [ "$ID" != "null" ] && \
-            curl -s -X DELETE "${GW}/api/cron/${ID}" >/dev/null 2>&1 || true
-    done
-
-    if [ "${DAILY_REPORT_ENABLED}" = "true" ]; then
-        DAILY_CRON="${REPORT_MIN} ${REPORT_UTC_HOUR} * * *"
-        DAILY_MSG="DAILY REPORT. Compose a 5-line home digest covering: (1) AC usage in last 24h via zc-audit-tail 50, (2) anything in ha.error_log, (3) pending approvals, (4) cost so far via zc-cost, (5) one specific suggestion. Send to Telegram."
-        curl -s -X POST "${GW}/api/cron" -H "Content-Type: application/json" \
-            -d "$(jq -nc --arg n zc_daily_report --arg s "$DAILY_CRON" --arg c "$DAILY_MSG" '{name:$n,schedule:$s,command:$c}')" >/dev/null 2>&1
-        bashio::log.info "Daily report cron seeded: ${DAILY_CRON} UTC"
-    fi
-
-    if [ "${OBSERVER_ENABLED}" = "true" ]; then
-        OBS_CRON="*/${OBSERVER_INTERVAL} * * * *"
-        OBS_MSG="OBSERVER TICK. Read zc-world-state and zc-audit-tail 20. If you notice an anomaly, a repeating pattern worth automating, a forgotten device, or a condition the user would want to know about, send a one-line note to Telegram. If nothing notable, respond with the literal token NOOP and do not message."
-        curl -s -X POST "${GW}/api/cron" -H "Content-Type: application/json" \
-            -d "$(jq -nc --arg n zc_observer --arg s "$OBS_CRON" --arg c "$OBS_MSG" '{name:$n,schedule:$s,command:$c}')" >/dev/null 2>&1
-        bashio::log.info "Observer cron seeded: every ${OBSERVER_INTERVAL}m"
-    fi
-
-    # Expiry is handled by the root-only state-cleanup loop above.  Do not
-    # delegate canonical approval cleanup to the untrusted planner cron.
-) &
+# Scheduling is deliberately delegated to Home Assistant automations.  There
+# is no hidden planner or gateway REST scheduler in this release.
 
 # ==============================================================
 # Telegram callback-query watcher (v3.1.2) — handles inline-keyboard
