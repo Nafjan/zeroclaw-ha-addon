@@ -74,11 +74,12 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
     cat > /tmp/approval-fake-ha <<'FAKE_HA'
 #!/bin/sh
 set -eu
-IFS= read -r request_line || exit 0
-case "$request_line" in
-    *" /core/api/services/switch/turn_on"*) body='[]' ;;
-    *) body='{}' ;;
-esac
+    IFS= read -r request_line || exit 0
+    case "$request_line" in
+        *" /core/api/services/switch/turn_on"*) body='[]' ;;
+        *" /core/api/states/"*) body='{"entity_id":"switch.kitchen","state":"off","attributes":{}}' ;;
+        *) body='{}' ;;
+    esac
 length=$(printf '%s' "$body" | wc -c)
 printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "$length" "$body"
 FAKE_HA
