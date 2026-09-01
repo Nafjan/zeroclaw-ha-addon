@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "descriptor_kind": "homeassistant_local_app",
+  "config_filename": "config.yaml",
+  "app_name": "ZeroClaw Canary",
+  "app_slug": "zeroclaw_canary",
+  "version": "3.1.4.0-canary.33495320528",
+  "image": "ghcr.io/nafjan/zeroclaw-ha-addon",
+  "image_tag": "3.1.4.0-canary.33495320528",
+  "resolved_image": "ghcr.io/nafjan/zeroclaw-ha-addon:3.1.4.0-canary.33495320528@sha256:b9dcdcc03cb142066532a13890a022605094eba4b28b922a420c152901da8624",
+  "candidate_tag": "3.1.4.0-canary.33495320528",
+  "candidate_digest": "sha256:b9dcdcc03cb142066532a13890a022605094eba4b28b922a420c152901da8624",
+  "candidate_commit": "836b7736dbb7e488def1b7ce7702a70351aab01c",
+  "config_sha256": "7ce2e964ab28d4ca8287f3479c858e66b75daa6de963d8be4fd7adc66e4031e2",
+  "minimum_supervisor_version": "2026.04.0"
+}
