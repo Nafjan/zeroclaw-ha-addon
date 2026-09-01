@@ -133,8 +133,9 @@ read_http_line() {
             respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}"
         HTTP_LINE="$BOUNDED_READ_LINE"
         return 0
+    else
+        read_status=$?
     fi
-    read_status=$?
     case "$read_status" in
         2) respond 431 "Request Header Fields Too Large" "{\"error\":\"${line_label} is too large\"}" ;;
         *) respond 408 "Request Timeout" "{\"error\":\"${line_label} timed out\"}" ;;
