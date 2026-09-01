@@ -648,9 +648,24 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "planner audit boundary cannot mint execution outcomes" {
     run grep -F 'intent|deny|confirm|confirm_failed' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]
-    run grep -F 'Execution, failure, and undo outcomes are written by root-owned' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    run grep -F 'source:"untrusted_planner"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'planner_event "planner/telemetry"' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'AUDIT_DIR=/data/audit/planner' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'provider_max_requests_per_hour' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+}
+
+@test "broker framing is bounded before JSON or HTTP parsing" {
+    run grep -F 'bounded_read_line 32769' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'bounded_read_line "$((line_limit + 1))"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F '"$header_count" -le 64' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'bounded_read_line 131073' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
     [ "$status" -eq 0 ]
 }
 

@@ -1,7 +1,16 @@
-#!/bin/sh
+#!/bin/bash
 # Root-owned Telegram capability broker. The planner may request only typed,
 # ticket-scoped approval messages; it never receives TELEGRAM_BOT_TOKEN.
 set -eu
+export LC_ALL=C
+
+if [ -r /opt/zeroclaw/lib/bounded-read.sh ]; then
+    # shellcheck disable=SC1091
+    . /opt/zeroclaw/lib/bounded-read.sh
+else
+    # shellcheck disable=SC1091
+    . "$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)/bounded-read.sh"
+fi
 
 TOKEN_FILE="${TELEGRAM_TOKEN_FILE:-/run/zeroclaw/telegram-token}"
 APPROVAL_CHAT="${TELEGRAM_APPROVAL_CHAT:-}"
@@ -22,7 +31,18 @@ json_text() {
 }
 
 request=""
-IFS= read -r request || true
+read_deadline=$((SECONDS + 5))
+if bounded_read_line 131073 "$read_deadline"; then
+    request="$BOUNDED_READ_LINE"
+    read_status=0
+else
+    read_status=$?
+fi
+case "$read_status" in
+    0) ;;
+    2) json_error "Telegram request too large" ;;
+    *) json_error "Telegram request timed out" ;;
+esac
 [ -n "$request" ] || json_error "empty Telegram request"
 [ "${#request}" -le 131072 ] || json_error "Telegram request too large"
 [ -n "$CLIENT_AUTH_TOKEN" ] || json_error "Telegram broker client authentication is unavailable"

@@ -91,7 +91,14 @@ jobs:
           done
           sh_scripts=()
           for script in "$GITHUB_WORKSPACE"/zeroclaw/lib/*.sh; do
-            sh_scripts+=("/src/zeroclaw/lib/$(basename "$script")")
+            case "$(basename "$script")" in
+              bounded-read.sh|capability-broker-handler.sh|provider-broker-handler.sh|telegram-broker-handler.sh)
+                bash_scripts+=("/src/zeroclaw/lib/$(basename "$script")")
+                ;;
+              *)
+                sh_scripts+=("/src/zeroclaw/lib/$(basename "$script")")
+                ;;
+            esac
           done
           for script in "$GITHUB_WORKSPACE"/zeroclaw/tests/*.sh; do
             sh_scripts+=("/src/zeroclaw/tests/$(basename "$script")")
@@ -256,6 +263,13 @@ jobs:
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Smoke-test bounded broker framing
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/broker_framing_smoke.sh'
 
       - name: Smoke-test generated config with the real ZeroClaw daemon
         run: >-

@@ -54,6 +54,9 @@ logs are sanitized for symlinks before listeners start and remain root-owned.
 The persistent `/data` mount is root-owned with a sticky group boundary: the
 planner can create only its own runtime entries and cannot unlink or replace
 root-owned audit, approval, migration, or configuration state.
+Planner-requested audit notes are retained only as untrusted telemetry in
+`/data/audit/planner/`; `zc-audit-tail` reads the authoritative broker stream
+and never treats those notes as action evidence.
 Each boot also rotates ephemeral, root-created client credentials for the
 loopback provider, HA, and Telegram brokers; `/run/zeroclaw` is not included in
 backups and the planner receives no Supervisor, Telegram-bot, or provider
