@@ -192,3 +192,8 @@ workflow verifies the existing artifact and attestations without rebuilding it,
 then promotes only that digest. Any remediation after a candidate build
 supersedes that candidate: do not carry its image, canary, or evidence forward
 to the next commit.
+
+The `promote` input on `release.yml` is intentionally deprecated and must stay
+`false`. Its former inline promotion path required evidence from a commit that
+could only be created after the same workflow run, so it is rejected before
+the candidate build. `promote-existing.yml` is the sole promotion entry point.

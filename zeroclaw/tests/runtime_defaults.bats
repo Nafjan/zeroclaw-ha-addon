@@ -160,6 +160,14 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -ne 0 ]
 }
 
+@test "single-workflow inline promotion is rejected in favor of the two-phase path" {
+    release_file="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    run grep -F 'inline promotion is disabled; run release.yml with promote=false, commit post-canary evidence, then use promote-existing.yml' "$release_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Deprecated; must remain false. Promote only via promote-existing.yml' "$release_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram watcher fails closed on a concurrent polling conflict" {
     run grep -F 'telegram_polling_conflict' "$run_file"
     [ "$status" -eq 0 ]
