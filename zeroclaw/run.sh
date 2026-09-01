@@ -592,6 +592,7 @@ ensure_dir_chain /data tools
 ensure_dir_chain /data routines
 ensure_dir_chain /data provider
 ensure_dir_chain /data capability
+ensure_dir_chain /data migrations
 ensure_dir_chain /data approval-receipts
 ensure_dir_chain /data/approval-receipts tickets
 ensure_dir_chain /data/approval-receipts outcomes
