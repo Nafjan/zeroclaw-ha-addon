@@ -6,7 +6,7 @@ PORT="${ZEROCLAW_CAPABILITY_PORT:-42618}"
 HOST="127.0.0.1"
 
 usage() {
-    echo "Usage: ha-capability {read_lights|read_climate|read_covers|read_sensors|get_state|get_logbook|get_error_log|pending_count|set_outcome|call_service|audit} ..." >&2
+    echo "Usage: ha-capability {read_lights|read_climate|read_covers|read_sensors|health_read_sensors|get_state|get_logbook|get_error_log|pending_count|set_outcome|call_service|audit} ..." >&2
     exit 1
 }
 
@@ -15,7 +15,7 @@ OP="${1:-}"
 shift
 
 case "$OP" in
-    read_lights|read_climate|read_covers|read_sensors|get_error_log|pending_count)
+    read_lights|read_climate|read_covers|read_sensors|health_read_sensors|get_error_log|pending_count)
         [ "$#" -eq 0 ] || usage
         REQUEST=$(jq -nc --arg operation "$OP" '{operation:$operation}')
         OUTPUT=json_text

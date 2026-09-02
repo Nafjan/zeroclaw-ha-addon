@@ -28,9 +28,11 @@ admission_tmp=""
 cleanup() {
     rm -f "$admission_tmp"
     if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
     fi
     if [ "$approval_lock_held" -eq 1 ]; then
+        rm -f -- "$LOCK/owner" 2>/dev/null || true
         rmdir "$LOCK" 2>/dev/null || true
     fi
 }
@@ -134,6 +136,15 @@ acquire_lock() {
         [ "$LOCK_ATTEMPTS" -lt 100 ] || fail "ticket ${SHORT} is already being transitioned"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$LOCK/owner" || {
+        rmdir "$LOCK" 2>/dev/null || true
+        fail "ticket ${SHORT} transition lock is unavailable"
+    }
+    chmod 0600 "$LOCK/owner" || {
+        rm -f -- "$LOCK/owner" 2>/dev/null || true
+        rmdir "$LOCK" 2>/dev/null || true
+        fail "ticket ${SHORT} transition lock is unavailable"
+    }
     approval_lock_held=1
 }
 
@@ -144,6 +155,15 @@ acquire_quota_lock() {
         [ "$quota_attempts" -le 100 ] || fail "capability action quota is busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$ACTION_QUOTA_LOCK/owner" || {
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        fail "capability action quota lock is unavailable"
+    }
+    chmod 0600 "$ACTION_QUOTA_LOCK/owner" || {
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        fail "capability action quota lock is unavailable"
+    }
     quota_lock_held=1
 }
 

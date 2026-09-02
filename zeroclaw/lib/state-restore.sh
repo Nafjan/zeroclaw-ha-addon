@@ -608,6 +608,43 @@ preserve_current_file capability/telegram-conflict.token
 preserve_current_tree capability/action-admissions
 preserve_current_tree audit
 
+clear_transient_runtime_lock() {
+    transient_lock="$1"
+    if [ -e "$transient_lock" ] || [ -L "$transient_lock" ]; then
+        [ -d "$transient_lock" ] && [ ! -L "$transient_lock" ] ||
+            die "transient runtime lock is unsafe: $transient_lock"
+        transient_owner="${transient_lock}/owner"
+        if [ -e "$transient_owner" ] || [ -L "$transient_owner" ]; then
+            [ -f "$transient_owner" ] && [ ! -L "$transient_owner" ] ||
+                die "transient runtime lock owner is unsafe: $transient_lock"
+            transient_pid=$(cat "$transient_owner" 2>/dev/null || true)
+            case "$transient_pid" in
+                ''|*[!0-9]*) die "transient runtime lock owner is invalid: $transient_lock" ;;
+            esac
+            kill -0 "$transient_pid" 2>/dev/null &&
+                die "transient runtime lock is active: $transient_lock"
+            rm -f -- "$transient_owner"
+        fi
+        rmdir "$transient_lock" 2>/dev/null ||
+            die "transient runtime lock could not be cleared: $transient_lock"
+    fi
+}
+
+# Locks are coordination state, not monotonic evidence. Do not let a backup
+# or preserved audit tree resurrect a lock from a process that no longer
+# exists. The fixed paths and empty-directory requirement keep this cleanup
+# fail-closed and prevent recursive deletion through planner-controlled data.
+for transient_lock in \
+    "$DATA_DIR/capability/.quota.lock" \
+    "$DATA_DIR/capability/.read-quota.lock" \
+    "$DATA_DIR/capability/.telegram-approval-rate.lock" \
+    "$DATA_DIR/capability/.telegram-approval-admission.lock" \
+    "$DATA_DIR/provider/.ledger.lock" \
+    "$DATA_DIR/audit/.lock" \
+    "$DATA_DIR/audit/planner/.quota.lock"; do
+    clear_transient_runtime_lock "$transient_lock"
+done
+
 if [ "$IDENTITY_OVERRIDE" = "true" ] || [ -n "$identity_mismatch" ]; then
     [ -d "$AUDIT_DIR" ] && [ ! -L "$AUDIT_DIR" ] || die "audit directory is unavailable for identity override"
     override_tmp="${AUDIT_DIR}/.state-restore-override.$$"

@@ -882,10 +882,12 @@ create_root_client_auth() {
 
 PROVIDER_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-client-auth"
 CAPABILITY_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/capability-client-auth"
+HEALTH_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/health-client-auth"
 TELEGRAM_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-client-auth"
 TELEGRAM_SYSTEM_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-system-auth"
 PROVIDER_CLIENT_AUTH_TOKEN="$(create_broker_client_auth provider-client-auth)"
 CAPABILITY_CLIENT_AUTH_TOKEN="$(create_broker_client_auth capability-client-auth)"
+HEALTH_CLIENT_AUTH_TOKEN="$(create_root_client_auth health-client-auth)"
 TELEGRAM_CLIENT_AUTH_TOKEN="$(create_broker_client_auth telegram-client-auth)"
 TELEGRAM_SYSTEM_AUTH_TOKEN="$(create_root_client_auth telegram-system-auth)"
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
@@ -1012,7 +1014,7 @@ CAPABILITY_PORT=42618
     unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE
-    export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN
+    export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN="${HEALTH_CLIENT_AUTH_TOKEN}"
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
     export CAPABILITY_QUOTA_FILE="/data/capability/quota.json"
@@ -1060,6 +1062,18 @@ cat > /usr/local/bin/ha-sensors << 'SCRIPT'
 exec /usr/local/bin/ha-capability read_sensors
 SCRIPT
 
+cat > /usr/local/bin/ha-health-read << 'SCRIPT'
+#!/bin/sh
+# Root-only health lane; its credential is not readable by the planner and it
+# does not consume the planner's persisted read quota.
+unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+    OPENROUTER_KEY NVIDIA_KEY ARK_KEY ZEROCLAW_API_KEY
+export ZEROCLAW_CAPABILITY_AUTH_FILE=/run/zeroclaw/health-client-auth
+exec /usr/local/bin/ha-capability health_read_sensors
+SCRIPT
+chown root:root /usr/local/bin/ha-health-read
+chmod 0700 /usr/local/bin/ha-health-read
+
 cat > /usr/local/bin/ha-state << 'SCRIPT'
 #!/bin/sh
 # Usage: ha-state <entity_id>
@@ -1091,7 +1105,7 @@ SCRIPT
 cat > /usr/local/bin/ha-errors << 'SCRIPT'
 #!/bin/sh
 RESULT=$(/usr/local/bin/ha-capability get_error_log) || { echo "(unavailable)"; exit 1; }
-printf '%s\n' "$RESULT" | jq -r '.result.detail // "Home Assistant logs are unavailable"'
+printf '%s\n' "$RESULT" | jq -r '.detail // "Home Assistant logs are unavailable"'
 SCRIPT
 
 # Compatibility name retained for the policy gate. This is no longer a raw
@@ -1609,6 +1623,14 @@ replay_approval_message() {
     short="\$1"; update_id="\$2"; chat_id="\$3"; actor_user_id="\$4"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
     outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    # The broker writes the outcome before finalizing the ticket. Reconcile
+    # that durable result when a callback/text retry observes the interval;
+    # this never replays the HA call and is safe if another process already
+    # completed the transition.
+    if [ -f "/data/approval-receipts/tickets/\${short}.json" ] && \
+        [ ! -L "/data/approval-receipts/tickets/\${short}.json" ]; then
+        ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition complete "\$short" >/dev/null 2>&1 || true
+    fi
     send_and_cache "\$update_id" "\$chat_id" "\$actor_user_id" "\$outcome_reply"
 }
 
@@ -1618,6 +1640,10 @@ replay_approval_outcome() {
     outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
     jq -e --arg message "\$message_id" \
         '(.message_id | tostring) == \$message' "\$outcome_file" >/dev/null 2>&1 || return 1
+    if [ -f "/data/approval-receipts/tickets/\${short}.json" ] && \
+        [ ! -L "/data/approval-receipts/tickets/\${short}.json" ]; then
+        ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition complete "\$short" >/dev/null 2>&1 || true
+    fi
     answer_cb "\$cb_id" "Applied." || return 1
     edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
     cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "\$actor_user_id" "Applied." "\$outcome_reply"
@@ -1745,6 +1771,13 @@ handle_message() {
 \${OUT}"
                     then return 1; fi
                 else
+                    # A durable applied outcome may exist even when the
+                    # helper returned non-zero because finalization failed.
+                    # Replay that receipt before reporting uncertainty and do
+                    # not issue another Home Assistant call.
+                    if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
+                        return 0
+                    fi
                     if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
 \${OUT}"
                     then return 1; fi
@@ -2014,6 +2047,14 @@ while true; do
                    CALLBACK_EDIT="✅ Approved by \${FROM_NAME}: \${SUMMARY}
 \${OUT}"
                else
+                  # The capability broker durably records an applied outcome
+                  # immediately before final ticket completion. If completion
+                  # failed, prefer that truthful receipt over an unconfirmed
+                  # message; the replay helper also retries idempotent cleanup
+                  # without issuing a second HA service call.
+                  if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
+                      continue
+                  fi
                   if ! answer_cb "\$CB_ID" "Outcome unconfirmed; claim retained."; then BATCH_OK=false; break; fi
                   if ! edit_msg "\$CHAT_ID" "\$MSG_ID" "⚠️ Approved by \${FROM_NAME}, but the execution outcome could not be confirmed; claim retained for recovery. Check Home Assistant history before retrying.
 \${OUT}"
@@ -2358,7 +2399,13 @@ while ! mkdir "$LOCK" 2>/dev/null; do
     [ "$ATTEMPTS" -lt 100 ] || { echo "audit store is busy" >&2; exit 1; }
     sleep 0.1
 done
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+printf '%s\n' "$$" > "$LOCK/owner" || {
+    rmdir "$LOCK" 2>/dev/null || true
+    echo "audit lock owner could not be recorded" >&2
+    exit 1
+}
+chmod 0600 "$LOCK/owner"
+trap 'rm -f -- "$LOCK/owner" 2>/dev/null || true; rmdir "$LOCK" 2>/dev/null || true' EXIT
 AUDIT_FILE="${AUDIT_DIR}/${DATE}.jsonl"
 printf '%s\n' "$ROW" >> "$AUDIT_FILE"
 chown "$AUDIT_OWNER" "$AUDIT_FILE"
@@ -3349,7 +3396,8 @@ scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE \
-        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
+        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
+        TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN HEALTH_CLIENT_AUTH_TOKEN
 }
 
 # ==============================================================
@@ -3436,7 +3484,8 @@ fi
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
 unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_LEGACY_ACTION_GATE NVIDIA_KEY ARK_KEY \
-    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
+    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
+    TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN HEALTH_CLIENT_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
 # the group may create entries; the sticky bit prevents the planner from
