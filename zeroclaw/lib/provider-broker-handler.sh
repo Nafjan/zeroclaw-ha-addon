@@ -1386,7 +1386,6 @@ ${candidate_key}"
         fi
         respond 503 "Service Unavailable" '{"error":"provider accounting is unavailable"}'
     fi
-    non_budget_failure=1
     request_auth_file=$(mktemp)
     chmod 0600 "$request_auth_file"
     printf 'Authorization: Bearer %s\n' "$PROFILE_KEY" > "$request_auth_file"
@@ -1399,6 +1398,7 @@ ${candidate_key}"
     if [ "$remaining_timeout" -le 5 ]; then
         settle_attempt "$RESERVATION_ID" "0" "reserved_max_broker_deadline" "" || \
             respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
+        non_budget_failure=1
         last_failure="provider broker deadline exceeded"
         break
     fi
@@ -1423,6 +1423,7 @@ ${candidate_key}"
         settle_attempt "$RESERVATION_ID" "0" "reserved_max_network_failure" "" || \
             respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
         block_profile "$profile_id"
+        non_budget_failure=1
         last_failure="provider network or timeout failure"
         log_event "provider route=${requested_model} profile=${profile_id} class=network"
         continue
@@ -1450,6 +1451,7 @@ ${candidate_key}"
                 settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_invalid_response_contract" "" || \
                     respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
                 block_profile "$profile_id"
+                non_budget_failure=1
                 last_failure="provider response contract invalid"
                 log_event "provider route=${requested_model} profile=${profile_id} class=invalid_response_contract"
                 continue
@@ -1465,6 +1467,7 @@ ${candidate_key}"
                         respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
                     if [ "${SETTLE_ANOMALY:-0}" -eq 1 ]; then
                         block_profile "$profile_id"
+                        non_budget_failure=1
                         last_failure="provider usage exceeded local reservation"
                         log_event "provider route=${requested_model} profile=${profile_id} class=usage_overrun"
                         continue
@@ -1483,6 +1486,7 @@ ${candidate_key}"
                 settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_response_projection_failed" "" || \
                     respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
                 block_profile "$profile_id"
+                non_budget_failure=1
                 last_failure="provider response projection failed"
                 log_event "provider route=${requested_model} profile=${profile_id} class=response_projection"
                 continue
@@ -1491,6 +1495,7 @@ ${candidate_key}"
                 settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_response_projection_read_failed" "" || \
                     respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
                 block_profile "$profile_id"
+                non_budget_failure=1
                 last_failure="provider response projection read failed"
                 log_event "provider route=${requested_model} profile=${profile_id} class=response_projection_read"
                 continue
@@ -1518,12 +1523,14 @@ ${candidate_key}"
                     # so an explicitly configured free route may still use
                     # that profile; 401/429/5xx and network failures block the
                     # profile for every route.
+                    non_budget_failure=1
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"
                     continue
                     ;;
                 *)
                     [ "$FAILURE_CLASS" = "credit_exhausted" ] && mark_credit_exhausted "$profile_id"
+                    [ "$FAILURE_CLASS" = "credit_exhausted" ] || non_budget_failure=1
                     block_profile "$profile_id"
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"
