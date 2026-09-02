@@ -128,7 +128,10 @@ root_test_size() {
     printf 'current-audit\n' > "$DATA_DIR/audit/2026-09-02.jsonl"
 
     run restore_state "$DATA_DIR" "$BACKUP_DIR"
-    [ "$status" -eq 0 ]
+    if [ "$status" -ne 0 ]; then
+        printf 'monotonic restore diagnostic: %s\n' "$output" >&2
+        false
+    fi
     [ "$(root_cat "$DATA_DIR/capability/quota.json")" = '{"hour_window":123,"requests_hour":17}' ]
     [[ "$(root_cat "$DATA_DIR/provider/quota.json")" == *'current-ledger'* ]]
     [ "$(root_cat "$DATA_DIR/capability/action-admissions/cafe0001.json")" = '{"ticket":"cafe0001","hour_window":123}' ]
