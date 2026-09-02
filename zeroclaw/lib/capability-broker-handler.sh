@@ -24,6 +24,7 @@ ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action
 OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
 APPROVAL_OUTCOME_DIR="${ZEROCLAW_APPROVAL_OUTCOME_DIR:-/data/approval-receipts/outcomes}"
 CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
+HEALTH_CLIENT_AUTH_TOKEN="${CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN:-}"
 # Read operations are intentionally bounded independently from write quotas.
 # The fixed response ceiling is applied before parsing so a hostile or noisy HA
 # endpoint cannot force an unbounded shell variable allocation.
@@ -71,8 +72,14 @@ esac
 [ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
 provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
     json_error "broker client authentication failed" "broker_auth_failed"
-[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+auth_class=planner
+if [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
+    auth_class=planner
+elif [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$HEALTH_CLIENT_AUTH_TOKEN" ]; then
+    auth_class=health
+else
     json_error "broker client authentication failed" "broker_auth_failed"
+fi
 request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
     json_error "broker request is not valid JSON" "invalid_request"
 [ -n "${HA_TOKEN:-}" ] || json_error "broker is not configured"
@@ -91,15 +98,27 @@ planner_audit_tmp=""
 HA_RESPONSE_FILE=""
 cleanup() {
     rm -f "$HA_AUTH_FILE" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"
-    [ "$quota_lock_held" -eq 1 ] && rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
-    [ "$read_quota_lock_held" -eq 1 ] && rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
-    [ "$planner_audit_lock_held" -eq 1 ] && rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+    if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+    fi
+    if [ "$read_quota_lock_held" -eq 1 ]; then
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+    fi
+    if [ "$planner_audit_lock_held" -eq 1 ]; then
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
 if ! operation=$(printf '%s' "$request" | jq -er '.operation | select(type == "string")'); then
     json_error "operation must be a string"
 fi
+[ "$auth_class" = health ] && [ "$operation" = health_read_sensors ] ||
+    [ "$auth_class" = planner ] && [ "$operation" != health_read_sensors ] ||
+    json_error "health broker credential is restricted" "broker_auth_failed"
 
 valid_entity_value() {
     printf '%s' "$1" | jq -e '
@@ -151,6 +170,7 @@ bounded_ha_curl() {
 read_quota_release() {
     if [ "$read_quota_lock_held" -eq 1 ]; then
         read_quota_lock_held=0
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
     fi
 }
@@ -162,6 +182,15 @@ read_quota_acquire() {
         [ "$attempts" -le 20 ] || json_error "capability read quota is busy" "read_quota_busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$READ_QUOTA_LOCK/owner" || {
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability read quota lock is unavailable" "read_quota_unavailable"
+    }
+    chmod 0600 "$READ_QUOTA_LOCK/owner" || {
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability read quota lock is unavailable" "read_quota_unavailable"
+    }
     read_quota_lock_held=1
 }
 
@@ -219,6 +248,7 @@ reserve_read_quota() {
 planner_audit_quota_release() {
     if [ "$planner_audit_lock_held" -eq 1 ]; then
         planner_audit_lock_held=0
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
     fi
 }
@@ -236,6 +266,15 @@ planner_audit_quota_acquire() {
         [ "$attempts" -le 20 ] || json_error "planner audit quota is busy" "audit_quota_busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$PLANNER_AUDIT_QUOTA_LOCK/owner" || {
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+        json_error "planner audit quota lock is unavailable" "audit_quota_unavailable"
+    }
+    chmod 0600 "$PLANNER_AUDIT_QUOTA_LOCK/owner" || {
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+        json_error "planner audit quota lock is unavailable" "audit_quota_unavailable"
+    }
     planner_audit_lock_held=1
 }
 
@@ -549,6 +588,15 @@ acquire_action_quota_lock() {
         [ "$attempts" -le 20 ] || json_error "capability action quota is busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$ACTION_QUOTA_LOCK/owner" || {
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability action quota lock is unavailable"
+    }
+    chmod 0600 "$ACTION_QUOTA_LOCK/owner" || {
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability action quota lock is unavailable"
+    }
     quota_lock_held=1
 }
 
@@ -569,6 +617,7 @@ reserve_action_quota() {
     fi
     if ! printf '%s' "$quota" | jq -e 'type == "object"' >/dev/null 2>&1; then
         quota_lock_held=0
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
         json_error "capability action quota state is invalid"
     fi
@@ -577,12 +626,14 @@ reserve_action_quota() {
     case "$requests_hour" in
         ''|*[!0-9]*)
             quota_lock_held=0
+            rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
             rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
             json_error "capability action quota state is invalid"
             ;;
     esac
     [ "$requests_hour" -lt "$ACTION_LIMIT" ] || {
         quota_lock_held=0
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
         json_error "capability hourly action budget exceeded"
     }
@@ -595,6 +646,7 @@ reserve_action_quota() {
     mv -f "$quota_tmp" "$ACTION_QUOTA_FILE"
     quota_tmp=""
     quota_lock_held=0
+    rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
     rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
 }
 
@@ -781,6 +833,12 @@ case "$operation" in
     read_sensors)
         run_template '{% for s in states.sensor %}{% if "soil" in s.entity_id or "moisture" in s.entity_id or "temperature" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\n{% endif %}{% endfor %}'
         ;;
+    health_read_sensors)
+        # The Supervisor health process uses a root-only client credential and
+        # is intentionally exempt from the planner's read quota.  Keep the
+        # response bounded by the same broker template path.
+        run_template '{% for s in states.sensor %}{% if "soil" in s.entity_id or "moisture" in s.entity_id or "temperature" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\n{% endif %}{% endfor %}'
+        ;;
     get_state)
         entity=$(printf '%s' "$request" | jq -er '.entity_id | select(type == "string")' 2>/dev/null) || json_error "entity_id must be a string"
         valid_entity_value "\"${entity}\"" || json_error "entity_id is invalid"
@@ -809,7 +867,7 @@ case "$operation" in
         fi
         rm -f "$HA_RESPONSE_FILE"
         HA_RESPONSE_FILE=""
-        json_value '{available:true,detail:"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
+        json_value '{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
         ;;
     pending_count)
         run_pending_count

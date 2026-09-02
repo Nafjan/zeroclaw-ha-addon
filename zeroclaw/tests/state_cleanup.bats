@@ -11,7 +11,8 @@ setup() {
     mkdir -p "$DATA_DIR/approval-receipts/tickets" \
         "$DATA_DIR/approval-receipts/.claims" \
         "$DATA_DIR/approval-receipts/.locks" \
-        "$DATA_DIR/approved" "$DATA_DIR/pending" "$DATA_DIR/capability"
+        "$DATA_DIR/approved" "$DATA_DIR/pending" "$DATA_DIR/capability" \
+        "$DATA_DIR/provider" "$DATA_DIR/audit/planner"
     NOW="$(date -u +%s)"
 }
 
@@ -89,4 +90,31 @@ teardown() {
     run_cleanup
     [ "$status" -eq 0 ]
     [ ! -e "$DATA_DIR/capability/last-outcome.json" ]
+}
+
+@test "dead transient broker locks are reclaimed while live owners are retained" {
+    for lock in \
+        "$DATA_DIR/capability/.read-quota.lock" \
+        "$DATA_DIR/capability/.telegram-approval-rate.lock" \
+        "$DATA_DIR/capability/.telegram-approval-admission.lock" \
+        "$DATA_DIR/provider/.ledger.lock" \
+        "$DATA_DIR/audit/.lock" \
+        "$DATA_DIR/audit/planner/.quota.lock"; do
+        mkdir "$lock"
+        touch -t 200001010000 "$lock"
+    done
+    mkdir "$DATA_DIR/capability/.quota.lock"
+    printf '%s\n' "$$" > "$DATA_DIR/capability/.quota.lock/owner"
+    touch -t 200001010000 "$DATA_DIR/capability/.quota.lock"
+
+    run_cleanup
+    [ "$status" -eq 0 ]
+    [ -e "$DATA_DIR/capability/.quota.lock" ]
+    [ ! -e "$DATA_DIR/capability/.read-quota.lock" ]
+    [ ! -e "$DATA_DIR/capability/.telegram-approval-rate.lock" ]
+    [ ! -e "$DATA_DIR/capability/.telegram-approval-admission.lock" ]
+    [ ! -e "$DATA_DIR/provider/.ledger.lock" ]
+    [ ! -e "$DATA_DIR/audit/.lock" ]
+    [ ! -e "$DATA_DIR/audit/planner/.quota.lock" ]
+    [ -e "$DATA_DIR/capability/.quota-live.lock" ]
 }

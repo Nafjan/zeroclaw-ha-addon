@@ -26,4 +26,4 @@ printf 'header = "Authorization: Bearer %s"\n' "$provider_health_token" > "$prov
 chmod 0600 "$provider_health_config"
 curl -fsS --max-time 3 --config "$provider_health_config" http://127.0.0.1:42620/health >/dev/null
 unset provider_health_token
-/usr/local/bin/ha-capability read_sensors >/dev/null
+/usr/local/bin/ha-health-read >/dev/null

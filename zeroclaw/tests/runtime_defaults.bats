@@ -29,7 +29,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider-client-auth' "$health_file"
     [ "$status" -eq 0 ]
-    run grep -F '/usr/local/bin/ha-capability read_sensors' "$health_file"
+    run grep -F '/usr/local/bin/ha-health-read' "$health_file"
     [ "$status" -eq 0 ]
     run grep -F 'CMD /opt/zeroclaw/lib/healthcheck.sh' "$BATS_TEST_DIRNAME/../Dockerfile"
     [ "$status" -eq 0 ]
@@ -456,7 +456,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "HA error-log capability never forwards raw diagnostic contents" {
     capability_file="$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
-    run grep -F 'json_value '\''{available:true,detail:"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'\''' "$capability_file"
+    run grep -F 'json_value '\''{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'\''' "$capability_file"
+    [ "$status" -eq 0 ]
+    error_result='{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
+    run jq -e '.available == true and (.detail | type == "string")' <<< "$error_result"
     [ "$status" -eq 0 ]
     run awk '
         /^    get_error_log\)/ { inside=1 }
@@ -466,6 +469,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     ' "$capability_file"
     [ "$status" -eq 0 ]
     run grep -F 'RESULT=$(/usr/local/bin/ha-capability get_error_log)' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -r '\''.detail // "Home Assistant logs are unavailable"'\''' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -926,6 +931,39 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'Outcome unconfirmed; claim retained.' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram sendMessage rejected approval' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram retries reconcile a durable applied outcome before reporting uncertainty" {
+    run grep -F 'prefer that truthful receipt over an unconfirmed message' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition complete "$short"' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "transient broker locks carry owners and restore clears only fixed locks" {
+    run grep -F 'ACTION_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'READ_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'PLANNER_AUDIT_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'AUDIT_DIR}/.lock/owner' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'clear_transient_runtime_lock' "$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "healthcheck uses a root-only quota-exempt broker lane" {
+    run grep -F 'health_read_sensors' "$BATS_TEST_DIRNAME/../lib/ha-capability.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'health broker credential is restricted' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'chmod 0700 /usr/local/bin/ha-health-read' "$run_file"
     [ "$status" -eq 0 ]
 }
 
