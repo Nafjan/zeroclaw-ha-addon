@@ -84,7 +84,17 @@ length=$(printf '%s' "$body" | wc -c)
 printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "$length" "$body"
 FAKE_HA
     chmod +x /tmp/approval-fake-ha
-    /bin/busybox nc -l -p "$HA_PORT" -s 127.0.0.1 -e /tmp/approval-fake-ha &
+    (
+        # The guarded apply path makes one broker/HA request for the undo
+        # snapshot and a second request for the service call. Keep the fake
+        # endpoints available for both connections instead of accidentally
+        # turning a successful first request into a transport failure.
+        for _ in 1 2; do
+            while ! /bin/busybox nc -l -p "$HA_PORT" -s 127.0.0.1 -e /tmp/approval-fake-ha; do
+                sleep 1
+            done
+        done
+    ) &
     ha_pid=$!
     sleep 1
     (
@@ -94,7 +104,11 @@ FAKE_HA
         export ENABLE_WRITE_ACTIONS=true
         export POLICY_MODE=balanced POLICY_QUIET_CONFIRM=true POLICY_BULK_THRESHOLD=3 POLICY_CLIMATE_DELTA=3
         export QUIET_HOURS=23:00-06:00 EXTRA_DENY= EXTRA_CONFIRM= EXTRA_ALLOW=
-        /bin/busybox nc -l -p "$APPLY_PORT" -s 127.0.0.1 -e /usr/local/bin/ha-broker-entrypoint
+        for _ in 1 2; do
+            while ! /bin/busybox nc -l -p "$APPLY_PORT" -s 127.0.0.1 -e /usr/local/bin/ha-broker-entrypoint; do
+                sleep 1
+            done
+        done
     ) &
     broker_pid=$!
     sleep 1
