@@ -939,7 +939,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'zc-approval-transition complete "$short"' "$run_file"
+    run grep -F 'zc-approval-transition complete "\$short"' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -950,7 +950,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'PLANNER_AUDIT_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]
-    run grep -F 'AUDIT_DIR}/.lock/owner' "$run_file"
+    run grep -F 'LOCK="${AUDIT_DIR}/.lock"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '"$LOCK/owner"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'clear_transient_runtime_lock' "$BATS_TEST_DIRNAME/../lib/state-restore.sh"
     [ "$status" -eq 0 ]
