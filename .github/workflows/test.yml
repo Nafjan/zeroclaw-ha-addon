@@ -223,6 +223,13 @@ jobs:
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
 
+      - name: Smoke-test root-only health broker lane
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/health_lane_smoke.sh'
+
       - name: Prove Supervisor floor fails closed before planner startup
         run: >-
           docker run --rm --network none --platform linux/arm64
