@@ -293,6 +293,20 @@ jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].set
 CURRENT_CHECK=global-hour-admission
 rm -f "$LEDGER" "$LOCK" /data/provider/global-hour-primary.log /data/provider/global-hour-fallback.log
 next_case_ports
+# Seed an already-settled request in the current global hour. This keeps the
+# admission test deterministic even if a disposable BusyBox listener from the
+# preceding case takes a moment to exit; the scenario is specifically about a
+# consumed global slot preventing every later profile, not about re-testing
+# failed-request settlement.
+global_hour_now=$(date -u +%s)
+jq -nc --argjson now "$global_hour_now" --argjson hour "$((global_hour_now / 3600))" \
+    --argjson day "$((global_hour_now / 86400))" --arg month "$(date -u +%Y-%m)" \
+    '{schema:1,records:[{id:"seed-global-hour",created_at:$now,expires_at:($now + 180),
+      hour_window:$hour,day_window:$day,month_window:$month,route_id:"seed",
+      profile_id:"openrouter",upstream_model:"seed-model",reserved_tokens:16,
+      reserved_input_tokens:328,settled_tokens:16,settled_input_tokens:328,
+      reserved_cost_micros:34400,settled_cost_micros:34400,state:"settled",
+      settlement:"seeded_global_hour",updated_at:$now}],profile_quarantine:[]}' > "$LEDGER"
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
 nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="global-hour-route|openrouter|global-hour-primary|paid
