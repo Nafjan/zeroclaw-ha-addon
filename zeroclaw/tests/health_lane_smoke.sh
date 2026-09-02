@@ -11,6 +11,7 @@ cat > /tmp/health-lane-bin/curl <<'FAKE_CURL'
 # Home Assistant's /template endpoint returns the rendered template body,
 # not the JSON envelope used by the REST API. The broker deliberately wraps
 # that bounded text response in its own JSON result.
+[ -z "${HA_TOKEN:-}" ] || exit 91
 printf '%s\n' 'Kitchen: light.kitchen'
 FAKE_CURL
 chmod 0755 /tmp/health-lane-bin/curl

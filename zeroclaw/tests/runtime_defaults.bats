@@ -27,7 +27,7 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'http://127.0.0.1:42620/health' "$health_file"
     [ "$status" -eq 0 ]
-    run grep -F 'provider-client-auth' "$health_file"
+    run grep -F 'provider-health-auth' "$health_file"
     [ "$status" -eq 0 ]
     run grep -F '/usr/local/bin/ha-health-read' "$health_file"
     [ "$status" -eq 0 ]
@@ -412,6 +412,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'chmod 0710 /run/zeroclaw' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'PROVIDER_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'PROVIDER_HEALTH_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'CAPABILITY_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
@@ -964,6 +966,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'health broker credential is restricted' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider health credential is required' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-ready' "$BATS_TEST_DIRNAME/../lib/healthcheck.sh"
     [ "$status" -eq 0 ]
     run grep -F 'chmod 0700 /usr/local/bin/ha-health-read' "$run_file"
     [ "$status" -eq 0 ]

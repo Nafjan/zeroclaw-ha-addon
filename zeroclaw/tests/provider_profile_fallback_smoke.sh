@@ -175,6 +175,7 @@ start_proxy() {
         TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
+        PROVIDER_HEALTH_CLIENT_AUTH_TOKEN=provider-health-secret \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
         PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="$profile_input_tokens" \
@@ -208,18 +209,20 @@ stop_listeners() {
 
 request_proxy() {
     request_body="$1"
+    request_auth="${2:-provider-client-secret}"
     body_length=$(printf '%s' "$request_body" | wc -c | tr -d ' ')
     {
         printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
-            "$body_length" "$request_body"
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
+            "$request_auth" "$body_length" "$request_body"
     } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
 }
 
 request_provider_health() {
+    request_auth="$1"
     {
         printf 'GET /health HTTP/1.1\r\n'
-        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\n\r\n'
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\n\r\n' "$request_auth"
     } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
 }
 
@@ -252,10 +255,14 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="health-route|openrouter|health-model|paid"
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
-health_response=$(request_provider_health)
+health_response=$(request_provider_health provider-health-secret)
+planner_health_response=$(request_provider_health provider-client-secret)
+health_chat_response=$(request_proxy '{"model":"health-model","messages":[{"role":"user","content":"health credential must not chat"}]}' provider-health-secret)
 stop_listeners
 printf '%s' "$health_response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$health_response" | grep -F '{"status":"ok"}' >/dev/null
+printf '%s' "$planner_health_response" | grep -F 'HTTP/1.1 401 Unauthorized' >/dev/null
+printf '%s' "$health_chat_response" | grep -F 'HTTP/1.1 401 Unauthorized' >/dev/null
 [ ! -e /data/provider/profile-client-rate.json ]
 
 next_case_ports
