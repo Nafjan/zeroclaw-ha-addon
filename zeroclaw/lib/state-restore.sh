@@ -323,6 +323,32 @@ preserve_current_file() {
     [ -f "$preserve_source" ] && [ ! -L "$preserve_source" ] ||
         die "current monotonic state file is unsafe: $preserve_relative_path"
     preserve_parent=$(dirname -- "$preserve_target")
+    case "$preserve_parent" in
+        "$DATA_DIR") ;;
+        "$DATA_DIR"/*)
+            preserve_parent_relative=${preserve_parent#"$DATA_DIR"/}
+            preserve_parent_cursor="$DATA_DIR"
+            preserve_parent_ifs=$IFS
+            IFS=/
+            # The relative paths passed to this helper are fixed by the
+            # broker-owned inventory. Create only missing components, and
+            # reject a symlink or non-directory at every boundary.
+            set -- $preserve_parent_relative
+            IFS=$preserve_parent_ifs
+            for preserve_parent_component do
+                [ -n "$preserve_parent_component" ] || continue
+                preserve_parent_cursor="$preserve_parent_cursor/$preserve_parent_component"
+                if [ -e "$preserve_parent_cursor" ] || [ -L "$preserve_parent_cursor" ]; then
+                    [ -d "$preserve_parent_cursor" ] && [ ! -L "$preserve_parent_cursor" ] ||
+                        die "current monotonic state parent is unsafe: $preserve_parent_cursor"
+                else
+                    mkdir "$preserve_parent_cursor" ||
+                        die "current monotonic state parent could not be created: $preserve_parent_cursor"
+                fi
+            done
+            ;;
+        *) die "current monotonic state parent is outside the data directory" ;;
+    esac
     [ -d "$preserve_parent" ] && [ ! -L "$preserve_parent" ] ||
         die "current monotonic state parent is unsafe: $preserve_parent"
     if [ -e "$preserve_target" ] || [ -L "$preserve_target" ]; then
