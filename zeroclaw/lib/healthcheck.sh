@@ -16,7 +16,7 @@ pid_is_live() {
 pid_is_live /run/zeroclaw/provider-broker.pid
 pid_is_live /run/zeroclaw/capability-broker.pid
 curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null
-provider_health_auth_file=/run/zeroclaw/provider-client-auth
+provider_health_auth_file=/run/zeroclaw/provider-health-auth
 [ -f "$provider_health_auth_file" ] && [ ! -L "$provider_health_auth_file" ] || exit 1
 provider_health_token=$(tr -d '\r\n' < "$provider_health_auth_file")
 printf '%s' "$provider_health_token" | grep -Eq '^[a-f0-9]{64}$' || exit 1
@@ -26,4 +26,14 @@ printf 'header = "Authorization: Bearer %s"\n' "$provider_health_token" > "$prov
 chmod 0600 "$provider_health_config"
 curl -fsS --max-time 3 --config "$provider_health_config" http://127.0.0.1:42620/health >/dev/null
 unset provider_health_token
+if [ -e /run/zeroclaw/telegram-enabled ]; then
+    [ -f /run/zeroclaw/telegram-enabled ] && [ ! -L /run/zeroclaw/telegram-enabled ] || exit 1
+    [ "$(tr -d '\r\n' < /run/zeroclaw/telegram-enabled)" = true ] || exit 1
+    pid_is_live /run/zeroclaw/telegram-watcher.pid
+    telegram_ready_file=/data/capability/telegram-ready
+    [ -f "$telegram_ready_file" ] && [ ! -L "$telegram_ready_file" ] || exit 1
+    telegram_ready_bot=$(tr -d '\r\n' < "$telegram_ready_file")
+    printf '%s' "$telegram_ready_bot" | grep -Eq '^[0-9]+$' || exit 1
+    unset telegram_ready_bot
+fi
 /usr/local/bin/ha-health-read >/dev/null

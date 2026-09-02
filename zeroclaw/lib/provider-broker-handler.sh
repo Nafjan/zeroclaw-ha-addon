@@ -42,6 +42,7 @@ FREE_FALLBACK_ENABLED="${PROVIDER_FREE_FALLBACK_ENABLED:-false}"
 FUSION_PRESET="${PROVIDER_FUSION_PRESET:-general-budget}"
 AUTO_COST_TIER="${PROVIDER_AUTO_COST_TIER:-medium}"
 CLIENT_AUTH_TOKEN="${PROVIDER_CLIENT_AUTH_TOKEN:-}"
+HEALTH_CLIENT_AUTH_TOKEN="${PROVIDER_HEALTH_CLIENT_AUTH_TOKEN:-}"
 LEDGER_FILE="${PROVIDER_LEDGER_FILE:-${PROVIDER_QUOTA_FILE:-/data/provider/ledger.json}}"
 LEDGER_FILE=$(printf '%s' "$LEDGER_FILE" | sed 's/[[:space:]]*$//')
 LEDGER_LOCK="${PROVIDER_LEDGER_LOCK:-${PROVIDER_QUOTA_LOCK:-/data/provider/.ledger.lock}}"
@@ -336,9 +337,15 @@ done
 
 [ -n "$CLIENT_AUTH_TOKEN" ] || \
     respond 503 "Service Unavailable" '{"error":"provider broker client authentication is unavailable"}'
-[ "$client_auth_header_count" -eq 1 ] &&
-    [ "$client_auth_header" = "Bearer ${CLIENT_AUTH_TOKEN}" ] || \
+[ "$client_auth_header_count" -eq 1 ] || \
     respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
+auth_class=client
+if [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] &&
+    [ "$client_auth_header" = "Bearer ${HEALTH_CLIENT_AUTH_TOKEN}" ]; then
+    auth_class=health
+elif [ "$client_auth_header" != "Bearer ${CLIENT_AUTH_TOKEN}" ]; then
+    respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
+fi
 
 # Health probes must prove that this handler reached its authenticated request
 # path without consuming a provider request slot, contacting an upstream, or
@@ -346,11 +353,16 @@ done
 # loopback listener as chat completions.
 case "$request_line" in
     "GET /health HTTP/1.0"|"GET /health HTTP/1.1")
+        [ "$auth_class" = health ] || \
+            respond 401 "Unauthorized" '{"error":"provider health credential is required"}'
         [ -z "$content_length" ] || [ "$content_length" = 0 ] || \
             respond 400 "Bad Request" '{"error":"health requests must not contain a body"}'
         respond 200 "OK" '{"status":"ok"}'
         ;;
 esac
+
+[ "$auth_class" = client ] || \
+    respond 401 "Unauthorized" '{"error":"provider client credential is required"}'
 
 # The client admission counter is deliberately after authentication but before
 # route, envelope, body, or model validation. A caller that knows the loopback

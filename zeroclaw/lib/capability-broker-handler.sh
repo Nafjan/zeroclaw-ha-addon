@@ -89,6 +89,10 @@ request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
 HA_AUTH_FILE=$(mktemp)
 chmod 0600 "$HA_AUTH_FILE"
 printf 'Authorization: Bearer %s\n' "$HA_TOKEN" > "$HA_AUTH_FILE"
+# The credential is now sealed in the root-only curl config. Do not let jq,
+# curl, policy, or audit children inherit the Supervisor token through the
+# broker process environment.
+unset HA_TOKEN
 quota_lock_held=0
 quota_tmp=""
 read_quota_lock_held=0

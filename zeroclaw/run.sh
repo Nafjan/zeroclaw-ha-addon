@@ -881,15 +881,21 @@ create_root_client_auth() {
 }
 
 PROVIDER_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-client-auth"
+PROVIDER_HEALTH_AUTH_FILE="${BROKER_RUNTIME_DIR}/provider-health-auth"
 CAPABILITY_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/capability-client-auth"
 HEALTH_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/health-client-auth"
 TELEGRAM_CLIENT_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-client-auth"
 TELEGRAM_SYSTEM_AUTH_FILE="${BROKER_RUNTIME_DIR}/telegram-system-auth"
 PROVIDER_CLIENT_AUTH_TOKEN="$(create_broker_client_auth provider-client-auth)"
+PROVIDER_HEALTH_CLIENT_AUTH_TOKEN="$(create_root_client_auth provider-health-auth)"
 CAPABILITY_CLIENT_AUTH_TOKEN="$(create_broker_client_auth capability-client-auth)"
 HEALTH_CLIENT_AUTH_TOKEN="$(create_root_client_auth health-client-auth)"
 TELEGRAM_CLIENT_AUTH_TOKEN="$(create_broker_client_auth telegram-client-auth)"
 TELEGRAM_SYSTEM_AUTH_TOKEN="$(create_root_client_auth telegram-system-auth)"
+[ "${PROVIDER_CLIENT_AUTH_TOKEN}" != "${PROVIDER_HEALTH_CLIENT_AUTH_TOKEN}" ] || {
+    bashio::log.fatal "provider client and health credentials unexpectedly match"
+    exit 1
+}
 if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     # Native ZeroClaw sends ZEROCLAW_API_KEY as the Authorization bearer on
     # its OpenAI-compatible provider request. In broker mode that value is a
@@ -917,7 +923,7 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
         provider_test_upstream="${ZEROCLAW_PROVIDER_UPSTREAM_URL:-}"
         unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             LEGACY_HA_TOKEN ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE ZEROCLAW_PROVIDER_UPSTREAM_URL
-        export PROVIDER_CLIENT_AUTH_TOKEN
+        export PROVIDER_CLIENT_AUTH_TOKEN PROVIDER_HEALTH_CLIENT_AUTH_TOKEN
         # Only the CI image carries this immutable marker. The exact loopback
         # endpoint is accepted solely for the deterministic real-daemon test;
         # release images always use the fixed upstream below.
@@ -1001,6 +1007,9 @@ ${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
     printf '%s\n' "${PROVIDER_BROKER_PID}" > /run/zeroclaw/provider-broker.pid
     chown root:root /run/zeroclaw/provider-broker.pid
     chmod 0600 /run/zeroclaw/provider-broker.pid
+    # The provider broker has its own copies. Remove both credentials from the
+    # entrypoint before any unrelated root helper is forked.
+    unset PROVIDER_CLIENT_AUTH_TOKEN PROVIDER_HEALTH_CLIENT_AUTH_TOKEN
 fi
 
 # BusyBox nc is a minimal local transport. The broker is the only child
@@ -1172,6 +1181,15 @@ TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
 printf '%s' "${TELEGRAM_TOKEN}" > "${TELEGRAM_TOKEN_FILE}"
 chown root:root "${TELEGRAM_TOKEN_FILE}"
 chmod 0600 "${TELEGRAM_TOKEN_FILE}"
+TELEGRAM_ENABLED_FILE="/run/zeroclaw/telegram-enabled"
+TELEGRAM_WATCHER_PID_FILE="/run/zeroclaw/telegram-watcher.pid"
+TELEGRAM_READY_FILE="/data/capability/telegram-ready"
+rm -f "${TELEGRAM_ENABLED_FILE}" "${TELEGRAM_WATCHER_PID_FILE}" "${TELEGRAM_READY_FILE}"
+if [ "${TELEGRAM_ENABLED}" = "true" ]; then
+    printf '%s\n' true > "${TELEGRAM_ENABLED_FILE}"
+    chown root:root "${TELEGRAM_ENABLED_FILE}"
+    chmod 0600 "${TELEGRAM_ENABLED_FILE}"
+fi
 TELEGRAM_CONFLICT_FILE="/data/capability/telegram-conflict"
 TELEGRAM_CONFLICT_TOKEN_FILE="/data/capability/telegram-conflict.token"
 if [ "${TELEGRAM_ENABLED}" = "true" ]; then
@@ -1317,6 +1335,9 @@ fi
 BOT_ID_FILE="/data/capability/telegram-bot-id"
 BOT_ID=""
 BOT_ID_READY=false
+READY_FILE="${TELEGRAM_READY_FILE}"
+rm -f -- "\$READY_FILE"
+trap 'rm -f -- "\$READY_FILE"' EXIT
 [ ! -L "\$BOT_ID_FILE" ] || exit 1
 if [ -e "\$BOT_ID_FILE" ] && [ ! -f "\$BOT_ID_FILE" ]; then
     exit 1
@@ -1477,6 +1498,15 @@ load_bot_identity() {
     chmod 0600 "\$bot_id_tmp"
     mv -f "\$bot_id_tmp" "\$BOT_ID_FILE" || {
         rm -f "\$bot_id_tmp"
+        return 1
+    }
+    sync
+    ready_tmp="\${READY_FILE}.tmp.\$\$"
+    printf '%s\n' "\$new_bot_id" > "\$ready_tmp" || return 1
+    chown root:root "\$ready_tmp"
+    chmod 0600 "\$ready_tmp"
+    mv -f "\$ready_tmp" "\$READY_FILE" || {
+        rm -f "\$ready_tmp"
         return 1
     }
     sync
@@ -3396,7 +3426,7 @@ scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE \
-        PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
+        PROVIDER_CLIENT_AUTH_TOKEN PROVIDER_HEALTH_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
         TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN HEALTH_CLIENT_AUTH_TOKEN
 }
 
@@ -3447,6 +3477,10 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
             sleep 5
         done
     ) &
+    TELEGRAM_WATCHER_PID=$!
+    printf '%s\n' "${TELEGRAM_WATCHER_PID}" > "${TELEGRAM_WATCHER_PID_FILE}"
+    chown root:root "${TELEGRAM_WATCHER_PID_FILE}"
+    chmod 0600 "${TELEGRAM_WATCHER_PID_FILE}"
 fi
 
 # ==============================================================
@@ -3484,7 +3518,7 @@ fi
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
 unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_LEGACY_ACTION_GATE NVIDIA_KEY ARK_KEY \
-    PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
+    PROVIDER_CLIENT_AUTH_TOKEN PROVIDER_HEALTH_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN \
     TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN HEALTH_CLIENT_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
