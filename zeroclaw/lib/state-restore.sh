@@ -314,12 +314,74 @@ clear_directory_entries "$DATA_DIR/approval-receipts/outcomes"
 clear_directory_entries "$DATA_DIR/capability/telegram-replies"
 clear_directory_entries "$DATA_DIR/capability/telegram-callbacks"
 clear_directory_entries "$DATA_DIR/pending"
+
+preserve_current_file() {
+    preserve_relative_path="$1"
+    preserve_source="$ROLLBACK_DIR/$preserve_relative_path"
+    preserve_target="$DATA_DIR/$preserve_relative_path"
+    [ -e "$preserve_source" ] || [ -L "$preserve_source" ] || return 0
+    [ -f "$preserve_source" ] && [ ! -L "$preserve_source" ] ||
+        die "current monotonic state file is unsafe: $preserve_relative_path"
+    preserve_parent=$(dirname -- "$preserve_target")
+    [ -d "$preserve_parent" ] && [ ! -L "$preserve_parent" ] ||
+        die "current monotonic state parent is unsafe: $preserve_parent"
+    if [ -e "$preserve_target" ] || [ -L "$preserve_target" ]; then
+        [ -f "$preserve_target" ] && [ ! -L "$preserve_target" ] ||
+            die "restored monotonic state file is unsafe: $preserve_relative_path"
+    fi
+    preserve_tmp="${preserve_target}.preserve.$$"
+    [ ! -e "$preserve_tmp" ] && [ ! -L "$preserve_tmp" ] ||
+        die "monotonic state temporary path is occupied: $preserve_relative_path"
+    cp -a -- "$preserve_source" "$preserve_tmp" ||
+        die "current monotonic state could not be staged: $preserve_relative_path"
+    mv -f -- "$preserve_tmp" "$preserve_target" ||
+        die "current monotonic state could not be installed: $preserve_relative_path"
+}
+
+preserve_current_tree() {
+    preserve_relative_path="$1"
+    preserve_source="$ROLLBACK_DIR/$preserve_relative_path"
+    preserve_target="$DATA_DIR/$preserve_relative_path"
+    [ -e "$preserve_source" ] || [ -L "$preserve_source" ] || return 0
+    [ -d "$preserve_source" ] && [ ! -L "$preserve_source" ] ||
+        die "current monotonic state tree is unsafe: $preserve_relative_path"
+    state_inventory_validate_tree "$preserve_source" ||
+        die "current monotonic state tree could not be validated: $preserve_relative_path"
+    if [ -e "$preserve_target" ] || [ -L "$preserve_target" ]; then
+        [ -d "$preserve_target" ] && [ ! -L "$preserve_target" ] ||
+            die "restored monotonic state tree is unsafe: $preserve_relative_path"
+    else
+        mkdir "$preserve_target" ||
+            die "restored monotonic state tree could not be created: $preserve_relative_path"
+    fi
+    state_inventory_validate_tree "$preserve_target" ||
+        die "restored monotonic state tree could not be validated: $preserve_relative_path"
+    # Both source and target trees were validated above. Copying the contents
+    # in one bounded operation avoids recursive shell state/variable aliasing;
+    # current files replace same-named restored files while restored-only
+    # history remains present.
+    cp -a -- "$preserve_source"/. "$preserve_target"/ ||
+        die "current monotonic state tree could not be merged: $preserve_relative_path"
+}
+
+# Restore must not rewind state that limits future capability/provider work or
+# proves what already happened. Keep the current snapshot's durable quotas,
+# reservations, completed admissions, audit rows, and abuse-rate state. The
+# ordinary backup still supplies planner data and non-monotonic configuration;
+# actionable approval state below is invalidated separately.
+preserve_current_file capability/quota.json
+preserve_current_file capability/read-quota.json
+preserve_current_file capability/telegram-approval-rate.json
+preserve_current_file provider/quota.json
+preserve_current_file audit/planner/.quota.json
+preserve_current_tree capability/action-admissions
+preserve_current_tree audit
+
 for restore_receipt in "$DATA_DIR"/approval-receipts/*.sha256; do
     [ -f "$restore_receipt" ] && [ ! -L "$restore_receipt" ] || continue
     rm -f -- "$restore_receipt"
 done
 rm -f -- "$DATA_DIR/capability/telegram-bot-id" \
-    "$DATA_DIR/capability/telegram-approval-rate.json" \
     "$DATA_DIR/capability/.telegram-approval-rate.lock"
 RESTORE_OFFSET_FILE="$DATA_DIR/capability/telegram-offset"
 if [ -e "$RESTORE_OFFSET_FILE" ] || [ -L "$RESTORE_OFFSET_FILE" ]; then
