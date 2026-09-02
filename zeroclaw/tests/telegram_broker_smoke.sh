@@ -39,7 +39,11 @@ printf '%s\n' '{"ok":true,"result":{"message_id":123}}'
 FAKE_CURL
 chmod +x /tmp/fake-curl/curl
 
-mkdir -p /data/capability /data/pending /data/approval-receipts /data/approval-receipts/.locks
+mkdir -p /data/capability /data/pending /data/approval-receipts \
+    /data/approval-receipts/.locks /data/approval-receipts/ticket-nonces
+printf '%s\n' 0 > /data/.approval-restore-epoch
+chown root:root /data/.approval-restore-epoch
+chmod 0600 /data/.approval-restore-epoch
 rm -f /data/capability/telegram-approval-rate.json /data/capability/.telegram-approval-rate.lock
 jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
     '{uuid:"abcdef12",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
@@ -63,7 +67,9 @@ RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh
 printf '%s' "$RESPONSE" | jq -e '.message_id == 123' >/dev/null
 [ -f /data/approval-receipts/abcdef12.sha256 ]
 [ -f /data/approval-receipts/tickets/abcdef12.json ]
+[ -d /data/approval-receipts/ticket-nonces/abcdef12 ]
 test "$(stat -c '%u:%a' /data/approval-receipts/tickets/abcdef12.json)" = "0:600"
+printf '%s' "$(jq -r '.restore_epoch' /data/approval-receipts/tickets/abcdef12.json)" | grep -Eq '^0$'
 SEALED_NOW=$(date -u +%s)
 SEALED_EXP=$(jq -r '.expires_at' /data/approval-receipts/tickets/abcdef12.json)
 [ "$SEALED_EXP" -le "$((SEALED_NOW + 1800))" ]

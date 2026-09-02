@@ -107,7 +107,6 @@ options:
 
   # --- Phase switches ---
   # Reserved: the broker-only release does not map the host HA /config tree.
-  enable_creation_skill: false
   enable_learning_loops: false
   # Enabling writes never bypasses approval: every write still requires a
   # root-sealed, actor-bound Telegram ticket in the production runtime.
@@ -187,7 +186,6 @@ schema:
   observer_enabled: bool
   observer_interval_minutes: int(5,120)
 
-  enable_creation_skill: bool
   enable_learning_loops: bool
   enable_write_actions: bool
 

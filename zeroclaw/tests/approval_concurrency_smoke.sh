@@ -4,7 +4,13 @@ set -eu
 
 NOW=$(date -u +%s)
 SHORT=feedcafe
-mkdir -p /data/pending /data/approved /data/approval-receipts /data/approval-receipts/.locks /data/approval-receipts/tickets /tmp/zc-approval-race
+mkdir -p /data/pending /data/approved /data/approval-receipts \
+    /data/approval-receipts/.locks /data/approval-receipts/tickets \
+    /data/approval-receipts/ticket-nonces /data/capability /tmp/zc-approval-race
+if [ ! -f /data/.approval-restore-epoch ]; then
+    printf '%s\n' 0 > /data/.approval-restore-epoch
+    chmod 0600 /data/.approval-restore-epoch
+fi
 mkdir -p /run/zeroclaw
 printf '%s\n' capability-client-secret > /run/zeroclaw/capability-client-auth
 chmod 0600 /run/zeroclaw/capability-client-auth

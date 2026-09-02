@@ -14,6 +14,8 @@ CLAIMS_DIR="${ZEROCLAW_APPROVAL_CLAIM_DIR:-/data/approval-receipts/.claims}"
 CLAIM="${CLAIMS_DIR}/${SHORT}.claim"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 TICKET="${TICKET_DIR}/${SHORT}.json"
+TICKET_NONCE_DIR="${ZEROCLAW_APPROVAL_TICKET_NONCE_DIR:-/data/approval-receipts/ticket-nonces}"
+RESTORE_EPOCH_FILE="${ZEROCLAW_RESTORE_EPOCH_FILE:-/data/.approval-restore-epoch}"
 AUDIT_DIR="${ZEROCLAW_AUDIT_DIR:-/data/audit}"
 ACTION_ADMISSION_DIR="${ZEROCLAW_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
 ACTION_QUOTA_LOCK="${ZEROCLAW_ACTION_QUOTA_LOCK:-/data/capability/.quota.lock}"
@@ -53,12 +55,34 @@ esac
 
 printf '%s' "$SHORT" | grep -Eq '^[a-f0-9]{8}$' || fail "invalid ticket id"
 
+ensure_ticket_nonce() {
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || fail "ticket nonce history is unavailable"
+    nonce_path="${TICKET_NONCE_DIR}/${SHORT}"
+    if [ -e "$nonce_path" ] || [ -L "$nonce_path" ]; then
+        [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || fail "ticket nonce record is unsafe"
+        return 0
+    fi
+    mkdir "$nonce_path" 2>/dev/null || fail "ticket nonce could not be reserved"
+    chmod 0700 "$nonce_path"
+}
+
+current_restore_epoch() {
+    [ -f "$RESTORE_EPOCH_FILE" ] && [ ! -L "$RESTORE_EPOCH_FILE" ] || fail "approval restore epoch is unavailable"
+    restore_epoch=$(tr -d '\r\n' < "$RESTORE_EPOCH_FILE")
+    printf '%s' "$restore_epoch" | grep -Eq '^[0-9]+$' || fail "approval restore epoch is malformed"
+    printf '%s' "$restore_epoch"
+}
+
+ensure_ticket_nonce
+
 verify_marker() {
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "ticket ${SHORT} is not approved"
     [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing"
+    marker_epoch=$(current_restore_epoch)
     jq -e --arg id "$SHORT" --arg actor "$(jq -r '.approval.actor_user_id // empty' "$TICKET")" \
         --arg chat "$(jq -r '.approval.chat_id // empty' "$TICKET")" \
-        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number")' \
+        --argjson epoch "$marker_epoch" \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
         "$MARKER" >/dev/null 2>&1 || fail "ticket ${SHORT} approval marker is invalid"
     verify_receipt
     approval_audit_found=1
@@ -211,6 +235,7 @@ fi
 
 if [ "$ACTION" = "complete" ]; then
     acquire_lock
+    verify_marker
     [ -d "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is not claimed"
     claim_quota="$CLAIM/quota.json"
     if [ -f "$claim_quota" ] && [ ! -L "$claim_quota" ]; then
@@ -249,6 +274,7 @@ fi
 [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
 acquire_lock
 verify_receipt
+current_restore_epoch_value=$(current_restore_epoch)
 
 EXP=$(jq -r '.expires_at // 0' "$TICKET")
 NOW=$(date -u +%s)
@@ -275,8 +301,8 @@ case "$ACTION" in
         mkdir -p /data/approved
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
-            --argjson approved_at "$NOW" \
-            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+            --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
+            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"
@@ -287,8 +313,8 @@ case "$ACTION" in
         fi
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
-            --argjson approved_at "$NOW" \
-            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+            --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
+            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"

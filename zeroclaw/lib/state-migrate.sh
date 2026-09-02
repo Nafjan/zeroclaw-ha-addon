@@ -25,6 +25,27 @@ die() {
     exit 1
 }
 
+# A migration snapshot is portable only within this app identity.  The
+# target identity describes the runtime that created the snapshot, which lets
+# state-restore reject a snapshot produced for a different app/build unless a
+# root operator explicitly enables the audited legacy override.
+STATE_APP_SLUG="${ZEROCLAW_STATE_APP_SLUG:-zeroclaw}"
+STATE_TARGET_VERSION="${ZEROCLAW_ADDON_VERSION:-unknown}"
+STATE_TARGET_SOURCE_COMMIT="${ZEROCLAW_ADDON_SOURCE_COMMIT:-unknown}"
+printf '%s' "$STATE_APP_SLUG" | grep -Eq '^[a-z][a-z0-9_]{0,30}$' || die "state app slug is malformed"
+case "$STATE_TARGET_VERSION" in
+    unknown) ;;
+    *.*.*.*|*.*.*.*-canary.*)
+        printf '%s' "$STATE_TARGET_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' ||
+            die "state target version is malformed"
+        ;;
+    *) die "state target version is malformed" ;;
+esac
+case "$STATE_TARGET_SOURCE_COMMIT" in
+    unknown) ;;
+    *) printf '%s' "$STATE_TARGET_SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || die "state target source commit is malformed" ;;
+esac
+
 runtime_lock_held=0
 runtime_lock_dir=""
 release_runtime_lock() {
@@ -204,6 +225,9 @@ state_migrate() {
         printf 'new_version=schema-%s\n' "$new_schema"
         printf 'legacy_version=%s\n' "$legacy_value"
         printf 'legacy_marker_source=%s\n' "$legacy_origin"
+        printf 'app_slug=%s\n' "$STATE_APP_SLUG"
+        printf 'target_version=%s\n' "$STATE_TARGET_VERSION"
+        printf 'target_source_commit=%s\n' "$STATE_TARGET_SOURCE_COMMIT"
         printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'backup_dir=%s\n' "$backup_dir"
     } > "$backup_dir/manifest"
