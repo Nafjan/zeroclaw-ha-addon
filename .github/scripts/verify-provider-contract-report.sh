@@ -71,7 +71,8 @@ jq -e \
         .accounting.reservation_recorded,
         .accounting.success_settlement_recorded,
         .accounting.failure_settlement_recorded,
-        .accounting.budget_denied_before_upstream
+        .accounting.budget_denied_before_upstream,
+        .accounting.encoded_credential_reflection_blocked
     ][]; . == true) and
     (.accounting.ledger_schema == 1) and
     (.accounting.ledger_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and

@@ -79,6 +79,9 @@ verify_marker() {
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "ticket ${SHORT} is not approved"
     [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing"
     marker_epoch=$(current_restore_epoch)
+    ticket_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
+        fail "ticket ${SHORT} restore epoch is invalid"
+    [ "$ticket_epoch" = "$marker_epoch" ] || fail "ticket ${SHORT} belongs to a prior restore epoch"
     jq -e --arg id "$SHORT" --arg actor "$(jq -r '.approval.actor_user_id // empty' "$TICKET")" \
         --arg chat "$(jq -r '.approval.chat_id // empty' "$TICKET")" \
         --argjson epoch "$marker_epoch" \
@@ -275,6 +278,10 @@ fi
 acquire_lock
 verify_receipt
 current_restore_epoch_value=$(current_restore_epoch)
+ticket_restore_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
+    fail "ticket ${SHORT} restore epoch is invalid"
+[ "$ticket_restore_epoch" = "$current_restore_epoch_value" ] ||
+    fail "ticket ${SHORT} belongs to a prior restore epoch"
 
 EXP=$(jq -r '.expires_at // 0' "$TICKET")
 NOW=$(date -u +%s)

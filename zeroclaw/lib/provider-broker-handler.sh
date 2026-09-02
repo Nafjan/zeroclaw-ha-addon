@@ -340,6 +340,18 @@ done
     [ "$client_auth_header" = "Bearer ${CLIENT_AUTH_TOKEN}" ] || \
     respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
 
+# Health probes must prove that this handler reached its authenticated request
+# path without consuming a provider request slot, contacting an upstream, or
+# mutating the durable usage ledger.  Keep the endpoint on the same protected
+# loopback listener as chat completions.
+case "$request_line" in
+    "GET /health HTTP/1.0"|"GET /health HTTP/1.1")
+        [ -z "$content_length" ] || [ "$content_length" = 0 ] || \
+            respond 400 "Bad Request" '{"error":"health requests must not contain a body"}'
+        respond 200 "OK" '{"status":"ok"}'
+        ;;
+esac
+
 # The client admission counter is deliberately after authentication but before
 # route, envelope, body, or model validation. A caller that knows the loopback
 # port and client credential must not be able to churn rejected requests

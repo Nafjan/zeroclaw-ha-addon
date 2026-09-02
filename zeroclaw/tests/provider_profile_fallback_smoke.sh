@@ -49,6 +49,11 @@ if [ "$content_length" -gt 0 ]; then
 fi
 printf '\n' >> "$log_file"
 body="${FAKE_BODY:-}"
+if [ -n "${FAKE_REFLECT_VALUE:-}" ]; then
+    reflected_value=$(printf '%s' "$FAKE_REFLECT_VALUE" | base64 | tr -d '\r\n')
+    body=$(jq -nc --arg reflected "$reflected_value" \
+        '{choices:[{message:{content:$reflected}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}')
+fi
 [ -n "$body" ] || body='{"error":"fake failure"}'
 if [ "${FAKE_DELAY:-0}" -gt 0 ]; then
     sleep "${FAKE_DELAY}"
@@ -111,6 +116,8 @@ next_case_ports() {
     OPENROUTER_PORT=$((PROXY_PORT + 1))
     NVIDIA_PORT=$((PROXY_PORT + 2))
     CASE_INDEX=$((CASE_INDEX + 1))
+    rm -f /data/provider/profile-client-rate.json \
+        /data/provider/.profile-client-rate.lock
 }
 
 start_upstream() {
@@ -120,6 +127,7 @@ start_upstream() {
     upstream_body="$4"
     upstream_log="$5"
     upstream_delay="${6:-0}"
+    upstream_reflect_value="${7:-}"
     if [ "$upstream_port" -eq "$OPENROUTER_PORT" ]; then
         OPENROUTER_PID=0
     else
@@ -127,6 +135,7 @@ start_upstream() {
     fi
     FAKE_STATUS="$upstream_status" FAKE_REASON="$upstream_reason" \
     FAKE_BODY="$upstream_body" FAKE_LOG="$upstream_log" FAKE_DELAY="$upstream_delay" \
+    FAKE_REFLECT_VALUE="$upstream_reflect_value" \
         /bin/busybox nc -l -p "$upstream_port" -s 127.0.0.1 \
         -e /tmp/provider-profile-fake-upstream &
     if [ "$upstream_port" -eq "$OPENROUTER_PORT" ]; then
@@ -152,21 +161,33 @@ start_credit_then_free_upstream() {
 start_proxy() {
     profile_spec="$1"
     route_spec="$2"
+    # BusyBox ash may retain an assignment preceding a shell function after
+    # the function returns. Capture each per-case override and clear it before
+    # launching the background listener so a narrow test fixture cannot alter
+    # every later provider case in this process.
+    profile_max_requests="${TEST_PROVIDER_MAX_REQUESTS_PER_HOUR:-120}"
+    profile_client_requests="${TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR:-120}"
+    profile_input_tokens="${PROVIDER_MAX_INPUT_TOKENS:-16384}"
+    profile_daily_cost_limit="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}"
+    profile_total_timeout="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
+    unset TEST_PROVIDER_MAX_REQUESTS_PER_HOUR TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR \
+        PROVIDER_MAX_INPUT_TOKENS TEST_PROVIDER_DAILY_COST_LIMIT_MICROS \
+        TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
-        PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
-        PROVIDER_MAX_REQUESTS_PER_HOUR="${TEST_PROVIDER_MAX_REQUESTS_PER_HOUR:-120}" \
-        PROVIDER_CLIENT_REQUESTS_PER_HOUR="${TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR:-120}" \
-        PROVIDER_DAILY_COST_LIMIT_MICROS="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
+        PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="$profile_input_tokens" \
+        PROVIDER_MAX_REQUESTS_PER_HOUR="$profile_max_requests" \
+        PROVIDER_CLIENT_REQUESTS_PER_HOUR="$profile_client_requests" \
+        PROVIDER_DAILY_COST_LIMIT_MICROS="$profile_daily_cost_limit" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
          PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 \
          PROVIDER_LEDGER_FILE="$LEDGER" \
          PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
          PROVIDER_CLIENT_RATE_FILE=/data/provider/profile-client-rate.json \
          PROVIDER_CLIENT_RATE_LOCK=/data/provider/.profile-client-rate.lock \
          PROVIDER_RESERVATION_TTL_SECONDS=180 \
-         PROVIDER_TOTAL_TIMEOUT_SECONDS="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}" \
+         PROVIDER_TOTAL_TIMEOUT_SECONDS="$profile_total_timeout" \
          /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 \
         -e /usr/local/bin/provider-broker-entrypoint &
     PROXY_PID=$!
@@ -195,6 +216,13 @@ request_proxy() {
     } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
 }
 
+request_provider_health() {
+    {
+        printf 'GET /health HTTP/1.1\r\n'
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\n\r\n'
+    } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
+}
+
 cleanup() {
     stop_listeners
 }
@@ -215,6 +243,20 @@ rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-credit.log \
 NOW=$(date -u +%s)
 printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":40}\n' \
     "$((NOW / 3600))" "$((NOW / 86400))" > "$LEDGER"
+
+# The protected provider health endpoint must prove the handler is serving,
+# without contacting an upstream or consuming a client/provider budget slot.
+CURRENT_CHECK=authenticated-provider-health
+rm -f "$LOCK"
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="health-route|openrouter|health-model|paid"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+health_response=$(request_provider_health)
+stop_listeners
+printf '%s' "$health_response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$health_response" | grep -F '{"status":"ok"}' >/dev/null
+[ ! -e /data/provider/profile-client-rate.json ]
 
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
@@ -566,6 +608,25 @@ stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
 jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens >= 260 and .settled_tokens == 16)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# A compromised upstream must not be able to reflect a provider credential in
+# an encoded form. Exercise the real response scanner with a base64 payload and
+# require a bounded failure settlement before the response leaves the broker.
+CURRENT_CHECK=encoded-credential-reflection
+rm -f "$LEDGER" "$LOCK" /data/provider/encoded-reflection.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="encoded-reflection-route|openrouter|encoded-reflection-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"unused"}}]}' \
+    /data/provider/encoded-reflection.log 0 openrouter-secret
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+encoded_reflection_response=$(request_proxy '{"model":"encoded-reflection-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$encoded_reflection_response" | grep -F 'HTTP/1.1 502 Bad Gateway' >/dev/null
+! printf '%s' "$encoded_reflection_response" | grep -F 'openrouter-secret' >/dev/null
+jq -e '[.records[] | select(.profile_id == "openrouter" and .settlement == "reserved_max_credential_leak")] | length == 1' \
     "$LEDGER" >/dev/null
 
 # Provider usage is telemetry, not permission to release a durable reservation.
