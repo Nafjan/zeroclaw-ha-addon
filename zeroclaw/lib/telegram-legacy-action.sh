@@ -8,7 +8,14 @@
 # model text as shell and never grants an approval or bypasses policy.
 set -u
 
-LEGACY_ACTION_GATE="${ZEROCLAW_LEGACY_ACTION_GATE:-/usr/local/bin/ha-action-guarded}"
+# The callback watcher is root-owned in production; do not let an ambient
+# environment variable redirect privileged legacy actions. Non-root tests and
+# controlled migration tooling may still inject a gate explicitly.
+if [ "$(id -u)" -eq 0 ]; then
+    LEGACY_ACTION_GATE="/usr/local/bin/ha-action-guarded"
+else
+    LEGACY_ACTION_GATE="${ZEROCLAW_LEGACY_ACTION_GATE:-/usr/local/bin/ha-action-guarded}"
+fi
 
 [ "$#" -eq 1 ] || exit 2
 REPLY="$1"
