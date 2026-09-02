@@ -9,7 +9,12 @@ shift || true
 case "$OP" in
     send_approval)
         [ "$#" -eq 3 ] || { echo "Usage: tg-capability send_approval <ticket> <chat_id> <text>" >&2; exit 1; }
-        ticket_path="/data/pending/$1.json"
+        ticket_id="$1"
+        printf '%s' "$ticket_id" | grep -Eq '^[a-f0-9]{8}$' || {
+            echo "approval ticket id is invalid" >&2
+            exit 1
+        }
+        ticket_path="/data/pending/${ticket_id}.json"
         [ -f "$ticket_path" ] && [ ! -L "$ticket_path" ] || {
             echo "approval ticket is missing or is not a regular file" >&2
             exit 1
@@ -30,9 +35,12 @@ case "$OP" in
             echo "approval ticket is not valid JSON" >&2
             exit 1
         }
-        REQUEST=$(jq -nc --arg operation "$OP" --arg ticket "$1" --arg chat_id "$2" \
-            --arg text "$3" --arg ticket_json "$ticket_json" \
-            '{operation:$operation,ticket:$ticket,chat_id:$chat_id,text:$text,ticket_json:$ticket_json}')
+        # Keep the ticket body out of jq's process arguments.  input|tojson
+        # preserves the broker's string-valued ticket_json contract while
+        # avoiding argv exposure if a ticket ever contains sensitive data.
+        REQUEST=$(printf '%s\n' "$ticket_json" | jq -nc --arg operation "$OP" \
+            --arg ticket "$ticket_id" --arg chat_id "$2" --arg text "$3" \
+            '{operation:$operation,ticket:$ticket,chat_id:$chat_id,text:$text,ticket_json:(input|tojson)}')
         ;;
     *)
         echo "Telegram capability is not available for this operation" >&2

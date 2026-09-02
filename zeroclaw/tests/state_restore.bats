@@ -93,7 +93,7 @@ root_test_size() {
     [ "$(cat "$DATA_DIR/provider/profile")" = old-provider ]
     [ "$(cat "$DATA_DIR/capability/state")" = old-capability ]
     [ ! -e "$DATA_DIR/approval-receipts/tickets/ticket-1" ]
-    [ "$(cat "$DATA_DIR/audit/2026-09-01.jsonl")" = old-audit ]
+    [ "$(cat "$DATA_DIR/audit/2026-09-01.jsonl")" = new-audit ]
     [ ! -e "$DATA_DIR/.state-schema" ]
     [ "$(cat "$DATA_DIR/.state-version")" = 3.1.3.3 ]
     [ "$(root_cat "$DATA_DIR/capability/telegram-offset")" = -1 ]
@@ -111,6 +111,32 @@ root_test_size() {
     [ "$status" -eq 0 ]
     run root_test_size "$rollback_dir/checksums"
     [ "$status" -eq 0 ]
+}
+
+@test "restore preserves current monotonic quotas, admissions, and audit history" {
+    printf '{"hour_window":123,"requests_hour":17}\n' > "$DATA_DIR/capability/quota.json"
+    printf '{"schema":1,"records":[{"id":"current-ledger","profile_id":"openrouter","reserved_tokens":1,"reserved_input_tokens":2,"settled_tokens":3,"settled_input_tokens":4,"reserved_cost_micros":5,"settled_cost_micros":5,"state":"settled","hour_window":123,"day_window":1,"month_window":"1970-01","created_at":1,"expires_at":1,"updated_at":2}],"profile_quarantine":[]}\n' \
+        > "$DATA_DIR/provider/quota.json"
+    mkdir -p "$DATA_DIR/capability/action-admissions" "$DATA_DIR/audit/planner"
+    printf '{"ticket":"cafe0001","hour_window":123}\n' \
+        > "$DATA_DIR/capability/action-admissions/cafe0001.json"
+    printf '{"hour_window":123,"units_hour":9}\n' > "$DATA_DIR/capability/read-quota.json"
+    printf '{"schema":1,"window_start":1,"clients":{"42":3}}\n' \
+        > "$DATA_DIR/capability/telegram-approval-rate.json"
+    printf '{"hour_window":123,"events_hour":4,"bytes_day":5}\n' \
+        > "$DATA_DIR/audit/planner/.quota.json"
+    printf 'current-audit\n' > "$DATA_DIR/audit/2026-09-02.jsonl"
+
+    run restore_state "$DATA_DIR" "$BACKUP_DIR"
+    [ "$status" -eq 0 ]
+    [ "$(root_cat "$DATA_DIR/capability/quota.json")" = '{"hour_window":123,"requests_hour":17}' ]
+    [[ "$(root_cat "$DATA_DIR/provider/quota.json")" == *'current-ledger'* ]]
+    [ "$(root_cat "$DATA_DIR/capability/action-admissions/cafe0001.json")" = '{"ticket":"cafe0001","hour_window":123}' ]
+    [ "$(root_cat "$DATA_DIR/capability/read-quota.json")" = '{"hour_window":123,"units_hour":9}' ]
+    [[ "$(root_cat "$DATA_DIR/capability/telegram-approval-rate.json")" == *'"42":3'* ]]
+    [ "$(root_cat "$DATA_DIR/audit/planner/.quota.json")" = '{"hour_window":123,"events_hour":4,"bytes_day":5}' ]
+    [ "$(root_cat "$DATA_DIR/audit/2026-09-02.jsonl")" = current-audit ]
+    [ "$(root_cat "$DATA_DIR/audit/2026-09-01.jsonl")" = old-audit ]
 }
 
 @test "restore of a fresh snapshot removes the schema marker and remains recoverable" {

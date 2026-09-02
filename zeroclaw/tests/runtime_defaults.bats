@@ -78,6 +78,19 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'LEGACY_ACTION_GATE="/usr/local/bin/ha-action-guarded"' "$legacy_file"
     [ "$status" -eq 0 ]
 }
+
+@test "Telegram capability validates ticket ids before opening planner paths" {
+    capability_file="$BATS_TEST_DIRNAME/../lib/telegram-capability.sh"
+    run "$capability_file" send_approval ../options 42 "unexpected path"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"approval ticket id is invalid"* ]]
+    run grep -F 'ticket_id="$1"' "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F "grep -Eq '^[a-f0-9]{8}$'" "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ticket_json:(input|tojson)' "$capability_file"
+    [ "$status" -eq 0 ]
+}
 agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "runtime uses the Supervisor core API and safe gateway defaults" {
@@ -800,6 +813,20 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'never removes an unexpired ticket' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
     [ "$status" -eq 0 ]
     run grep -F 'CLAIM_GRACE_SECONDS=3600' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore preserves monotonic quota, admission, provider, and audit state" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'preserve_current_file capability/quota.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file provider/quota.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_tree capability/action-admissions' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_tree audit' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-approval-rate.json' "$restore_file"
     [ "$status" -eq 0 ]
 }
 
