@@ -89,7 +89,15 @@ DAILY_REPORT_ENABLED="$(bashio::config 'daily_report_enabled')"
 OBSERVER_ENABLED="$(bashio::config 'observer_enabled')"
 OBSERVER_INTERVAL="$(bashio::config 'observer_interval_minutes')"
 
-ENABLE_CREATION="$(bashio::config 'enable_creation_skill')"
+# Creation helpers still exist in the image for migration compatibility, but
+# this release does not expose a host-config writer. Ignore an old saved
+# option instead of advertising a switch that could write outside the typed
+# broker boundary.
+LEGACY_ENABLE_CREATION="$(bashio::config 'enable_creation_skill' 2>/dev/null || true)"
+ENABLE_CREATION=false
+if [ "${LEGACY_ENABLE_CREATION}" = "true" ]; then
+    bashio::log.warning "enable_creation_skill is retired in this release; ignoring the saved option."
+fi
 ENABLE_LEARNING="$(bashio::config 'enable_learning_loops')"
 ENABLE_WRITE_ACTIONS="$(bashio::config 'enable_write_actions')"
 ENABLE_UNDO="$(bashio::config 'enable_undo')"
@@ -450,11 +458,16 @@ if [ -n "${TELEGRAM_TOKEN}" ] || [ -n "${TELEGRAM_USERS}" ]; then
         bashio::log.fatal "telegram_allowed_users is required when telegram_bot_token is configured."
         exit 1
     }
-    FIRST_USER=$(echo "$TELEGRAM_USERS" | cut -d',' -f1 | tr -d ' ')
-    printf '%s' "$FIRST_USER" | grep -Eq '^[0-9]+$' || {
-        bashio::log.fatal "telegram_allowed_users must begin with a numeric Telegram user ID (the approval owner)."
+    TELEGRAM_USERS_SINGLE_LINE=$(printf '%s' "$TELEGRAM_USERS" | tr -d '\r\n')
+    [ "$TELEGRAM_USERS_SINGLE_LINE" = "$TELEGRAM_USERS" ] || {
+        bashio::log.fatal "telegram_allowed_users must not contain newline characters."
         exit 1
     }
+    printf '%s' "$TELEGRAM_USERS" | grep -Eq '^[[:space:]]*[0-9]+([[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*$' || {
+        bashio::log.fatal "telegram_allowed_users must be a comma-separated list of numeric Telegram user IDs."
+        exit 1
+    }
+    FIRST_USER=$(printf '%s' "$TELEGRAM_USERS" | cut -d',' -f1 | tr -d ' ')
     TELEGRAM_ENABLED=true
 else
     bashio::log.info "Telegram transport disabled; no bot token or users configured."
@@ -532,13 +545,9 @@ supervisor_api_preflight
 # name before any unrelated provider, Telegram, or helper child is born.
 # Keeping this in the parent as well as in the broker subshell prevents an
 # accidental future helper from retaining the Supervisor credential.
-unset SUPERVISOR_TOKEN
+unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN
 if [ "${ENABLE_WRITE_ACTIONS}" != "true" ]; then
     bashio::log.warning "Write actions are disabled by default; enable only after reviewing the broker and policy settings."
-fi
-if [ "${ENABLE_CREATION}" = "true" ]; then
-    bashio::log.fatal "enable_creation_skill is reserved until a broker-backed Home Assistant config writer is implemented; keep it false."
-    exit 1
 fi
 if [ -L /data/logs ]; then
     rm -f /data/logs
@@ -596,6 +605,7 @@ ensure_dir_chain /data migrations
 ensure_dir_chain /data approval-receipts
 ensure_dir_chain /data/approval-receipts tickets
 ensure_dir_chain /data/approval-receipts outcomes
+ensure_dir_chain /data/approval-receipts ticket-nonces
 # Broker logs are root-owned state.  Remove legacy symlinks before any root
 # listener opens a log path, then keep the directory unreadable to the planner.
 find /data/logs -type l -exec rm -f {} \; 2>/dev/null || true
@@ -618,6 +628,8 @@ chown root:root /data/capability/action-admissions
 chmod 0700 /data/capability/action-admissions
 chown root:root /data/capability/telegram-callbacks
 chmod 0700 /data/capability/telegram-callbacks
+chown root:root /data/approval-receipts/ticket-nonces
+chmod 0700 /data/approval-receipts/ticket-nonces
 
 # Do not let a planner-controlled symlink hide or redirect a root-owned state
 # file.  Workspace/pending/routines/tools are the only intentionally
@@ -749,6 +761,30 @@ if [ ! -e "$LEGACY_VERSION_TOMBSTONE" ]; then
     chmod 0600 "$tombstone_tmp"
     mv -f "$tombstone_tmp" "$LEGACY_VERSION_TOMBSTONE"
 fi
+# Approval state is bound to an epoch that lives outside the restorable
+# inventory. A successful state restore increments it, invalidating every
+# pre-restore ticket, callback, and cached approval even when an old snapshot
+# contains otherwise valid-looking state.
+APPROVAL_RESTORE_EPOCH_FILE="${CONFIG_DIR}/.approval-restore-epoch"
+if [ -L "$APPROVAL_RESTORE_EPOCH_FILE" ] ||
+    [ -e "$APPROVAL_RESTORE_EPOCH_FILE" ] && [ ! -f "$APPROVAL_RESTORE_EPOCH_FILE" ]; then
+    bashio::log.fatal "approval restore epoch is not a regular file"
+    exit 1
+fi
+if [ -e "$APPROVAL_RESTORE_EPOCH_FILE" ]; then
+    approval_restore_epoch=$(tr -d '\r\n' < "$APPROVAL_RESTORE_EPOCH_FILE")
+    printf '%s' "$approval_restore_epoch" | grep -Eq '^[0-9]+$' || {
+        bashio::log.fatal "approval restore epoch is malformed"
+        exit 1
+    }
+else
+    approval_restore_epoch=0
+    approval_epoch_tmp="${APPROVAL_RESTORE_EPOCH_FILE}.tmp.$$"
+    printf '%s\n' "$approval_restore_epoch" > "$approval_epoch_tmp"
+    chown root:root "$approval_epoch_tmp"
+    chmod 0600 "$approval_epoch_tmp"
+    mv -f "$approval_epoch_tmp" "$APPROVAL_RESTORE_EPOCH_FILE"
+fi
 
 # ==============================================================
 # Typed capability broker and read-only HA helpers
@@ -858,7 +894,7 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     chmod 0700 "${PROVIDER_KEY_DIR}"
     PROVIDER_PORT=42620
     (
-        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+        unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             LEGACY_HA_TOKEN ZEROCLAW_API_KEY
         export PROVIDER_CLIENT_AUTH_TOKEN
         # The endpoint remains root-controlled.  The test-only override lets
@@ -936,6 +972,10 @@ ${COMPLEX_MODEL}|ark|${ARK_FREE_MODEL}|free"
             fi
         done
     ) &
+    PROVIDER_BROKER_PID=$!
+    printf '%s\n' "${PROVIDER_BROKER_PID}" > /run/zeroclaw/provider-broker.pid
+    chown root:root /run/zeroclaw/provider-broker.pid
+    chmod 0600 /run/zeroclaw/provider-broker.pid
 fi
 
 # BusyBox nc is a minimal local transport. The broker is the only child
@@ -946,7 +986,7 @@ CAPABILITY_PORT=42618
     # HA_TOKEN is the only credential this broker is allowed to retain. The
     # original Supervisor-provided variable was scrubbed in the parent and is
     # explicitly removed here as a defense against reordering regressions.
-    unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+    unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
     export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN
@@ -968,6 +1008,9 @@ CAPABILITY_PORT=42618
     done
 ) &
 CAPABILITY_BROKER_PID=$!
+printf '%s\n' "${CAPABILITY_BROKER_PID}" > /run/zeroclaw/capability-broker.pid
+chown root:root /run/zeroclaw/capability-broker.pid
+chmod 0600 /run/zeroclaw/capability-broker.pid
 # The background subshell has its private copy for the typed broker.  Erase
 # the parent-shell copies immediately after the fork so the entrypoint itself
 # cannot retain or accidentally pass the Supervisor credential to later
@@ -1120,7 +1163,7 @@ install -m 0755 /opt/zeroclaw/lib/telegram-legacy-action.sh /usr/local/bin/teleg
 TELEGRAM_PORT=42619
     if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
-        unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+        unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
             ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
         export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
@@ -1197,7 +1240,7 @@ cat > /usr/local/bin/tg-callback-watcher << SCRIPT
 set -u
 # The watcher reads the Telegram bot token from its private runtime file.  It
 # must never inherit Supervisor, provider, or parent-process credential env.
-unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
     OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
     ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
@@ -1507,6 +1550,8 @@ replay_approval_outcome() {
     short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"; actor_user_id="\$5"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
     outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    jq -e --arg message "\$message_id" \
+        '(.message_id | tostring) == \$message' "\$outcome_file" >/dev/null 2>&1 || return 1
     answer_cb "\$cb_id" "Applied." || return 1
     edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
     cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "\$actor_user_id" "Applied." "\$outcome_reply"
@@ -1864,12 +1909,18 @@ while true; do
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
-        if [ ! -f "\$TICKET" ]; then
+        if [ ! -f "\$TICKET" ] || [ -L "\$TICKET" ]; then
             if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
                 continue
             fi
             if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
             if [ -n "\$MSG_ID" ] && ! edit_msg "\$CHAT_ID" "\$MSG_ID" "(this approval is no longer pending)"; then BATCH_OK=false; break; fi
+            continue
+        fi
+
+        STORED_MSG_ID=\$(jq -r '.tg_message_id // empty' "\$TICKET" 2>/dev/null || true)
+        if ! valid_positive_id "\$STORED_MSG_ID" || [ "\$STORED_MSG_ID" != "\$MSG_ID" ]; then
+            if ! answer_cb "\$CB_ID" "This approval message is no longer valid."; then BATCH_OK=false; break; fi
             continue
         fi
 
@@ -3229,7 +3280,7 @@ bashio::log.info "Config ready | mode=${POLICY_MODE} | ${DEFAULT_MODEL} + ${COMP
 # forked so the typed capability brokers are the only long-lived processes
 # retaining Supervisor, Telegram, or provider credentials.
 scrub_unrelated_child_credentials() {
-    unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
+    unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
         ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY \
         PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
@@ -3318,7 +3369,7 @@ fi
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
-unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
+unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
     PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
@@ -3382,13 +3433,15 @@ find /data/capability -type l -exec rm -f {} \; 2>/dev/null || true
 chown -R root:root /data/capability
 chmod 0700 /data/capability
 find /data/capability -type f -exec chmod 0600 {} \; 2>/dev/null || true
-mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets /data/approval-receipts/outcomes
+mkdir -p /data/approved /data/approval-receipts /data/approval-receipts/tickets /data/approval-receipts/outcomes /data/approval-receipts/ticket-nonces
 chown root:root /data/approved /data/approval-receipts
 chmod 0700 /data/approved /data/approval-receipts
 chown -R root:root /data/approval-receipts
 chmod 0700 /data/approval-receipts/tickets
 chown root:root /data/approval-receipts/outcomes
 chmod 0700 /data/approval-receipts/outcomes
+chown root:root /data/approval-receipts/ticket-nonces
+chmod 0700 /data/approval-receipts/ticket-nonces
 mkdir -p /data/approval-receipts/.locks
 chown root:root /data/approval-receipts/.locks
 chmod 0700 /data/approval-receipts/.locks

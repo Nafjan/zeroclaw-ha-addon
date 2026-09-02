@@ -17,6 +17,20 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "healthcheck covers gateway, broker liveness, and Home Assistant reachability" {
+    health_file="$BATS_TEST_DIRNAME/../lib/healthcheck.sh"
+    run grep -F 'pid_is_live /run/zeroclaw/provider-broker.pid' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'pid_is_live /run/zeroclaw/capability-broker.pid' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42617/health' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F '/usr/local/bin/ha-capability read_sensors' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'CMD /opt/zeroclaw/lib/healthcheck.sh' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
 @test "Dockerfile has no permissive release metadata defaults" {
     for argument in BUILD_VERSION BUILD_ARCH ZEROCLAW_SHA256 ZEROCLAW_SOURCE_COMMIT ADDON_SOURCE_COMMIT ZEROCLAW_SOURCE_DATE_EPOCH ZEROCLAW_LLVM_RNG_SEED REQUIRE_VERIFIED_ARTIFACT ZEROCLAW_STATE_SCHEMA; do
         run grep -E "^ARG ${argument}=" "$BATS_TEST_DIRNAME/../Dockerfile"
@@ -70,6 +84,57 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "generated Telegram watcher preserves jq actor bindings" {
     run grep -F '.actor_user_id == \$actor and .chat_id == \$chat' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram callbacks stay bound to the delivered approval message" {
+    run grep -F 'STORED_MSG_ID=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.tg_message_id // empty' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'This approval message is no longer valid.' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '(.message_id | tostring) == \$message' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'message_id:$message_id' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "approval admission and ticket identifiers are serialized and monotonic" {
+    broker_file="$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    transition_file="$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    run grep -F 'acquire_approval_admission_lock' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'release_approval_admission_lock' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'reserve_ticket_nonce' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TICKET_NONCE_DIR=' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.restore_epoch == $epoch' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F '. + {restore_epoch:$restore_epoch}' "$broker_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore invalidates approval state and rewinds the Telegram cursor" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'restore_epoch=$((restore_epoch + 1))' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F "printf '%s\\n' '-1' > \"\$restore_offset_tmp\"" "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'state_restore_identity_override' "$restore_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "retired creation option is not exposed by the Supervisor schema" {
+    run grep -F 'enable_creation_skill' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -ne 0 ]
+    run grep -F 'enable_creation_skill' "$BATS_TEST_DIRNAME/../translations/en.yaml"
+    [ "$status" -ne 0 ]
+    run grep -F 'LEGACY_ENABLE_CREATION=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'enable_creation_skill is retired in this release' "$run_file"
     [ "$status" -eq 0 ]
 }
 

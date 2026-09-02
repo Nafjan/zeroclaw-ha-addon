@@ -26,6 +26,7 @@ RUN set -eu; \
 
 ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"
 ENV ZEROCLAW_STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA}"
+ENV ZEROCLAW_ADDON_SOURCE_COMMIT="${ADDON_SOURCE_COMMIT}"
 
 LABEL \
     io.hass.version="${BUILD_VERSION}" \
@@ -73,7 +74,6 @@ RUN chmod +x /run.sh
 RUN mkdir -p /data/memory /data/logs /data/tools
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD test ! -e /data/capability/telegram-conflict && \
-        curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
+    CMD /opt/zeroclaw/lib/healthcheck.sh
 
 CMD ["/run.sh"]

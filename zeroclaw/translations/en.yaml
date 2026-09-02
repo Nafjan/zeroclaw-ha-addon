@@ -262,12 +262,6 @@ configuration:
     description: "Migration-only; no ZeroClaw observer schedule is started."
 
   # ─────── Phase switches ───────
-  enable_creation_skill:
-    name: "Enable creation skill (v3.1)"
-    description: >-
-      Lets the agent draft scenes, automations, and routines through the
-      approval flow. Off by default — turn on once you've used v3.0 long
-      enough to trust the policy gate.
   enable_learning_loops:
     name: "Enable learning loops (v3.2)"
     description: >-

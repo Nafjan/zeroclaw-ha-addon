@@ -6,6 +6,11 @@
 set -eu
 umask 077
 
+[ "$(id -u)" -eq 0 ] || {
+    echo "state restore must run as root" >&2
+    exit 1
+}
+
 [ "$#" -eq 2 ] || {
     echo "Usage: state-restore <data_dir> <backup_dir>" >&2
     exit 64
@@ -29,6 +34,29 @@ DATA_DIR=$(cd "$1" 2>/dev/null && pwd -P) || die "data directory does not exist"
 BACKUP_DIR=$(cd "$2" 2>/dev/null && pwd -P) || die "backup directory does not exist"
 MIGRATIONS_DIR="$DATA_DIR/migrations"
 SCHEMA_FILE="$DATA_DIR/.state-schema"
+STATE_APP_SLUG="${ZEROCLAW_STATE_APP_SLUG:-zeroclaw}"
+CURRENT_VERSION="${ZEROCLAW_ADDON_VERSION:-}"
+CURRENT_SOURCE_COMMIT="${ZEROCLAW_ADDON_SOURCE_COMMIT:-}"
+IDENTITY_OVERRIDE="${STATE_RESTORE_ALLOW_IDENTITY_OVERRIDE:-false}"
+AUDIT_DIR="$DATA_DIR/audit"
+
+printf '%s' "$STATE_APP_SLUG" | grep -Eq '^[a-z][a-z0-9_]{0,30}$' || die "current state app slug is malformed"
+case "$IDENTITY_OVERRIDE" in
+    true|false) ;;
+    *) die "state restore identity override must be true or false" ;;
+esac
+case "$CURRENT_VERSION" in
+    '') ;;
+    *.*.*.*|*.*.*.*-canary.*)
+        printf '%s' "$CURRENT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' ||
+            die "current app version is malformed"
+        ;;
+    *) die "current app version is malformed" ;;
+esac
+case "$CURRENT_SOURCE_COMMIT" in
+    '') ;;
+    *) printf '%s' "$CURRENT_SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || die "current app source commit is malformed" ;;
+esac
 
 [ "$(dirname "$BACKUP_DIR")" = "$MIGRATIONS_DIR" ] ||
     die "backup must be a direct child of ${MIGRATIONS_DIR}"
@@ -45,6 +73,9 @@ OLD_SCHEMA=$(manifest_value old_schema)
 NEW_SCHEMA=$(manifest_value new_schema)
 OLD_VERSION=$(manifest_value old_version)
 NEW_VERSION=$(manifest_value new_version)
+SNAPSHOT_APP_SLUG=$(manifest_value app_slug)
+SNAPSHOT_TARGET_VERSION=$(manifest_value target_version)
+SNAPSHOT_TARGET_SOURCE_COMMIT=$(manifest_value target_source_commit)
 
 [ "$FORMAT" = "2" ] || die "backup manifest format is unsupported"
 if [ -n "$OLD_SCHEMA" ]; then
@@ -64,6 +95,43 @@ case "$OLD_VERSION" in
         ;;
     *) die "backup old_version is malformed" ;;
 esac
+
+case "$SNAPSHOT_APP_SLUG" in
+    '')
+        [ "$IDENTITY_OVERRIDE" = "true" ] || die "backup app identity is missing; set STATE_RESTORE_ALLOW_IDENTITY_OVERRIDE=true for an audited legacy restore"
+        ;;
+    *)
+        printf '%s' "$SNAPSHOT_APP_SLUG" | grep -Eq '^[a-z][a-z0-9_]{0,30}$' || die "backup app identity is malformed"
+        ;;
+esac
+case "$SNAPSHOT_TARGET_VERSION" in
+    ''|unknown) ;;
+    *.*.*.*|*.*.*.*-canary.*)
+        printf '%s' "$SNAPSHOT_TARGET_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-canary\.[0-9]+)?$' ||
+            die "backup target version is malformed"
+        ;;
+    *) die "backup target version is malformed" ;;
+esac
+case "$SNAPSHOT_TARGET_SOURCE_COMMIT" in
+    ''|unknown) ;;
+    *) printf '%s' "$SNAPSHOT_TARGET_SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || die "backup target source commit is malformed" ;;
+esac
+
+identity_mismatch=""
+if [ -n "$SNAPSHOT_APP_SLUG" ] && [ "$SNAPSHOT_APP_SLUG" != "$STATE_APP_SLUG" ]; then
+    identity_mismatch="app_slug"
+fi
+if [ -n "$CURRENT_VERSION" ] && [ "$SNAPSHOT_TARGET_VERSION" != "" ] &&
+    [ "$SNAPSHOT_TARGET_VERSION" != "unknown" ] && [ "$SNAPSHOT_TARGET_VERSION" != "$CURRENT_VERSION" ]; then
+    identity_mismatch="${identity_mismatch:-target_version}"
+fi
+if [ -n "$CURRENT_SOURCE_COMMIT" ] && [ "$SNAPSHOT_TARGET_SOURCE_COMMIT" != "" ] &&
+    [ "$SNAPSHOT_TARGET_SOURCE_COMMIT" != "unknown" ] &&
+    [ "$SNAPSHOT_TARGET_SOURCE_COMMIT" != "$CURRENT_SOURCE_COMMIT" ]; then
+    identity_mismatch="${identity_mismatch:-target_source_commit}"
+fi
+[ -z "$identity_mismatch" ] || [ "$IDENTITY_OVERRIDE" = "true" ] ||
+    die "backup identity does not match the installed app (${identity_mismatch}); set STATE_RESTORE_ALLOW_IDENTITY_OVERRIDE=true for an audited override"
 
 # Verify every file before creating or touching live state.  Generated paths
 # are relative to BACKUP_DIR; reject traversal and symlink-based escapes.
@@ -181,6 +249,9 @@ state_inventory_copy_markers "$DATA_DIR" "$ROLLBACK_DIR" || die "current state m
     printf 'new_schema=%s\n' "${OLD_SCHEMA:-legacy}"
     printf 'old_version=%s\n' "${current_schema}"
     printf 'new_version=%s\n' "${OLD_VERSION}"
+    printf 'app_slug=%s\n' "$STATE_APP_SLUG"
+    printf 'target_version=%s\n' "${CURRENT_VERSION:-unknown}"
+    printf 'target_source_commit=%s\n' "${CURRENT_SOURCE_COMMIT:-unknown}"
     printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'backup_dir=%s\n' "$ROLLBACK_DIR"
 } > "$ROLLBACK_DIR/manifest"
@@ -201,6 +272,97 @@ restore_succeeded=0
 state_inventory_remove "$DATA_DIR" || die "current state could not be removed safely"
 state_inventory_copy "$STAGE_DIR" "$DATA_DIR" || die "staged state could not be installed"
 state_inventory_copy_markers "$STAGE_DIR" "$DATA_DIR" || die "staged state markers could not be installed"
+
+clear_directory_entries() {
+    clear_dir="$1"
+    [ -d "$clear_dir" ] && [ ! -L "$clear_dir" ] || die "approval state directory is unsafe: $clear_dir"
+    state_inventory_validate_tree "$clear_dir" || die "approval state directory could not be validated: $clear_dir"
+    for clear_entry in "$clear_dir"/* "$clear_dir"/.[!.]* "$clear_dir"/..?*; do
+        [ -e "$clear_entry" ] || [ -L "$clear_entry" ] || continue
+        rm -rf -- "$clear_entry"
+    done
+}
+
+# Restoring the ordinary inventory must never resurrect a ticket, callback,
+# reply, or planner draft that was valid only in the pre-restore world. Keep
+# the root-owned nonce history and action quota, but invalidate actionable
+# approval state and reset the Telegram cursor so every future action gets a
+# fresh approval in the new epoch.
+mkdir -p "$DATA_DIR/approved" "$DATA_DIR/approval-receipts/tickets" \
+    "$DATA_DIR/approval-receipts/.claims" "$DATA_DIR/approval-receipts/.locks" \
+    "$DATA_DIR/approval-receipts/outcomes" "$DATA_DIR/pending" \
+    "$DATA_DIR/capability/telegram-replies" "$DATA_DIR/capability/telegram-callbacks"
+if [ -d "$ROLLBACK_DIR/approval-receipts/ticket-nonces" ] &&
+    [ ! -L "$ROLLBACK_DIR/approval-receipts/ticket-nonces" ]; then
+    state_inventory_validate_tree "$ROLLBACK_DIR/approval-receipts/ticket-nonces" ||
+        die "rollback ticket nonce history could not be validated"
+    mkdir -p "$DATA_DIR/approval-receipts/ticket-nonces"
+    state_inventory_validate_tree "$DATA_DIR/approval-receipts/ticket-nonces" ||
+        die "restored ticket nonce history could not be validated"
+    for nonce_entry in "$ROLLBACK_DIR/approval-receipts/ticket-nonces"/*; do
+        [ -e "$nonce_entry" ] || [ -L "$nonce_entry" ] || continue
+        nonce_name=$(basename "$nonce_entry")
+        [ ! -e "$DATA_DIR/approval-receipts/ticket-nonces/$nonce_name" ] || continue
+        cp -a -- "$nonce_entry" "$DATA_DIR/approval-receipts/ticket-nonces/$nonce_name"
+    done
+fi
+clear_directory_entries "$DATA_DIR/approved"
+clear_directory_entries "$DATA_DIR/approval-receipts/tickets"
+clear_directory_entries "$DATA_DIR/approval-receipts/.claims"
+clear_directory_entries "$DATA_DIR/approval-receipts/.locks"
+clear_directory_entries "$DATA_DIR/approval-receipts/outcomes"
+clear_directory_entries "$DATA_DIR/capability/telegram-replies"
+clear_directory_entries "$DATA_DIR/capability/telegram-callbacks"
+clear_directory_entries "$DATA_DIR/pending"
+for restore_receipt in "$DATA_DIR"/approval-receipts/*.sha256; do
+    [ -f "$restore_receipt" ] && [ ! -L "$restore_receipt" ] || continue
+    rm -f -- "$restore_receipt"
+done
+rm -f -- "$DATA_DIR/capability/telegram-bot-id" \
+    "$DATA_DIR/capability/telegram-approval-rate.json" \
+    "$DATA_DIR/capability/.telegram-approval-rate.lock"
+RESTORE_OFFSET_FILE="$DATA_DIR/capability/telegram-offset"
+if [ -e "$RESTORE_OFFSET_FILE" ] || [ -L "$RESTORE_OFFSET_FILE" ]; then
+    [ -f "$RESTORE_OFFSET_FILE" ] && [ ! -L "$RESTORE_OFFSET_FILE" ] ||
+        die "Telegram restore cursor is unsafe"
+fi
+restore_offset_tmp="${RESTORE_OFFSET_FILE}.tmp.$$"
+printf '%s\n' '-1' > "$restore_offset_tmp"
+chown root:root "$restore_offset_tmp"
+chmod 0600 "$restore_offset_tmp"
+mv -f "$restore_offset_tmp" "$RESTORE_OFFSET_FILE"
+
+RESTORE_EPOCH_FILE="$DATA_DIR/.approval-restore-epoch"
+restore_epoch=0
+if [ -e "$RESTORE_EPOCH_FILE" ] || [ -L "$RESTORE_EPOCH_FILE" ]; then
+    [ -f "$RESTORE_EPOCH_FILE" ] && [ ! -L "$RESTORE_EPOCH_FILE" ] || die "approval restore epoch is unsafe"
+    restore_epoch=$(tr -d '\r\n' < "$RESTORE_EPOCH_FILE")
+    printf '%s' "$restore_epoch" | grep -Eq '^[0-9]+$' || die "approval restore epoch is malformed"
+fi
+restore_epoch=$((restore_epoch + 1))
+restore_epoch_tmp="${RESTORE_EPOCH_FILE}.tmp.$$"
+printf '%s\n' "$restore_epoch" > "$restore_epoch_tmp"
+chown root:root "$restore_epoch_tmp"
+chmod 0600 "$restore_epoch_tmp"
+mv -f "$restore_epoch_tmp" "$RESTORE_EPOCH_FILE"
+sync
+
+if [ "$IDENTITY_OVERRIDE" = "true" ] || [ -n "$identity_mismatch" ]; then
+    [ -d "$AUDIT_DIR" ] && [ ! -L "$AUDIT_DIR" ] || die "audit directory is unavailable for identity override"
+    override_tmp="${AUDIT_DIR}/.state-restore-override.$$"
+    jq -nc --arg app "$STATE_APP_SLUG" --arg snapshot_app "$SNAPSHOT_APP_SLUG" \
+        --arg version "$CURRENT_VERSION" --arg snapshot_version "$SNAPSHOT_TARGET_VERSION" \
+        --arg source_commit "$CURRENT_SOURCE_COMMIT" --arg snapshot_source_commit "$SNAPSHOT_TARGET_SOURCE_COMMIT" \
+        --argjson epoch "$restore_epoch" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{kind:"state_restore_identity_override",app_slug:$app,snapshot_app_slug:$snapshot_app,
+          current_version:$version,snapshot_target_version:$snapshot_version,
+          current_source_commit:$source_commit,snapshot_target_source_commit:$snapshot_source_commit,
+          restore_epoch:$epoch,created_at:$ts}' > "$override_tmp" || die "identity override audit could not be rendered"
+    chown root:root "$override_tmp"
+    chmod 0600 "$override_tmp"
+    cat "$override_tmp" >> "$AUDIT_DIR/$(date -u +%Y-%m-%d).jsonl" || die "identity override audit could not be persisted"
+    rm -f "$override_tmp"
+fi
 if [ "${STATE_RESTORE_TEST_FAIL_AFTER_MUTATION:-false}" = "true" ]; then
     die "test failure injected after live-state replacement"
 fi

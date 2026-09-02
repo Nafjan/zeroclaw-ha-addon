@@ -431,17 +431,20 @@ write_approval_outcome() {
     [ -f "$outcome_ticket_file" ] && [ ! -L "$outcome_ticket_file" ] || return 1
     outcome_actor=$(jq -er '.approval.actor_user_id | tostring' "$outcome_ticket_file") || return 1
     outcome_chat=$(jq -er '.approval.chat_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_message_id=$(jq -er '.tg_message_id | tostring' "$outcome_ticket_file") || return 1
+    printf '%s' "$outcome_message_id" | grep -Eq '^[0-9]+$' || return 1
     outcome_summary=$(printf '%s' "$outcome_payload" | jq -rS -c --arg service "$outcome_service" \
         '($service + " | " + (tojson))') || return 1
     outcome_now=$(date -u +%s)
     outcome_tmp=$(mktemp "${APPROVAL_OUTCOME_DIR}/.${outcome_ticket}.XXXXXX") || return 1
     if ! jq -nc --arg ticket "$outcome_ticket" --arg service "$outcome_service" \
         --arg actor "$outcome_actor" --arg chat "$outcome_chat" \
+        --arg message_id "$outcome_message_id" \
         --arg summary "$outcome_summary" --argjson payload "$outcome_payload" \
         --argjson result "$outcome_result" --argjson now "$outcome_now" \
         '{version:1,state:"applied",ticket:$ticket,service:$service,payload:$payload,
           summary:$summary,result:$result,actor_user_id:$actor,chat_id:$chat,
-          applied_at:$now}' > "$outcome_tmp"; then
+          message_id:$message_id,applied_at:$now}' > "$outcome_tmp"; then
         rm -f "$outcome_tmp"
         return 1
     fi

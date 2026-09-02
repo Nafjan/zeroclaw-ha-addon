@@ -19,10 +19,14 @@ CLIENT_AUTH_TOKEN="${TELEGRAM_CLIENT_AUTH_TOKEN:-}"
 SYSTEM_AUTH_TOKEN="${TELEGRAM_SYSTEM_AUTH_TOKEN:-}"
 APPROVAL_RATE_FILE="${TELEGRAM_APPROVAL_RATE_FILE:-/data/capability/telegram-approval-rate.json}"
 APPROVAL_RATE_LOCK="${TELEGRAM_APPROVAL_RATE_LOCK:-/data/capability/.telegram-approval-rate.lock}"
+APPROVAL_ADMISSION_LOCK="${TELEGRAM_APPROVAL_ADMISSION_LOCK:-/data/capability/.telegram-approval-admission.lock}"
+APPROVAL_ADMISSION_LOCK_HELD=0
 APPROVAL_RATE_LIMIT="${TELEGRAM_APPROVAL_RATE_LIMIT:-12}"
 APPROVAL_RATE_WINDOW_SECONDS="${TELEGRAM_APPROVAL_RATE_WINDOW_SECONDS:-60}"
 MAX_PENDING_TICKETS="${TELEGRAM_MAX_PENDING_TICKETS:-64}"
 MAX_PENDING_TICKET_BYTES="${TELEGRAM_MAX_PENDING_TICKET_BYTES:-2097152}"
+TICKET_NONCE_DIR="${ZEROCLAW_APPROVAL_TICKET_NONCE_DIR:-/data/approval-receipts/ticket-nonces}"
+RESTORE_EPOCH_FILE="${ZEROCLAW_RESTORE_EPOCH_FILE:-/data/.approval-restore-epoch}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -105,6 +109,34 @@ valid_chat_id() {
 
 valid_ticket() {
     printf '%s' "$1" | grep -Eq '^[a-f0-9]{8}$'
+}
+
+current_restore_epoch() {
+    [ -f "$RESTORE_EPOCH_FILE" ] && [ ! -L "$RESTORE_EPOCH_FILE" ] || return 1
+    restore_epoch=$(tr -d '\r\n' < "$RESTORE_EPOCH_FILE")
+    printf '%s' "$restore_epoch" | grep -Eq '^[0-9]+$' || return 1
+    printf '%s' "$restore_epoch"
+}
+
+ensure_ticket_nonce() {
+    nonce_ticket="$1"
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || return 1
+    nonce_path="${TICKET_NONCE_DIR}/${nonce_ticket}"
+    if [ -e "$nonce_path" ] || [ -L "$nonce_path" ]; then
+        [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || return 1
+        return 0
+    fi
+    mkdir "$nonce_path" 2>/dev/null || return 1
+    chmod 0700 "$nonce_path"
+}
+
+reserve_ticket_nonce() {
+    nonce_ticket="$1"
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || return 1
+    nonce_path="${TICKET_NONCE_DIR}/${nonce_ticket}"
+    [ ! -e "$nonce_path" ] && [ ! -L "$nonce_path" ] || return 1
+    mkdir "$nonce_path" 2>/dev/null || return 1
+    chmod 0700 "$nonce_path"
 }
 
 valid_entity_value() {
@@ -254,6 +286,56 @@ release_approval_rate_lock() {
     rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
 }
 
+approval_admission_lock_is_stale() {
+    [ -d "$APPROVAL_ADMISSION_LOCK" ] && [ ! -L "$APPROVAL_ADMISSION_LOCK" ] || return 1
+    approval_admission_owner_file="${APPROVAL_ADMISSION_LOCK}/owner"
+    if [ -e "$approval_admission_owner_file" ]; then
+        [ -f "$approval_admission_owner_file" ] && [ ! -L "$approval_admission_owner_file" ] || return 1
+        approval_admission_owner_pid=$(cat "$approval_admission_owner_file" 2>/dev/null || true)
+        case "$approval_admission_owner_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "$approval_admission_owner_pid" 2>/dev/null && return 1
+    fi
+    approval_admission_lock_mtime=$(stat -c '%Y' "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true)
+    approval_admission_lock_now=$(date -u +%s)
+    case "$approval_admission_lock_mtime:$approval_admission_lock_now" in
+        ''|*[!0-9:]*|*:*:*) return 1 ;;
+    esac
+    [ "$approval_admission_lock_now" -ge "$approval_admission_lock_mtime" ] || return 1
+    [ $((approval_admission_lock_now - approval_admission_lock_mtime)) -ge 120 ]
+}
+
+acquire_approval_admission_lock() {
+    [ -d "$(dirname -- "$APPROVAL_ADMISSION_LOCK")" ] &&
+        [ ! -L "$(dirname -- "$APPROVAL_ADMISSION_LOCK")" ] || return 1
+    approval_admission_attempts=0
+    while ! mkdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null; do
+        if approval_admission_lock_is_stale; then
+            rm -f -- "${APPROVAL_ADMISSION_LOCK}/owner" 2>/dev/null || true
+            rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+            continue
+        fi
+        approval_admission_attempts=$((approval_admission_attempts + 1))
+        [ "$approval_admission_attempts" -le 10 ] || return 1
+        sleep 1
+    done
+    printf '%s\n' "$$" > "${APPROVAL_ADMISSION_LOCK}/owner" || {
+        rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "${APPROVAL_ADMISSION_LOCK}/owner"
+    APPROVAL_ADMISSION_LOCK_HELD=1
+}
+
+release_approval_admission_lock() {
+    if [ "$APPROVAL_ADMISSION_LOCK_HELD" -eq 1 ]; then
+        rm -f -- "${APPROVAL_ADMISSION_LOCK}/owner" 2>/dev/null || true
+        rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+        APPROVAL_ADMISSION_LOCK_HELD=0
+    fi
+}
+
 write_approval_rate() {
     [ ! -L "$APPROVAL_RATE_FILE" ] || return 1
     if [ -e "$APPROVAL_RATE_FILE" ] && [ ! -f "$APPROVAL_RATE_FILE" ]; then
@@ -383,10 +465,14 @@ send_approval() {
     ticket_file="${TICKET_DIR}/${ticket}.json"
     lock="${ZEROCLAW_APPROVAL_LOCK_DIR:-/data/approval-receipts/.locks}/approval-${ticket}.lock"
     mkdir "$lock" 2>/dev/null || json_error "approval ticket is already being processed"
-    trap 'rm -f "${staged_ticket:-}"; rmdir "$lock" 2>/dev/null || true' EXIT
+    trap 'rm -f "${staged_ticket:-}"; release_approval_admission_lock; rmdir "$lock" 2>/dev/null || true' EXIT
+    acquire_approval_admission_lock || json_error "Telegram approval admission state is unavailable"
+    current_restore_epoch_value=$(current_restore_epoch) ||
+        json_error "approval restore epoch is unavailable"
     mkdir -p "$TICKET_DIR"
     if [ -e "$ticket_file" ] || [ -L "$ticket_file" ]; then
         [ -f "$ticket_file" ] && [ ! -L "$ticket_file" ] || json_error "approval ticket state is not a regular file"
+        ensure_ticket_nonce "$ticket" || json_error "approval ticket nonce state is unavailable"
         delivery_state=$(jq -r '.delivery_state // empty' "$ticket_file" 2>/dev/null || true)
         case "$delivery_state" in
             delivered)
@@ -457,8 +543,24 @@ send_approval() {
         staged_ticket=""
         json_error "approval payload is too large to render exactly"
     }
+    reserve_ticket_nonce "$ticket" || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket id has already been used or nonce state is unavailable"
+    }
+    epoch_tmp=$(mktemp "${TICKET_DIR}/.${ticket}.epoch.XXXXXX")
+    if ! jq --argjson restore_epoch "$current_restore_epoch_value" \
+        '. + {restore_epoch:$restore_epoch}' "$staged_ticket" > "$epoch_tmp"; then
+        rm -f "$epoch_tmp" "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket restore epoch could not be sealed"
+    fi
+    chown root:root "$epoch_tmp"
+    chmod 0600 "$epoch_tmp"
+    mv "$epoch_tmp" "$staged_ticket"
     mv "$staged_ticket" "$ticket_file"
     staged_ticket=""
+    release_approval_admission_lock
     expires_at=$(jq -r '.expires_at' "$ticket_file")
     now=$(date -u +%s)
     [ "$now" -le "$expires_at" ] || {
