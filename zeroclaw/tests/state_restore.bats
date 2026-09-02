@@ -23,7 +23,29 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$TEST_ROOT"
+    if [ "$(id -u)" -eq 0 ]; then
+        rm -rf "$TEST_ROOT"
+    else
+        sudo -n rm -rf "$TEST_ROOT"
+    fi
+}
+
+restore_state() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    else
+        sudo -n "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    fi
+}
+
+restore_state_with_failure() {
+    if [ "$(id -u)" -eq 0 ]; then
+        STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    else
+        sudo -n env STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    fi
 }
 
 @test "restore verifies the snapshot and replaces the full persistent inventory" {
@@ -36,7 +58,7 @@ teardown() {
     printf 'new-ticket\n' > "$DATA_DIR/approval-receipts/tickets/ticket-1"
     printf 'new-audit\n' > "$DATA_DIR/audit/2026-09-01.jsonl"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -eq 0 ]
     [[ "$output" == *"restored_schema=0 restored_version=3.1.3.3"* ]]
@@ -73,7 +95,7 @@ teardown() {
     [ -n "$fresh_backup" ]
     printf 'new-brain\n' > "$DATA_DIR/brain.db"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$fresh_backup"
     [ "$status" -eq 0 ]
     [[ "$output" == *"restored_schema=0 restored_version=fresh"* ]]
@@ -91,8 +113,7 @@ teardown() {
     printf 'new-config\n' > "$DATA_DIR/config.toml"
     printf 'new-session\n' > "$DATA_DIR/workspace/sessions-1/state.db"
 
-    run env STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
-        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state_with_failure \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -ne 0 ]
     [[ "$output" == *"live state was restored from rollback snapshot"* ]]
@@ -111,7 +132,7 @@ teardown() {
     printf 'tampered\n' > "$BACKUP_DIR/brain.db"
     printf 'current\n' > "$DATA_DIR/brain.db"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -ne 0 ]
     [ "$(cat "$DATA_DIR/brain.db")" = current ]
