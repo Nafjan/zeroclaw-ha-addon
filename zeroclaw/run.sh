@@ -711,6 +711,14 @@ MIGRATIONS_DIR="${CONFIG_DIR}/migrations"
 mkdir -p "${MIGRATIONS_DIR}"
 chown root:root "${MIGRATIONS_DIR}"
 chmod 0700 "${MIGRATIONS_DIR}"
+# A restore journal is written before any live state is removed.  Resolve an
+# untrapped interruption (SIGKILL, power loss, or container termination) before
+# treating the runtime lock as stale; otherwise startup could accept a partial
+# inventory or rewound quotas/audit state.
+if ! /opt/zeroclaw/lib/state-restore.sh recover "${CONFIG_DIR}"; then
+    bashio::log.fatal "Incomplete state restore recovery failed; refusing to start."
+    exit 1
+fi
 RUNTIME_LOCK_DIR="${CONFIG_DIR}/.state-runtime-lock"
 if [ -e "${RUNTIME_LOCK_DIR}" ]; then
     if [ -L "${RUNTIME_LOCK_DIR}" ] || [ ! -d "${RUNTIME_LOCK_DIR}" ] ||
@@ -1224,8 +1232,12 @@ AUTH_FILE=/run/zeroclaw/telegram-system-auth
 [ -r "$AUTH_FILE" ] || { echo "system Telegram credential is unavailable" >&2; exit 1; }
 AUTH=$(tr -d '\r\n' < "$AUTH_FILE")
 [ -n "$AUTH" ] || { echo "system Telegram credential is empty" >&2; exit 1; }
-REQUEST=$(jq -nc --arg auth "$AUTH" --arg text "$1" \
+# Read the secret from the protected file directly instead of placing it in
+# jq's argv, where a concurrent unprivileged planner could observe it through
+# procfs. The non-secret bounded notice text may remain an argv value.
+REQUEST=$(jq -nc --rawfile auth "$AUTH_FILE" --arg text "$1" \
     '{operation:"send_system_notice",auth:$auth,text:$text}')
+unset AUTH
 RESPONSE=$(/bin/busybox nc -w 40 127.0.0.1 42619 <<EOF
 $REQUEST
 EOF

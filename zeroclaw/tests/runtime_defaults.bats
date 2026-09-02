@@ -25,6 +25,10 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'http://127.0.0.1:42617/health' "$health_file"
     [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42620/health' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider-client-auth' "$health_file"
+    [ "$status" -eq 0 ]
     run grep -F '/usr/local/bin/ha-capability read_sensors' "$health_file"
     [ "$status" -eq 0 ]
     run grep -F 'CMD /opt/zeroclaw/lib/healthcheck.sh' "$BATS_TEST_DIRNAME/../Dockerfile"
@@ -443,6 +447,13 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "system Telegram auth is not placed in jq argv" {
+    run grep -F 'jq -nc --rawfile auth "$AUTH_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -nc --arg auth "$AUTH"' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
 @test "HA error-log capability never forwards raw diagnostic contents" {
     capability_file="$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     run grep -F 'json_value '\''{available:true,detail:"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'\''' "$capability_file"
@@ -827,6 +838,32 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'preserve_current_tree audit' "$restore_file"
     [ "$status" -eq 0 ]
     run grep -F 'preserve_current_file capability/telegram-approval-rate.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-conflict' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-conflict.token' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'state-restore.sh recover' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore recovery is journaled before live state mutation" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'write_transaction_state prepared' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'write_transaction_state mutating' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'write_transaction_state committed' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'recover_incomplete_restore' "$restore_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "approval transition authenticates the ticket restore epoch" {
+    transition_file="$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    run grep -F 'ticket ${SHORT} belongs to a prior restore epoch' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ticket_restore_epoch' "$transition_file"
     [ "$status" -eq 0 ]
 }
 

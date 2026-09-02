@@ -15,7 +15,7 @@ mkdir -p /run/zeroclaw
 printf '%s\n' capability-client-secret > /run/zeroclaw/capability-client-auth
 chmod 0600 /run/zeroclaw/capability-client-auth
 jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${SHORT}.sha256"
 
@@ -46,7 +46,7 @@ test -f "/data/approved/${SHORT}.marker"
 # be able to run the approved Home Assistant service twice.
 CLAIM_SHORT=c0ffee12
 jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${CLAIM_SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${CLAIM_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${CLAIM_SHORT}.sha256"
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$CLAIM_SHORT" 42 42 >/dev/null
@@ -72,7 +72,7 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
     APPLY_PORT=42638
     HA_PORT=42639
     jq -nc --argjson exp "$((NOW + 300))" \
-        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,tg_message_id:123,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:123,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
         > "/data/approval-receipts/tickets/${APPLY_SHORT}.json"
     sha256sum "/data/approval-receipts/tickets/${APPLY_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${APPLY_SHORT}.sha256"
     ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 >/dev/null
