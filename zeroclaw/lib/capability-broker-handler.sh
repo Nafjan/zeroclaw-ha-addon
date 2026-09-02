@@ -116,9 +116,13 @@ trap cleanup EXIT
 if ! operation=$(printf '%s' "$request" | jq -er '.operation | select(type == "string")'); then
     json_error "operation must be a string"
 fi
-[ "$auth_class" = health ] && [ "$operation" = health_read_sensors ] ||
-    [ "$auth_class" = planner ] && [ "$operation" != health_read_sensors ] ||
-    json_error "health broker credential is restricted" "broker_auth_failed"
+if [ "$auth_class" = health ]; then
+    [ "$operation" = health_read_sensors ] ||
+        json_error "health broker credential is restricted" "broker_auth_failed"
+else
+    [ "$operation" != health_read_sensors ] ||
+        json_error "health broker credential is restricted" "broker_auth_failed"
+fi
 
 valid_entity_value() {
     printf '%s' "$1" | jq -e '
