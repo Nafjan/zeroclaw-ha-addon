@@ -242,7 +242,7 @@ jq -e '[.records[] | select(.settlement == "migrated_reserved_max")] | length ==
     "$LEDGER" >/dev/null
 jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "primary-model")] | length == 1 and .[0].settlement == "reserved_max_credit_exhausted"' \
     "$LEDGER" >/dev/null
-jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 3' \
+jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 16 and .[0].settled_input_tokens == 328 and .[0].usage_floor == true' \
     "$LEDGER" >/dev/null
 
 # The hourly request ceiling is global to the provider ledger, not a separate
