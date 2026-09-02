@@ -89,6 +89,56 @@ TOKEN=$(cat "$TOKEN_FILE")
 case "$TOKEN" in
     *[!A-Za-z0-9_.:-]*) json_error "Telegram broker credential has an invalid format" ;;
 esac
+
+# Telegram responses must never relay the bot credential, including common
+# transport encodings that a compromised upstream or proxy could reflect.
+TOKEN_BASE64=$(printf '%s' "$TOKEN" | base64 | tr -d '\r\n') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_BASE64_UNPADDED=$(printf '%s' "$TOKEN_BASE64" | tr -d '=')
+TOKEN_BASE64_URLSAFE=$(printf '%s' "$TOKEN_BASE64" | tr '+/' '-_')
+TOKEN_BASE64_URLSAFE_UNPADDED=$(printf '%s' "$TOKEN_BASE64_URLSAFE" | tr -d '=')
+TOKEN_HEX=$(printf '%s' "$TOKEN" | od -An -tx1 -v | tr -d ' \r\n') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_HEX_UPPER=$(printf '%s' "$TOKEN_HEX" | tr 'a-f' 'A-F')
+TOKEN_PERCENT=$(printf '%s' "$TOKEN" | od -An -tx1 -v |
+    awk '{for (i=1; i<=NF; i++) printf "%%%s", toupper($i)}') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_PERCENT_LOWER=$(printf '%s' "$TOKEN_PERCENT" | tr 'A-F' 'a-f')
+TOKEN_PERCENT_MIXED=$(printf '%s' "$TOKEN" | od -An -tx1 -v |
+    awk 'function hex_value(h, p) {
+             p = index("0123456789ABCDEF", toupper(h))
+             return p - 1
+         }
+         {
+             for (i=1; i<=NF; i++) {
+                 h=toupper($i)
+                 value=hex_value(substr(h,1,1))*16 + hex_value(substr(h,2,1))
+                 if ((value >= 48 && value <= 57) ||
+                     (value >= 65 && value <= 90) ||
+                     (value >= 97 && value <= 122) ||
+                     value == 45 || value == 46 || value == 95 || value == 126) {
+                     printf "%c", value
+                 } else {
+                     printf "%%%s", h
+                 }
+             }
+         }') || json_error "Telegram credential encoding is unavailable"
+TOKEN_PERCENT_MIXED_LOWER=$(printf '%s' "$TOKEN_PERCENT_MIXED" | tr 'A-F' 'a-f')
+
+telegram_credential_in_response() {
+    response_text="$1"
+    for credential_variant in \
+        "$TOKEN" "$TOKEN_BASE64" "$TOKEN_BASE64_UNPADDED" \
+        "$TOKEN_BASE64_URLSAFE" "$TOKEN_BASE64_URLSAFE_UNPADDED" \
+        "$TOKEN_HEX" "$TOKEN_HEX_UPPER" "$TOKEN_PERCENT" \
+        "$TOKEN_PERCENT_LOWER" "$TOKEN_PERCENT_MIXED" "$TOKEN_PERCENT_MIXED_LOWER"; do
+        [ -n "$credential_variant" ] || continue
+        if printf '%s' "$response_text" | grep -F -- "$credential_variant" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
 staged_ticket=""
 
 # Telegram puts the bot token in the endpoint path. Build that URL in a
@@ -237,7 +287,7 @@ mark_delivery_state() {
 
 telegram_result() {
     result="$1"
-    if printf '%s' "$result" | grep -F -- "$TOKEN" >/dev/null 2>&1; then
+    if telegram_credential_in_response "$result"; then
         json_error "Telegram response contained broker credential"
     fi
     if ! printf '%s' "$result" | jq -e '.ok == true' >/dev/null 2>&1; then
@@ -601,7 +651,7 @@ send_approval() {
         mark_delivery_state delivery_unknown || true
         json_error "Telegram sendMessage outcome is unknown; ticket retained for recovery"
     fi
-    if printf '%s' "$response" | grep -F -- "$TOKEN" >/dev/null 2>&1; then
+    if telegram_credential_in_response "$response"; then
         rm -f "$ticket_file"
         json_error "Telegram response contained broker credential"
     fi

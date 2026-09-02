@@ -65,7 +65,13 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram broker credential has an invalid format' "$telegram_file"
     [ "$status" -eq 0 ]
+    run grep -F 'TOKEN_BASE64_URLSAFE_UNPADDED' "$telegram_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TOKEN_PERCENT_MIXED_LOWER' "$telegram_file"
+    [ "$status" -eq 0 ]
     run grep -F 'case "\$TOKEN" in' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'token_percent_mixed_lower' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'if [ "$(id -u)" -eq 0 ]; then' "$legacy_file"
     [ "$status" -eq 0 ]

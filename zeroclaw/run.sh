@@ -1299,10 +1299,45 @@ fi
 telegram_response_ok() {
     response="\$1"
     [ -n "\$response" ] || return 1
-    # Never log or relay a Telegram response that contains the bot token.
-    if printf '%s' "\$response" | grep -F -- "\$TOKEN" >/dev/null 2>&1; then
-        return 1
-    fi
+    # Never log or relay a Telegram response that contains the bot token or a
+    # common transport encoding of it.
+    token_base64=\$(printf '%s' "\$TOKEN" | base64 | tr -d '\r\n') || return 1
+    token_base64_unpadded=\$(printf '%s' "\$token_base64" | tr -d '=')
+    token_base64_urlsafe=\$(printf '%s' "\$token_base64" | tr '+/' '-_')
+    token_base64_urlsafe_unpadded=\$(printf '%s' "\$token_base64_urlsafe" | tr -d '=')
+    token_hex=\$(printf '%s' "\$TOKEN" | od -An -tx1 -v | tr -d ' \r\n') || return 1
+    token_hex_upper=\$(printf '%s' "\$token_hex" | tr 'a-f' 'A-F')
+    token_percent=\$(printf '%s' "\$TOKEN" | od -An -tx1 -v | awk '{for (i=1; i<=NF; i++) printf "%%%s", toupper(\$i)}') || return 1
+    token_percent_lower=\$(printf '%s' "\$token_percent" | tr 'A-F' 'a-f')
+    token_percent_mixed=\$(printf '%s' "\$TOKEN" | od -An -tx1 -v | awk 'function hex_value(h, p) {
+                 p = index("0123456789ABCDEF", toupper(h))
+                 return p - 1
+             }
+             {
+                 for (i=1; i<=NF; i++) {
+                     h=toupper(\$i)
+                     value=hex_value(substr(h,1,1))*16 + hex_value(substr(h,2,1))
+                     if ((value >= 48 && value <= 57) ||
+                         (value >= 65 && value <= 90) ||
+                         (value >= 97 && value <= 122) ||
+                         value == 45 || value == 46 || value == 95 || value == 126) {
+                         printf "%c", value
+                     } else {
+                         printf "%%%s", h
+                     }
+                 }
+             }') || return 1
+    token_percent_mixed_lower=\$(printf '%s' "\$token_percent_mixed" | tr 'A-F' 'a-f')
+    for credential_variant in \
+        "\$TOKEN" "\$token_base64" "\$token_base64_unpadded" \
+        "\$token_base64_urlsafe" "\$token_base64_urlsafe_unpadded" \
+        "\$token_hex" "\$token_hex_upper" "\$token_percent" \
+        "\$token_percent_lower" "\$token_percent_mixed" "\$token_percent_mixed_lower"; do
+        [ -n "\$credential_variant" ] || continue
+        if printf '%s' "\$response" | grep -F -- "\$credential_variant" >/dev/null 2>&1; then
+            return 1
+        fi
+    done
     printf '%s' "\$response" | jq -e '.ok == true' >/dev/null 2>&1
 }
 
