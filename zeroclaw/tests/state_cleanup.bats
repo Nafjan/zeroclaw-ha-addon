@@ -106,6 +106,8 @@ teardown() {
     mkdir "$DATA_DIR/capability/.quota.lock"
     printf '%s\n' "$$" > "$DATA_DIR/capability/.quota.lock/owner"
     touch -t 200001010000 "$DATA_DIR/capability/.quota.lock"
+    mkdir "$DATA_DIR/capability/.quota-live.lock"
+    touch -t 200001010000 "$DATA_DIR/capability/.quota-live.lock"
 
     run_cleanup
     [ "$status" -eq 0 ]

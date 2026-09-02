@@ -2049,8 +2049,8 @@ while true; do
                else
                   # The capability broker durably records an applied outcome
                   # immediately before final ticket completion. If completion
-                  # failed, prefer that truthful receipt over an unconfirmed
-                  # message; the replay helper also retries idempotent cleanup
+                  # failed, prefer that truthful receipt over an unconfirmed message;
+                  # the replay helper also retries idempotent cleanup
                   # without issuing a second HA service call.
                   if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
                       continue
