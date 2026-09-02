@@ -85,6 +85,10 @@ request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
 [ -r "$TOKEN_FILE" ] || json_error "Telegram broker credential is unavailable"
 TOKEN=$(cat "$TOKEN_FILE")
 [ -n "$TOKEN" ] || json_error "Telegram broker credential is empty"
+[ "${#TOKEN}" -le 256 ] || json_error "Telegram broker credential is too long"
+case "$TOKEN" in
+    *[!A-Za-z0-9_.:-]*) json_error "Telegram broker credential has an invalid format" ;;
+esac
 staged_ticket=""
 
 # Telegram puts the bot token in the endpoint path. Build that URL in a

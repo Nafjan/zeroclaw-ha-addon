@@ -41,6 +41,37 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'COPY state-schema /usr/share/zeroclaw/state-schema' "$BATS_TEST_DIRNAME/../Dockerfile"
     [ "$status" -eq 0 ]
 }
+
+@test "provider test endpoint is image-gated and release builds do not enable it" {
+    dockerfile="$BATS_TEST_DIRNAME/../Dockerfile"
+    run grep -F 'ARG ALLOW_TEST_PROVIDER_OVERRIDE=false' "$dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'zeroclaw-ci-test-hooks-v1' "$dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'test-hooks-enabled' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42633/v1/chat/completions' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--build-arg ALLOW_TEST_PROVIDER_OVERRIDE=true' "$BATS_TEST_DIRNAME/../../.github/workflows/test.yml"
+    [ "$status" -eq 0 ]
+    run grep -F 'ALLOW_TEST_PROVIDER_OVERRIDE=true' "$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    [ "$status" -ne 0 ]
+}
+
+@test "Telegram credentials are constrained before curl config serialization" {
+    telegram_file="$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    legacy_file="$BATS_TEST_DIRNAME/../lib/telegram-legacy-action.sh"
+    run grep -F 'telegram_bot_token contains unsupported characters' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Telegram broker credential has an invalid format' "$telegram_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'case "\$TOKEN" in' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if [ "$(id -u)" -eq 0 ]; then' "$legacy_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'LEGACY_ACTION_GATE="/usr/local/bin/ha-action-guarded"' "$legacy_file"
+    [ "$status" -eq 0 ]
+}
 agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "runtime uses the Supervisor core API and safe gateway defaults" {

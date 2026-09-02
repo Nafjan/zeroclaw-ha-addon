@@ -144,6 +144,7 @@ jobs:
             --build-arg ZEROCLAW_LLVM_RNG_SEED="$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)" \
             --build-arg REQUIRE_VERIFIED_ARTIFACT="${{ inputs.require_verified_artifact == true && 'true' || 'false' }}" \
             --build-arg ZEROCLAW_STATE_SCHEMA="$(tr -d '\r\n' < zeroclaw/state-schema)" \
+            --build-arg ALLOW_TEST_PROVIDER_OVERRIDE=true \
             zeroclaw
 
       - name: Smoke-test image contents and entrypoint syntax

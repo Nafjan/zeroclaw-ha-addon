@@ -458,6 +458,16 @@ if [ -n "${TELEGRAM_TOKEN}" ] || [ -n "${TELEGRAM_USERS}" ]; then
         bashio::log.fatal "telegram_allowed_users is required when telegram_bot_token is configured."
         exit 1
     }
+    case "${TELEGRAM_TOKEN}" in
+        ''|*[!A-Za-z0-9_.:-]*)
+            bashio::log.fatal "telegram_bot_token contains unsupported characters"
+            exit 1
+            ;;
+    esac
+    [ "${#TELEGRAM_TOKEN}" -le 256 ] || {
+        bashio::log.fatal "telegram_bot_token is too long"
+        exit 1
+    }
     TELEGRAM_USERS_SINGLE_LINE=$(printf '%s' "$TELEGRAM_USERS" | tr -d '\r\n')
     [ "$TELEGRAM_USERS_SINGLE_LINE" = "$TELEGRAM_USERS" ] || {
         bashio::log.fatal "telegram_allowed_users must not contain newline characters."
@@ -894,15 +904,20 @@ if [ "${PROVIDER_KEY_MODE}" = "broker" ]; then
     chmod 0700 "${PROVIDER_KEY_DIR}"
     PROVIDER_PORT=42620
     (
+        provider_test_upstream="${ZEROCLAW_PROVIDER_UPSTREAM_URL:-}"
         unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
-            LEGACY_HA_TOKEN ZEROCLAW_API_KEY
+            LEGACY_HA_TOKEN ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE ZEROCLAW_PROVIDER_UPSTREAM_URL
         export PROVIDER_CLIENT_AUTH_TOKEN
-        # The endpoint remains root-controlled.  The test-only override lets
-        # the real arm64 planner binary exercise this broker against a local
-        # deterministic upstream without ever exposing a provider key to it.
-        if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] &&
-            [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
-            OPENROUTER_UPSTREAM_URL="${ZEROCLAW_PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
+        # Only the CI image carries this immutable marker. The exact loopback
+        # endpoint is accepted solely for the deterministic real-daemon test;
+        # release images always use the fixed upstream below.
+        if [ -f /usr/share/zeroclaw/test-hooks-enabled ] &&
+            [ ! -L /usr/share/zeroclaw/test-hooks-enabled ] &&
+            [ "$(tr -d '\r\n' < /usr/share/zeroclaw/test-hooks-enabled)" = "zeroclaw-ci-test-hooks-v1" ] &&
+            [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ] &&
+            [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ] &&
+            [ "${provider_test_upstream}" = "http://127.0.0.1:42633/v1/chat/completions" ]; then
+            OPENROUTER_UPSTREAM_URL="${provider_test_upstream}"
         else
             OPENROUTER_UPSTREAM_URL="https://openrouter.ai/api/v1/chat/completions"
         fi
@@ -988,7 +1003,7 @@ CAPABILITY_PORT=42618
     # explicitly removed here as a defense against reordering regressions.
     unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE
     export HA_TOKEN HA_URL CAPABILITY_CLIENT_AUTH_TOKEN
     export ENABLE_WRITE_ACTIONS
     export CAPABILITY_MAX_ACTIONS_PER_HOUR="${MAX_ACTIONS_PER_HOUR}"
@@ -1165,7 +1180,7 @@ TELEGRAM_PORT=42619
     (
         unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
             OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-            ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+            ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE
         export TELEGRAM_TOKEN_FILE TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
         export TELEGRAM_APPROVAL_CHAT="${FIRST_USER}"
         while true; do
@@ -1242,8 +1257,12 @@ set -u
 # must never inherit Supervisor, provider, or parent-process credential env.
 unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
     OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-    ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY
+    ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE
 TOKEN=\$(cat "${TELEGRAM_TOKEN_FILE}")
+[ "\${#TOKEN}" -le 256 ] || exit 1
+case "\$TOKEN" in
+    ''|*[!A-Za-z0-9_.:-]*) exit 1 ;;
+esac
 OFFSET_F="${TELEGRAM_OFFSET_FILE}"
 REPLY_CACHE_DIR="/data/capability/telegram-replies"
 CALLBACK_CACHE_DIR="/data/capability/telegram-callbacks"
@@ -3282,7 +3301,7 @@ bashio::log.info "Config ready | mode=${POLICY_MODE} | ${DEFAULT_MODEL} + ${COMP
 scrub_unrelated_child_credentials() {
     unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \
         OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN \
-        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY \
+        ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_API_KEY ZEROCLAW_LEGACY_ACTION_GATE \
         PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
 }
 
@@ -3369,7 +3388,7 @@ fi
 # All credential-bearing helper processes have been started above. Drop the
 # copies held by the root entrypoint before it launches the planner, so the
 # typed brokers are the only long-lived processes retaining these values.
-unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL NVIDIA_KEY ARK_KEY \
+unset OPENROUTER_KEY LEGACY_HA_TOKEN HA_TOKEN TELEGRAM_TOKEN SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN ZEROCLAW_PROVIDER_UPSTREAM_URL ZEROCLAW_LEGACY_ACTION_GATE NVIDIA_KEY ARK_KEY \
     PROVIDER_CLIENT_AUTH_TOKEN CAPABILITY_CLIENT_AUTH_TOKEN TELEGRAM_CLIENT_AUTH_TOKEN TELEGRAM_SYSTEM_AUTH_TOKEN
 # Keep the persistent mount point root-owned and sticky.  ZeroClaw needs to
 # create a small amount of runtime metadata directly under its config dir, so
@@ -3483,7 +3502,7 @@ fi
 CRASH_COUNT=0
 while true; do
     env -u HA_TOKEN -u SUPERVISOR_TOKEN -u TELEGRAM_BOT_TOKEN \
-        -u OPENROUTER_KEY -u TELEGRAM_TOKEN -u LEGACY_HA_TOKEN \
+        -u OPENROUTER_KEY -u TELEGRAM_TOKEN -u LEGACY_HA_TOKEN -u ZEROCLAW_LEGACY_ACTION_GATE \
         su-exec zeroclaw:zeroclaw \
         zeroclaw daemon --config-dir "${CONFIG_DIR}"
     EXIT_CODE=$?
