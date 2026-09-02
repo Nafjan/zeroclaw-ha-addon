@@ -48,6 +48,30 @@ restore_state_with_failure() {
     fi
 }
 
+root_find() {
+    if [ "$(id -u)" -eq 0 ]; then
+        find "$@"
+    else
+        sudo -n find "$@"
+    fi
+}
+
+root_cat() {
+    if [ "$(id -u)" -eq 0 ]; then
+        cat "$@"
+    else
+        sudo -n cat "$@"
+    fi
+}
+
+root_test_size() {
+    if [ "$(id -u)" -eq 0 ]; then
+        test -s "$1"
+    else
+        sudo -n test -s "$1"
+    fi
+}
+
 @test "restore verifies the snapshot and replaces the full persistent inventory" {
     printf 'new-brain\n' > "$DATA_DIR/brain.db"
     printf 'new-config\n' > "$DATA_DIR/config.toml"
@@ -68,21 +92,25 @@ restore_state_with_failure() {
     [ "$(cat "$DATA_DIR/options.json")" = old-options ]
     [ "$(cat "$DATA_DIR/provider/profile")" = old-provider ]
     [ "$(cat "$DATA_DIR/capability/state")" = old-capability ]
-    [ "$(cat "$DATA_DIR/approval-receipts/tickets/ticket-1")" = old-ticket ]
+    [ ! -e "$DATA_DIR/approval-receipts/tickets/ticket-1" ]
     [ "$(cat "$DATA_DIR/audit/2026-09-01.jsonl")" = old-audit ]
     [ ! -e "$DATA_DIR/.state-schema" ]
     [ "$(cat "$DATA_DIR/.state-version")" = 3.1.3.3 ]
+    [ "$(root_cat "$DATA_DIR/capability/telegram-offset")" = -1 ]
+    [ "$(root_cat "$DATA_DIR/.approval-restore-epoch")" = 1 ]
 
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ "$(cat "$rollback_dir/brain.db")" = new-brain ]
-    [ "$(cat "$rollback_dir/options.json")" = new-options ]
-    [ "$(cat "$rollback_dir/provider/profile")" = new-provider ]
-    [ "$(cat "$rollback_dir/audit/2026-09-01.jsonl")" = new-audit ]
-    [ "$(cat "$rollback_dir/.state-schema")" = 1 ]
+    [ "$(root_cat "$rollback_dir/brain.db")" = new-brain ]
+    [ "$(root_cat "$rollback_dir/options.json")" = new-options ]
+    [ "$(root_cat "$rollback_dir/provider/profile")" = new-provider ]
+    [ "$(root_cat "$rollback_dir/audit/2026-09-01.jsonl")" = new-audit ]
+    [ "$(root_cat "$rollback_dir/.state-schema")" = 1 ]
     [ ! -e "$rollback_dir/.state-version" ]
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
 }
 
 @test "restore of a fresh snapshot removes the schema marker and remains recoverable" {
@@ -102,10 +130,12 @@ restore_state_with_failure() {
     [ "$(cat "$DATA_DIR/brain.db")" = old-brain ]
     [ ! -e "$DATA_DIR/.state-schema" ]
     [ ! -e "$DATA_DIR/.state-version" ]
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
 }
 
 @test "a failed restore repairs live state from the durable rollback snapshot" {
@@ -122,10 +152,12 @@ restore_state_with_failure() {
     [ "$(cat "$DATA_DIR/workspace/sessions-1/state.db")" = new-session ]
     [ "$(cat "$DATA_DIR/.state-schema")" = 1 ]
     [ ! -e "$DATA_DIR/.state-version" ]
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
 }
 
 @test "a tampered snapshot is rejected before live state moves" {
