@@ -10,6 +10,9 @@ smoke_failure_diagnostics() {
     status="$1"
     [ "$status" -eq 0 ] && return 0
     echo "startup smoke assertion failed (status ${status})" >&2
+    if [ -n "${run_status-}" ]; then
+        echo "startup smoke inner run status: ${run_status}" >&2
+    fi
     for diagnostic_file in \
         /tmp/zeroclaw-startup.log \
         /tmp/startup-plain.log \
