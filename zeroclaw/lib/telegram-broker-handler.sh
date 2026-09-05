@@ -172,6 +172,16 @@ current_restore_epoch() {
     printf '%s' "$restore_epoch"
 }
 
+valid_approval_generation() {
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
+}
+
+generate_approval_generation() {
+    approval_generation=$(head -c 16 /dev/urandom | sha256sum | cut -c1-32) || return 1
+    valid_approval_generation "$approval_generation" || return 1
+    printf '%s' "$approval_generation"
+}
+
 ensure_ticket_nonce() {
     nonce_ticket="$1"
     [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || return 1
@@ -530,6 +540,9 @@ send_approval() {
         delivery_state=$(jq -r '.delivery_state // empty' "$ticket_file" 2>/dev/null || true)
         case "$delivery_state" in
             delivered)
+                approval_generation=$(jq -r '.approval_generation // empty' "$ticket_file" 2>/dev/null || true)
+                valid_approval_generation "$approval_generation" || \
+                    json_error "delivered Telegram ticket has no valid approval generation"
                 message_id=$(jq -r '.tg_message_id // empty' "$ticket_file" 2>/dev/null || true)
                 printf '%s' "$message_id" | grep -Eq '^[0-9]+$' || \
                     json_error "delivered Telegram ticket has no valid message id"
@@ -602,9 +615,15 @@ send_approval() {
         staged_ticket=""
         json_error "approval ticket id has already been used or nonce state is unavailable"
     }
+    approval_generation=$(generate_approval_generation) || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket generation could not be created"
+    }
     epoch_tmp=$(mktemp "${TICKET_DIR}/.${ticket}.epoch.XXXXXX")
     if ! jq --argjson restore_epoch "$current_restore_epoch_value" \
-        '. + {restore_epoch:$restore_epoch}' "$staged_ticket" > "$epoch_tmp"; then
+        --arg generation "$approval_generation" \
+        '. + {restore_epoch:$restore_epoch,approval_generation:$generation}' "$staged_ticket" > "$epoch_tmp"; then
         rm -f "$epoch_tmp" "$staged_ticket"
         staged_ticket=""
         json_error "approval ticket restore epoch could not be sealed"
@@ -641,8 +660,8 @@ send_approval() {
     # renders the exact canonical payload and uses a
     # fixed safety statement, so an operator cannot approve hidden parameters
     # or planner-controlled policy prose.
-    text=$(printf 'Approval needed (%s)\nAction: %s\nParameters: %s\nSafety gate: approval is required for this exact action.\nReply YES %s or NO %s. Expires in 30 min.' \
-        "$ticket" "$service" "$payload" "$ticket" "$ticket")
+    text=$(printf 'Approval needed (%s)\nAction: %s\nParameters: %s\nSafety gate: approval is required for this exact action.\nReply YES %s %s or NO %s %s. Expires in 30 min.' \
+        "$ticket" "$service" "$payload" "$ticket" "$approval_generation" "$ticket" "$approval_generation")
     keyboard=$(jq -nc --arg id "$ticket" '{inline_keyboard:[[{text:"✅ Approve",callback_data:("zcv1:approve:" + $id)},{text:"❌ Reject",callback_data:("zcv1:reject:" + $id)}],[{text:"💬 Discuss",callback_data:("zcv1:discuss:" + $id)}]]}')
     body=$(jq -nc --arg cid "$chat_id" --arg text "$text" --argjson keyboard "$keyboard" \
         '{chat_id:$cid,text:$text,reply_markup:$keyboard}')

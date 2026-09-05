@@ -147,6 +147,24 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "text approvals are bound to a root-sealed generation" {
+    approval_format_file="$BATS_TEST_DIRNAME/../lib/telegram-approval-format.sh"
+    run grep -F '. /opt/zeroclaw/lib/telegram-approval-format.sh' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'Reply YES %s %s or NO %s %s' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'This approval reply is missing its one-time code' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'rmdir "$nonce_path"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches()' "$approval_format_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "Telegram callbacks stay bound to the delivered approval message" {
     run grep -F 'STORED_MSG_ID=' "$run_file"
     [ "$status" -eq 0 ]
@@ -173,7 +191,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F '.restore_epoch == $epoch' "$transition_file"
     [ "$status" -eq 0 ]
-    run grep -F '. + {restore_epoch:$restore_epoch}' "$broker_file"
+    run grep -F '. + {restore_epoch:$restore_epoch,approval_generation:$generation}' "$broker_file"
     [ "$status" -eq 0 ]
 }
 

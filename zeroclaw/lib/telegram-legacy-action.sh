@@ -77,7 +77,7 @@ case "$GATE_STATUS" in
     2)
         TICKET=$(printf '%s\n' "$GATE_OUTPUT" | sed -nE 's/.*ticket=([a-f0-9]{8}).*/\1/p' | head -n 1)
         if [ -n "$TICKET" ]; then
-            echo "Approval needed (id $TICKET). Reply YES $TICKET to proceed."
+            echo "Approval needed (id $TICKET). Reply with the exact YES/NO form shown in the Telegram approval message."
         else
             echo "Approval is required before that action can run."
         fi
