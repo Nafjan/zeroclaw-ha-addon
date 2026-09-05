@@ -8,7 +8,7 @@ GENERATION=66666666666666666666666666666666
 CLAIM_GENERATION=77777777777777777777777777777777
 APPLY_GENERATION=88888888888888888888888888888888
 failure_phase=setup
-trap 'status=$?; if [ "$status" -ne 0 ]; then echo "approval concurrency failure phase: ${failure_phase}" >&2; for output_file in /tmp/zc-approval-race/*.out; do [ -f "$output_file" ] || continue; printf "%s: " "$output_file" >&2; tr "\n" "," < "$output_file" >&2; echo >&2; done; fi; exit "$status"' EXIT
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "approval concurrency failure phase: ${failure_phase}" >&2; for output_file in /tmp/zc-approval-race/*.out; do [ -f "$output_file" ] || continue; printf "%s: " "$output_file" >&2; tr "\n" "," < "$output_file" >&2; echo >&2; error_file="${output_file%.out}.err"; if [ -s "$error_file" ]; then printf "%s error: " "$output_file" >&2; tr "\n" "," < "$error_file" >&2; echo >&2; fi; done; fi; exit "$status"' EXIT
 mkdir -p /data/pending /data/approved /data/approval-receipts \
     /data/approval-receipts/.locks /data/approval-receipts/tickets \
     /data/approval-receipts/ticket-nonces /data/capability /tmp/zc-approval-race
@@ -28,7 +28,8 @@ pids=""
 failure_phase=racing-approvals
 for n in $(seq 1 12); do
     (
-        if result=$(ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 "$GENERATION" 2>/dev/null); then
+        error_file="/tmp/zc-approval-race/${n}.err"
+        if result=$(ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 "$GENERATION" 2>"$error_file"); then
             printf '%s\n' "$result"
         else
             echo rejected
