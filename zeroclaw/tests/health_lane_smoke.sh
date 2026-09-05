@@ -6,6 +6,15 @@ set -eu
 
 mkdir -p /data/capability /tmp/health-lane-bin
 
+HEALTH_LANE_REAL_JQ="$(command -v jq)"
+
+cat > /tmp/health-lane-bin/jq <<'FAKE_JQ'
+#!/bin/sh
+[ -z "${HA_TOKEN:-}" ] || exit 92
+exec "${HEALTH_LANE_REAL_JQ:?}" "$@"
+FAKE_JQ
+chmod 0755 /tmp/health-lane-bin/jq
+
 cat > /tmp/health-lane-bin/curl <<'FAKE_CURL'
 #!/bin/sh
 # Home Assistant's /template endpoint returns the rendered template body,
@@ -27,9 +36,22 @@ invoke_broker() {
             CAPABILITY_CLIENT_AUTH_TOKEN=cap-client \
             CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN=health-client \
             HA_URL=http://127.0.0.1:42633/core/api \
+            HEALTH_LANE_REAL_JQ="$HEALTH_LANE_REAL_JQ" \
             PATH="/tmp/health-lane-bin:$PATH" \
             "$broker"
 }
+
+invalid_response=$(printf '\n' |
+    env \
+        HA_TOKEN=supervisor-secret \
+        CAPABILITY_CLIENT_AUTH_TOKEN=cap-client \
+        CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN=health-client \
+        HA_URL=http://127.0.0.1:42633/core/api \
+        HEALTH_LANE_REAL_JQ="$HEALTH_LANE_REAL_JQ" \
+        PATH="/tmp/health-lane-bin:$PATH" \
+        "$broker")
+printf '%s\n' "$invalid_response" |
+    jq -e '.ok == false and .error == "empty broker request"' >/dev/null
 
 health_response=$(invoke_broker health-client health_read_sensors)
 printf '%s\n' "$health_response" |
