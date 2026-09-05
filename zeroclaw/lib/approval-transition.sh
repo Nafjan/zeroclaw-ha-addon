@@ -63,10 +63,18 @@ ensure_ticket_nonce() {
     nonce_path="${TICKET_NONCE_DIR}/${SHORT}"
     if [ -e "$nonce_path" ] || [ -L "$nonce_path" ]; then
         [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || fail "ticket nonce record is unsafe"
+        chmod 0700 "$nonce_path" || fail "ticket nonce record is unsafe"
         return 0
     fi
-    mkdir "$nonce_path" 2>/dev/null || fail "ticket nonce could not be reserved"
-    chmod 0700 "$nonce_path"
+    if mkdir "$nonce_path" 2>/dev/null; then
+        chmod 0700 "$nonce_path" || fail "ticket nonce could not be secured"
+        return 0
+    fi
+    # Another concurrent transition may have created the directory after the
+    # existence check. Treat that valid, non-symlink directory as the same
+    # reservation; any other mkdir failure remains fail-closed.
+    [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || fail "ticket nonce could not be reserved"
+    chmod 0700 "$nonce_path" || fail "ticket nonce could not be secured"
 }
 
 current_restore_epoch() {
