@@ -191,7 +191,7 @@ jobs:
             }
             rm -f "$target_error_file"
           else
-            if grep -Eiq '(^|[^[:alnum:]])manifest unknown([^[:alnum:]]|$)|(^|[^[:alnum:]])name unknown([^[:alnum:]]|$)|(^|[^[:alnum:]])no such manifest([^[:alnum:]]|$)' "$target_error_file"; then
+            if bash .github/scripts/classify-canary-tag-missing.sh "$IMAGE" "$TARGET_TAG" "$target_error_file"; then
               rm -f "$target_error_file"
               docker buildx imagetools create \
                 --tag "${IMAGE}:${TARGET_TAG}" \
