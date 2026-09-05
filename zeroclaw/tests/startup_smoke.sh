@@ -79,6 +79,15 @@ assert_file_value() {
     }
 }
 
+run_child_smoke() {
+    child_name="$1"
+    shift
+    "$@" || {
+        echo "startup smoke child failed: ${child_name}" >&2
+        return 1
+    }
+}
+
 # The image test provides a synthetic Supervisor credential so the entrypoint
 # exercises its real fail-closed preflight against the fake Supervisor below.
 : "${SUPERVISOR_TOKEN:=supervisor-secret}"
@@ -454,12 +463,12 @@ migration_config=$(find /data/migrations -type f -name config.toml -print -quit 
     echo "startup smoke migration snapshot mismatch: expected=old-config actual=${migration_config}" >&2
     exit 1
 }
-/src/tests/approval_transition_smoke.sh
-/src/tests/approval_concurrency_smoke.sh
-/src/tests/telegram_broker_smoke.sh
+run_child_smoke approval_transition /src/tests/approval_transition_smoke.sh
+run_child_smoke approval_concurrency /src/tests/approval_concurrency_smoke.sh
+run_child_smoke telegram_broker /src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
-    /src/tests/provider_broker_smoke.sh
-    /src/tests/provider_profile_fallback_smoke.sh
+    run_child_smoke provider_broker /src/tests/provider_broker_smoke.sh
+    run_child_smoke provider_profile_fallback /src/tests/provider_profile_fallback_smoke.sh
     [ -s /data/provider/provider-contract-report.json ] || {
         echo 'startup smoke provider contract report is missing or empty' >&2
         exit 1
