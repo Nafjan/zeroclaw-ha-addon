@@ -778,7 +778,7 @@ next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
 ROUTE_SPEC="cost-floor-route|openrouter|cost-floor-model|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
-    '{"choices":[{"message":{"content":"cost-floor-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0}}' \
+    '{"choices":[{"message":{"content":"cost-floor-ok"}}],"usage":{"prompt_tokens":331,"completion_tokens":16,"total_tokens":347,"cost":0}}' \
     /data/provider/cost-floor.log
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"cost-floor-route","messages":[{"role":"user","content":"hello"}]}' )
