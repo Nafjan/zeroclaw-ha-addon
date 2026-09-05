@@ -730,7 +730,7 @@ ROUTE_SPEC="monthly-retention-route|openrouter|monthly-retention-model|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"must-not-run"}}]}' \
     /data/provider/monthly-retention.log
-TEST_PROVIDER_DAILY_COST_LIMIT_MICROS=1000000 TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS=100000 \
+TEST_PROVIDER_DAILY_COST_LIMIT_MICROS=100000 TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS=100000 \
     PROVIDER_MAX_INPUT_TOKENS=1024 \
     start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"monthly-retention-route","messages":[{"role":"user","content":"hello"}]}')

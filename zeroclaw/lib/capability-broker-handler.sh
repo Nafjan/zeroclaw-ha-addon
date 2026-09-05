@@ -486,12 +486,14 @@ write_approval_outcome() {
     [ ! -L "$outcome_file" ] || return 1
     if [ -e "$outcome_file" ]; then
         jq -e --arg service "$outcome_service" --argjson payload "$outcome_payload" \
-            '.state == "applied" and .service == $service and .payload == $payload' \
+            '.state == "applied" and (.approval_generation | type == "string" and test("^[a-f0-9]{32}$")) and .service == $service and .payload == $payload' \
             "$outcome_file" >/dev/null 2>&1
         return $?
     fi
     outcome_ticket_file="${TICKET_DIR}/${outcome_ticket}.json"
     [ -f "$outcome_ticket_file" ] && [ ! -L "$outcome_ticket_file" ] || return 1
+    outcome_generation=$(jq -er '.approval_generation | select(type == "string" and test("^[a-f0-9]{32}$"))' \
+        "$outcome_ticket_file") || return 1
     outcome_actor=$(jq -er '.approval.actor_user_id | tostring' "$outcome_ticket_file") || return 1
     outcome_chat=$(jq -er '.approval.chat_id | tostring' "$outcome_ticket_file") || return 1
     outcome_message_id=$(jq -er '.tg_message_id | tostring' "$outcome_ticket_file") || return 1
@@ -503,11 +505,12 @@ write_approval_outcome() {
     if ! jq -nc --arg ticket "$outcome_ticket" --arg service "$outcome_service" \
         --arg actor "$outcome_actor" --arg chat "$outcome_chat" \
         --arg message_id "$outcome_message_id" \
+        --arg generation "$outcome_generation" \
         --arg summary "$outcome_summary" --argjson payload "$outcome_payload" \
         --argjson result "$outcome_result" --argjson now "$outcome_now" \
         '{version:1,state:"applied",ticket:$ticket,service:$service,payload:$payload,
           summary:$summary,result:$result,actor_user_id:$actor,chat_id:$chat,
-          message_id:$message_id,applied_at:$now}' > "$outcome_tmp"; then
+          message_id:$message_id,approval_generation:$generation,applied_at:$now}' > "$outcome_tmp"; then
         rm -f "$outcome_tmp"
         return 1
     fi

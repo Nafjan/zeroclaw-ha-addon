@@ -163,6 +163,18 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'approval_generation_matches()' "$approval_format_file"
     [ "$status" -eq 0 ]
+    run grep -F 'GENERATION="${5:-}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'verify_supplied_generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation:$generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation:$generation' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches "\$ticket_file" "\$approval_generation"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_marker_ready' "$run_file"
+    [ "$status" -ne 0 ]
 }
 
 @test "Telegram callbacks stay bound to the delivered approval message" {

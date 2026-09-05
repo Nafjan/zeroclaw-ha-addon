@@ -7,6 +7,7 @@ ACTION="${1:-}"
 SHORT="${2:-}"
 ACTOR="${3:-}"
 CHAT="${4:-}"
+GENERATION="${5:-}"
 MARKER="/data/approved/${SHORT}.marker"
 LOCK="${ZEROCLAW_APPROVAL_LOCK_DIR:-/data/approval-receipts/.locks}/approval-${SHORT}.lock"
 RECEIPT="/data/approval-receipts/${SHORT}.sha256"
@@ -51,7 +52,7 @@ case "$ACTION" in
         [ "${ZEROCLAW_APPROVAL_INTERNAL:-}" = "1" ] || fail "approval verification is internal-only"
         ;;
     *)
-        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat]"
+        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat] [generation]"
         ;;
 esac
 
@@ -75,6 +76,21 @@ current_restore_epoch() {
     printf '%s' "$restore_epoch"
 }
 
+valid_approval_generation() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
+}
+
+verify_supplied_generation() {
+    [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
+    valid_approval_generation "$GENERATION" || fail "approval generation is invalid"
+    ticket_generation=$(jq -er '.approval_generation | select(type == "string")' "$TICKET" 2>/dev/null) || \
+        fail "ticket ${SHORT} approval generation is invalid"
+    valid_approval_generation "$ticket_generation" || fail "ticket ${SHORT} approval generation is invalid"
+    [ "$ticket_generation" = "$GENERATION" ] || \
+        fail "approval generation does not match ticket ${SHORT}"
+}
+
 ensure_ticket_nonce
 
 verify_marker() {
@@ -84,10 +100,14 @@ verify_marker() {
     ticket_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
         fail "ticket ${SHORT} restore epoch is invalid"
     [ "$ticket_epoch" = "$marker_epoch" ] || fail "ticket ${SHORT} belongs to a prior restore epoch"
+    ticket_generation=$(jq -er '.approval_generation | select(type == "string")' "$TICKET" 2>/dev/null) || \
+        fail "ticket ${SHORT} approval generation is invalid"
+    valid_approval_generation "$ticket_generation" || fail "ticket ${SHORT} approval generation is invalid"
     jq -e --arg id "$SHORT" --arg actor "$(jq -r '.approval.actor_user_id // empty' "$TICKET")" \
         --arg chat "$(jq -r '.approval.chat_id // empty' "$TICKET")" \
+        --arg generation "$ticket_generation" \
         --argjson epoch "$marker_epoch" \
-        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
         "$MARKER" >/dev/null 2>&1 || fail "ticket ${SHORT} approval marker is invalid"
     verify_receipt
     approval_audit_found=1
@@ -296,6 +316,7 @@ fi
 
 [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
 acquire_lock
+verify_supplied_generation
 verify_receipt
 current_restore_epoch_value=$(current_restore_epoch)
 ticket_restore_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
@@ -312,8 +333,24 @@ EXPECTED_CHAT=$(jq -r '.approval.chat_id // empty' "$TICKET")
 [ -n "$EXPECTED_CHAT" ] && [ "$CHAT" = "$EXPECTED_CHAT" ] || fail "chat is not authorized for ticket ${SHORT}"
 [ ! -e "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is being applied"
 if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
-    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && jq -e '.state == "approval_pending"' "$MARKER" >/dev/null 2>&1; then
+    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && jq -e --arg id "$SHORT" \
+        --arg actor "$ACTOR" --arg chat "$CHAT" --arg generation "$ticket_generation" \
+        --argjson epoch "$current_restore_epoch_value" \
+        '.ticket == $id and .state == "approval_pending" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
+        "$MARKER" >/dev/null 2>&1; then
         rm -f "$MARKER"
+    elif [ "$ACTION" = "approve" ] && [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && \
+        jq -e --arg id "$SHORT" --arg actor "$ACTOR" --arg chat "$CHAT" \
+        --arg generation "$ticket_generation" --argjson epoch "$current_restore_epoch_value" \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
+        "$MARKER" >/dev/null 2>&1; then
+        # A watcher can restart after the audited approval marker is durable but
+        # before the capability broker claims it. Revalidate the marker, ticket,
+        # receipt, audit, epoch, and expiry under this same transition lock, then
+        # let the caller resume the one-shot apply path.
+        verify_marker
+        echo "ALREADY_APPROVED ${SHORT}"
+        exit 0
     else
         fail "ticket ${SHORT} was already approved"
     fi
@@ -328,8 +365,9 @@ case "$ACTION" in
         mkdir -p /data/approved
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
+            --arg generation "$ticket_generation" \
             --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
-            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
+            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approval_generation:$generation,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"
@@ -340,8 +378,9 @@ case "$ACTION" in
         fi
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
+            --arg generation "$ticket_generation" \
             --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
-            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
+            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approval_generation:$generation,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"
