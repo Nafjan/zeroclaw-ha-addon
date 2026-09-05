@@ -45,9 +45,9 @@ LABEL \
 # Static musl binary — no runtime dependencies needed
 RUN apk add --no-cache \
     ca-certificates=20260611-r0 \
-    curl=8.20.0-r1 \
-    jq=1.8.1-r0 \
-    yq-go=4.53.3-r0 \
+    curl=8.22.0-r0 \
+    jq=1.8.2-r0 \
+    yq-go=4.53.3-r1 \
     findutils=4.10.0-r1 \
     coreutils=9.11-r0 \
     su-exec=0.3-r0 \
