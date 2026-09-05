@@ -205,6 +205,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F '. + {restore_epoch:$restore_epoch,approval_generation:$generation}' "$broker_file"
     [ "$status" -eq 0 ]
+    run grep -F 'APPROVAL_LOCK_MAX_ATTEMPTS=600' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if mkdir "$nonce_path" 2>/dev/null; then' "$transition_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "restore invalidates approval state and rewinds the Telegram cursor" {
