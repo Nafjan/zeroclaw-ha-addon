@@ -306,7 +306,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'exit 42' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'PIPESTATUS[0]' "$run_file"
+    run grep -F 'watcher_child_pid=$!' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'wait "${watcher_child_pid}" || watcher_status=$?' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram polling conflict is latched' "$run_file"
     [ "$status" -eq 0 ]
