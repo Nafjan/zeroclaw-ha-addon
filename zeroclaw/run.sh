@@ -2120,7 +2120,7 @@ while true; do
               if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM" "\$TICKET_GENERATION"; then
                   continue
               fi
-              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" >/dev/null 2>&1; then
+              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
@@ -2155,7 +2155,7 @@ while true; do
                fi
               ;;
           reject)
-              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" >/dev/null 2>&1; then
+              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi

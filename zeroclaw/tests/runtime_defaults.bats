@@ -165,7 +165,11 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'GENERATION="${5:-}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'MESSAGE_ID="${6:-}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
     run grep -F 'verify_supplied_generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'verify_supplied_message_id' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
     [ "$status" -eq 0 ]
     run grep -F 'approval_generation:$generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
     [ "$status" -eq 0 ]
@@ -185,6 +189,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'This approval message is no longer valid.' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '(.message_id | tostring) == \$message' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'message_id:$message_id' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
     [ "$status" -eq 0 ]

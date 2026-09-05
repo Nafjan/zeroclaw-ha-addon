@@ -8,6 +8,7 @@ SHORT="${2:-}"
 ACTOR="${3:-}"
 CHAT="${4:-}"
 GENERATION="${5:-}"
+MESSAGE_ID="${6:-}"
 MARKER="/data/approved/${SHORT}.marker"
 LOCK="${ZEROCLAW_APPROVAL_LOCK_DIR:-/data/approval-receipts/.locks}/approval-${SHORT}.lock"
 RECEIPT="/data/approval-receipts/${SHORT}.sha256"
@@ -52,7 +53,7 @@ case "$ACTION" in
         [ "${ZEROCLAW_APPROVAL_INTERNAL:-}" = "1" ] || fail "approval verification is internal-only"
         ;;
     *)
-        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat] [generation]"
+        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat] [generation] [message_id]"
         ;;
 esac
 
@@ -89,6 +90,14 @@ valid_approval_generation() {
     printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
 }
 
+valid_positive_id() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 verify_supplied_generation() {
     [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
     valid_approval_generation "$GENERATION" || fail "approval generation is invalid"
@@ -97,6 +106,20 @@ verify_supplied_generation() {
     valid_approval_generation "$ticket_generation" || fail "ticket ${SHORT} approval generation is invalid"
     [ "$ticket_generation" = "$GENERATION" ] || \
         fail "approval generation does not match ticket ${SHORT}"
+}
+
+verify_supplied_message_id() {
+    # A callback carries the Telegram message id as well as the approval
+    # generation. When supplied, bind both values to the ticket while the
+    # transition lock is held; this closes the window where cleanup can replace
+    # a ticket between the watcher's two reads.
+    [ -n "$MESSAGE_ID" ] || return 0
+    valid_positive_id "$MESSAGE_ID" || fail "approval message id is invalid"
+    ticket_message_id=$(jq -er '.tg_message_id | select(type == "number" and floor == .) | tostring' \
+        "$TICKET" 2>/dev/null) || fail "ticket ${SHORT} Telegram message id is invalid"
+    valid_positive_id "$ticket_message_id" || fail "ticket ${SHORT} Telegram message id is invalid"
+    [ "$ticket_message_id" = "$MESSAGE_ID" ] || \
+        fail "approval message id does not match ticket ${SHORT}"
 }
 
 ensure_ticket_nonce
@@ -330,6 +353,7 @@ fi
 [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
 acquire_lock
 verify_supplied_generation
+verify_supplied_message_id
 verify_receipt
 current_restore_epoch_value=$(current_restore_epoch)
 ticket_restore_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
