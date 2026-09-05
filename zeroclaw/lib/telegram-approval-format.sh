@@ -32,12 +32,18 @@ legacy_rejection_id() {
         's/^[[:space:]]*[Nn][Oo][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p'
 }
 
+valid_approval_generation() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
+}
+
 approval_generation_matches() {
     [ "$#" -eq 2 ] || return 1
     ticket_file="$1"
     supplied_generation="$2"
     [ -f "$ticket_file" ] && [ ! -L "$ticket_file" ] || return 1
-    printf '%s' "$supplied_generation" | grep -Eq '^[a-f0-9]{32}$' || return 1
+    valid_approval_generation "$supplied_generation" || return 1
     ticket_generation=$(jq -r '.approval_generation // empty' "$ticket_file" 2>/dev/null) || return 1
+    valid_approval_generation "$ticket_generation" || return 1
     [ "$ticket_generation" = "$supplied_generation" ]
 }

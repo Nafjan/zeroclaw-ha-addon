@@ -1665,9 +1665,13 @@ canonical_ticket_summary() {
 
 approval_outcome_text() {
     outcome_file="\$1"
+    expected_generation="\${2:-}"
     [ ! -L "\$outcome_file" ] && [ -f "\$outcome_file" ] || return 1
     jq -e --arg actor "\$APPROVAL_USER" --arg chat "\$APPROVAL_CHAT" \
-        '.state == "applied" and .actor_user_id == \$actor and .chat_id == \$chat and
+        --arg generation "\$expected_generation" \
+        '.state == "applied" and (.approval_generation | type == "string" and test("^[a-f0-9]{32}$")) and
+         (\$generation == "" or .approval_generation == \$generation) and
+         .actor_user_id == \$actor and .chat_id == \$chat and
          (.service | type == "string") and (.payload | type == "object")' \
         "\$outcome_file" >/dev/null 2>&1 || return 1
     outcome_summary=\$(canonical_ticket_summary "\$outcome_file") || return 1
@@ -1677,40 +1681,41 @@ approval_outcome_text() {
 }
 
 replay_approval_message() {
-    short="\$1"; update_id="\$2"; chat_id="\$3"; actor_user_id="\$4"
+    short="\$1"; update_id="\$2"; chat_id="\$3"; actor_user_id="\$4"; approval_generation="\$5"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
-    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    ticket_file="/data/approval-receipts/tickets/\${short}.json"
+    if [ -e "\$ticket_file" ] || [ -L "\$ticket_file" ]; then
+        [ -f "\$ticket_file" ] && [ ! -L "\$ticket_file" ] || return 1
+        approval_generation_matches "\$ticket_file" "\$approval_generation" || return 1
+    fi
+    outcome_reply=\$(approval_outcome_text "\$outcome_file" "\$approval_generation") || return 1
     # The broker writes the outcome before finalizing the ticket. Reconcile
     # that durable result when a callback/text retry observes the interval;
     # this never replays the HA call and is safe if another process already
     # completed the transition.
-    if [ -f "/data/approval-receipts/tickets/\${short}.json" ] && \
-        [ ! -L "/data/approval-receipts/tickets/\${short}.json" ]; then
+    if [ -f "\$ticket_file" ] && [ ! -L "\$ticket_file" ]; then
         ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition complete "\$short" >/dev/null 2>&1 || true
     fi
     send_and_cache "\$update_id" "\$chat_id" "\$actor_user_id" "\$outcome_reply"
 }
 
 replay_approval_outcome() {
-    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"; actor_user_id="\$5"
+    short="\$1"; cb_id="\$2"; chat_id="\$3"; message_id="\$4"; actor_user_id="\$5"; approval_generation="\${6:-}"
     outcome_file="\${APPROVAL_OUTCOME_DIR}/\${short}.json"
-    outcome_reply=\$(approval_outcome_text "\$outcome_file") || return 1
+    ticket_file="/data/approval-receipts/tickets/\${short}.json"
+    if [ -e "\$ticket_file" ] || [ -L "\$ticket_file" ]; then
+        [ -f "\$ticket_file" ] && [ ! -L "\$ticket_file" ] || return 1
+        approval_generation_matches "\$ticket_file" "\$approval_generation" || return 1
+    fi
+    outcome_reply=\$(approval_outcome_text "\$outcome_file" "\$approval_generation") || return 1
     jq -e --arg message "\$message_id" \
         '(.message_id | tostring) == \$message' "\$outcome_file" >/dev/null 2>&1 || return 1
-    if [ -f "/data/approval-receipts/tickets/\${short}.json" ] && \
-        [ ! -L "/data/approval-receipts/tickets/\${short}.json" ]; then
+    if [ -f "\$ticket_file" ] && [ ! -L "\$ticket_file" ]; then
         ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition complete "\$short" >/dev/null 2>&1 || true
     fi
     answer_cb "\$cb_id" "Applied." || return 1
     edit_msg "\$chat_id" "\$message_id" "\$outcome_reply" || return 1
     cache_callback_result "\$UPDATE_ID" "\$chat_id" "\$message_id" "\$actor_user_id" "Applied." "\$outcome_reply"
-}
-
-approval_marker_ready() {
-    short="\$1"
-    marker="/data/approved/\${short}.marker"
-    [ -f "\$marker" ] && [ ! -L "\$marker" ] || return 1
-    jq -e '.state == "approved_audited"' "\$marker" >/dev/null 2>&1
 }
 
 run_agent_turn() {
@@ -1816,19 +1821,18 @@ handle_message() {
             return 0
         fi
         if ! approval_generation_matches "\$TICKET" "\$APPROVAL_GENERATION"; then
-            if ! send_and_cache "\$update_id" "\$chat_id" "That approval code is no longer valid for ticket \${SHORT}. Use the exact YES/NO form shown in the current Telegram approval message."; then return 1; fi
+            if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "That approval code is no longer valid for ticket \${SHORT}. Use the exact YES/NO form shown in the current Telegram approval message."; then return 1; fi
             return 0
         fi
         SUMMARY=\$(canonical_ticket_summary "\$TICKET") || return 1
         if [ -n "\$APPROVE_ID" ]; then
-            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
+            if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id" "\$APPROVAL_GENERATION"; then
                 return 0
             fi
             # A watcher restart can occur after the durable approved_audited
             # marker but before HA execution. Resume that approval instead of
             # treating the redelivery as a duplicate and abandoning it.
-            if approval_marker_ready "\$SHORT" || \
-                ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
+            if ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$from_id" "\$chat_id" "\$APPROVAL_GENERATION" >/dev/null 2>&1; then
                 if OUT=\$(apply_approved_ticket "\$SHORT" "\$from_id" "\$chat_id"); then
                     if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "✅ Approved and applied: \${SUMMARY}
 \${OUT}"
@@ -1838,7 +1842,7 @@ handle_message() {
                     # helper returned non-zero because finalization failed.
                     # Replay that receipt before reporting uncertainty and do
                     # not issue another Home Assistant call.
-                    if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
+                    if replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id" "\$APPROVAL_GENERATION"; then
                         return 0
                     fi
                     if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "⚠️ Approved, but the execution outcome could not be confirmed; the claim remains for recovery. Check Home Assistant history before retrying.
@@ -1848,7 +1852,7 @@ handle_message() {
             else
                 if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Approval for \${SHORT} could not be applied."; then return 1; fi
             fi
-        elif ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$from_id" "\$chat_id" >/dev/null 2>&1; then
+        elif ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$from_id" "\$chat_id" "\$APPROVAL_GENERATION" >/dev/null 2>&1; then
             if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "❌ Rejected: \${SUMMARY}"; then return 1; fi
         else
             if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
@@ -2089,7 +2093,7 @@ while true; do
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
 
         if [ ! -f "\$TICKET" ] || [ -L "\$TICKET" ]; then
-            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
+            if [ "\$VERB" = approve ] && replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM" ""; then
                 continue
             fi
             if ! answer_cb "\$CB_ID" "Ticket expired or already actioned."; then BATCH_OK=false; break; fi
@@ -2102,17 +2106,21 @@ while true; do
             if ! answer_cb "\$CB_ID" "This approval message is no longer valid."; then BATCH_OK=false; break; fi
             continue
         fi
+        TICKET_GENERATION=\$(jq -r '.approval_generation // empty' "\$TICKET" 2>/dev/null || true)
+        if ! valid_approval_generation "\$TICKET_GENERATION"; then
+            if ! answer_cb "\$CB_ID" "This approval ticket is no longer valid."; then BATCH_OK=false; break; fi
+            continue
+        fi
 
         SUMMARY=\$(canonical_ticket_summary "\$TICKET") || { BATCH_OK=false; break; }
         CALLBACK_ANSWER=""
         CALLBACK_EDIT=""
         case "\$VERB" in
           approve)
-              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
+              if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM" "\$TICKET_GENERATION"; then
                   continue
               fi
-              if ! approval_marker_ready "\$SHORT" && \
-                  ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
+              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
@@ -2132,7 +2140,7 @@ while true; do
                   # failed, prefer that truthful receipt over an unconfirmed message;
                   # the replay helper also retries idempotent cleanup
                   # without issuing a second HA service call.
-                  if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"; then
+                  if replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM" "\$TICKET_GENERATION"; then
                       continue
                   fi
                   if ! answer_cb "\$CB_ID" "Outcome unconfirmed; claim retained."; then BATCH_OK=false; break; fi
@@ -2147,7 +2155,7 @@ while true; do
                fi
               ;;
           reject)
-              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" >/dev/null 2>&1; then
+              if ! ZEROCLAW_APPROVAL_INTERNAL=1 /usr/local/bin/zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" >/dev/null 2>&1; then
                   if ! answer_cb "\$CB_ID" "Ticket is already actioned or no longer valid."; then BATCH_OK=false; break; fi
                   continue
               fi
@@ -2570,19 +2578,21 @@ SCRIPT
 # zc-approve — agent-callable bridge for user "YES <short>" replies.
 # Validates the message text matches before writing the marker.
 # This is the deterministic check: the LLM cannot fabricate approvals
-# because zc-approve refuses anything that isn't an exact YES <uuid>.
+# because zc-approve refuses anything that isn't an exact YES <id> <generation>.
 # ==============================================================
 cat > /usr/local/bin/zc-approve << 'SCRIPT'
 #!/bin/sh
 # Compatibility wrapper. Telegram watcher owns the real approval transition.
-# Usage: ZEROCLAW_APPROVAL_INTERNAL=1 zc-approve "YES <id>" <actor> <chat>
+# Usage: ZEROCLAW_APPROVAL_INTERNAL=1 zc-approve "YES <id> <generation>" <actor> <chat>
 [ "${ZEROCLAW_APPROVAL_INTERNAL:-}" = "1" ] || { echo "ERROR: approvals are Telegram-adapter-only" >&2; exit 1; }
 MSG="$1"
 ACTOR="$2"
 CHAT="$3"
-SHORT=$(echo "$MSG" | sed -nE 's/^[Yy][Ee][Ss][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p')
-[ -n "$SHORT" ] || { echo "ERROR: message is not 'YES <id>'"; exit 1; }
-exec /usr/local/bin/zc-approval-transition approve "$SHORT" "$ACTOR" "$CHAT"
+REQUEST=$(printf '%s' "$MSG" | sed -nE 's/^[Yy][Ee][Ss][[:space:]]+([a-f0-9]{8})[[:space:]]+([a-f0-9]{32})[[:space:]]*$/\1 \2/p')
+[ -n "$REQUEST" ] || { echo "ERROR: message is not 'YES <id> <generation>'"; exit 1; }
+SHORT="${REQUEST%% *}"
+GENERATION="${REQUEST#* }"
+exec /usr/local/bin/zc-approval-transition approve "$SHORT" "$ACTOR" "$CHAT" "$GENERATION"
 SCRIPT
 
 cat > /usr/local/bin/zc-reject << 'SCRIPT'
@@ -2592,9 +2602,11 @@ cat > /usr/local/bin/zc-reject << 'SCRIPT'
 MSG="$1"
 ACTOR="$2"
 CHAT="$3"
-SHORT=$(echo "$MSG" | sed -nE 's/^[Nn][Oo][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p')
-[ -z "$SHORT" ] && { echo "ERROR: not 'NO <id>'"; exit 1; }
-exec /usr/local/bin/zc-approval-transition reject "$SHORT" "$ACTOR" "$CHAT"
+REQUEST=$(printf '%s' "$MSG" | sed -nE 's/^[Nn][Oo][[:space:]]+([a-f0-9]{8})[[:space:]]+([a-f0-9]{32})[[:space:]]*$/\1 \2/p')
+[ -n "$REQUEST" ] || { echo "ERROR: message is not 'NO <id> <generation>'"; exit 1; }
+SHORT="${REQUEST%% *}"
+GENERATION="${REQUEST#* }"
+exec /usr/local/bin/zc-approval-transition reject "$SHORT" "$ACTOR" "$CHAT" "$GENERATION"
 SCRIPT
 
 # ==============================================================

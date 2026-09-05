@@ -4,6 +4,9 @@ set -eu
 
 NOW=$(date -u +%s)
 SHORT=feedcafe
+GENERATION=66666666666666666666666666666666
+CLAIM_GENERATION=77777777777777777777777777777777
+APPLY_GENERATION=88888888888888888888888888888888
 mkdir -p /data/pending /data/approved /data/approval-receipts \
     /data/approval-receipts/.locks /data/approval-receipts/tickets \
     /data/approval-receipts/ticket-nonces /data/capability /tmp/zc-approval-race
@@ -14,16 +17,16 @@ fi
 mkdir -p /run/zeroclaw
 printf '%s\n' capability-client-secret > /run/zeroclaw/capability-client-auth
 chmod 0600 /run/zeroclaw/capability-client-auth
-jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$GENERATION" \
+    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${SHORT}.sha256"
 
 pids=""
 for n in $(seq 1 12); do
     (
-        if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 >/dev/null 2>&1; then
-            echo success
+        if result=$(ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 "$GENERATION" 2>/dev/null); then
+            printf '%s\n' "$result"
         else
             echo rejected
         fi
@@ -35,21 +38,21 @@ for pid in $pids; do
     wait "$pid" || true
 done
 
-successes=$(grep -l '^success$' /tmp/zc-approval-race/*.out | wc -l)
-rejections=$(grep -l '^rejected$' /tmp/zc-approval-race/*.out | wc -l)
-[ "$successes" -eq 1 ]
-[ "$rejections" -eq 11 ]
+first_approvals=$(grep -l '^APPROVED feedcafe$' /tmp/zc-approval-race/*.out | wc -l)
+duplicate_approvals=$(grep -l '^ALREADY_APPROVED feedcafe$' /tmp/zc-approval-race/*.out | wc -l)
+[ "$first_approvals" -eq 1 ]
+[ "$duplicate_approvals" -eq 11 ]
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh verify "$SHORT" >/dev/null
 test -f "/data/approved/${SHORT}.marker"
 
 # A second apply claim is one-shot: a concurrent or replayed executor must not
 # be able to run the approved Home Assistant service twice.
 CLAIM_SHORT=c0ffee12
-jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$CLAIM_GENERATION" \
+    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${CLAIM_SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${CLAIM_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${CLAIM_SHORT}.sha256"
-ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$CLAIM_SHORT" 42 42 >/dev/null
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$CLAIM_SHORT" 42 42 "$CLAIM_GENERATION" >/dev/null
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$CLAIM_SHORT" >/dev/null
 if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$CLAIM_SHORT" >/dev/null 2>&1; then
     echo "duplicate apply claim was accepted" >&2
@@ -71,11 +74,11 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
     APPLY_SHORT=a11e0d01
     APPLY_PORT=42638
     HA_PORT=42639
-    jq -nc --argjson exp "$((NOW + 300))" \
-        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:123,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    jq -nc --argjson exp "$((NOW + 300))" --arg generation "$APPLY_GENERATION" \
+        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:123,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
         > "/data/approval-receipts/tickets/${APPLY_SHORT}.json"
     sha256sum "/data/approval-receipts/tickets/${APPLY_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${APPLY_SHORT}.sha256"
-    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 >/dev/null
+    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 "$APPLY_GENERATION" >/dev/null
 
     cat > /tmp/approval-fake-ha <<'FAKE_HA'
 #!/bin/sh

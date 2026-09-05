@@ -70,6 +70,8 @@ printf '%s' "$RESPONSE" | jq -e '.message_id == 123' >/dev/null
 [ -d /data/approval-receipts/ticket-nonces/abcdef12 ]
 test "$(stat -c '%u:%a' /data/approval-receipts/tickets/abcdef12.json)" = "0:600"
 printf '%s' "$(jq -r '.restore_epoch' /data/approval-receipts/tickets/abcdef12.json)" | grep -Eq '^0$'
+APPROVAL_GENERATION=$(jq -r '.approval_generation // empty' /data/approval-receipts/tickets/abcdef12.json)
+printf '%s' "$APPROVAL_GENERATION" | grep -Eq '^[a-f0-9]{32}$'
 SEALED_NOW=$(date -u +%s)
 SEALED_EXP=$(jq -r '.expires_at' /data/approval-receipts/tickets/abcdef12.json)
 [ "$SEALED_EXP" -le "$((SEALED_NOW + 1800))" ]
@@ -83,11 +85,11 @@ SYSTEM_REQUEST=$(jq -nc '{operation:"send_system_notice",auth:"telegram-system-s
 SYSTEM_RESPONSE=$(printf '%s\n' "$SYSTEM_REQUEST" | /bin/busybox nc -w 10 127.0.0.1 42629)
 printf '%s' "$SYSTEM_RESPONSE" | jq -e '.message_id == 123' >/dev/null
 
-if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 >/dev/null 2>&1; then
+if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 "$APPROVAL_GENERATION" >/dev/null 2>&1; then
     echo "Telegram broker smoke accepted the wrong actor" >&2
     exit 1
 fi
-ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 42 42 >/dev/null
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 42 42 "$APPROVAL_GENERATION" >/dev/null
 
 # Telegram can return HTTP 200 with {"ok":false}; that must not seal a
 # canonical ticket as delivered.  A response containing the bot credential
