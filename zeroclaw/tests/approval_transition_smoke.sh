@@ -8,6 +8,11 @@ BAD_GENERATION=22222222222222222222222222222222
 REJECT_GENERATION=33333333333333333333333333333333
 REUSE_OLD_GENERATION=44444444444444444444444444444444
 REUSE_NEW_GENERATION=55555555555555555555555555555555
+CALLBACK_OLD_GENERATION=66666666666666666666666666666666
+CALLBACK_NEW_GENERATION=77777777777777777777777777777777
+CALLBACK_SHORT=baadf00d
+CALLBACK_OLD_MESSAGE_ID=100
+CALLBACK_NEW_MESSAGE_ID=200
 mkdir -p /data/pending /data/approved /data/approval-receipts /data/approval-receipts/.locks /data/approval-receipts/tickets /data/approval-receipts/ticket-nonces
 jq -nc --argjson exp "$((NOW + 300))" --arg generation "$GENERATION" \
     '{uuid:"deadbeef",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
@@ -74,3 +79,34 @@ fi
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve c0de0001 42 42 "$REUSE_NEW_GENERATION" >/dev/null
 jq -e --arg generation "$REUSE_NEW_GENERATION" '.approval_generation == $generation' \
     /data/approved/c0de0001.marker >/dev/null
+
+# A callback watcher can read the delivered message id just before cleanup
+# replaces the ticket, then read the replacement generation. The root
+# transition must bind both callback values to the same current ticket while
+# holding its lock; otherwise that mixed identity could approve the replacement.
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$CALLBACK_OLD_GENERATION" \
+    --argjson message "$CALLBACK_OLD_MESSAGE_ID" \
+    '{uuid:"baadf00d",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:$message,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    > "/data/approval-receipts/tickets/${CALLBACK_SHORT}.json"
+sha256sum "/data/approval-receipts/tickets/${CALLBACK_SHORT}.json" | cut -d' ' -f1 > \
+    "/data/approval-receipts/${CALLBACK_SHORT}.sha256"
+CALLBACK_MESSAGE_FROM_OLD_TICKET=$(jq -r '.tg_message_id' \
+    "/data/approval-receipts/tickets/${CALLBACK_SHORT}.json")
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$CALLBACK_NEW_GENERATION" \
+    --argjson message "$CALLBACK_NEW_MESSAGE_ID" \
+    '{uuid:"baadf00d",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:$message,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    > "/data/approval-receipts/tickets/.${CALLBACK_SHORT}.replacement"
+mv "/data/approval-receipts/tickets/.${CALLBACK_SHORT}.replacement" \
+    "/data/approval-receipts/tickets/${CALLBACK_SHORT}.json"
+sha256sum "/data/approval-receipts/tickets/${CALLBACK_SHORT}.json" | cut -d' ' -f1 > \
+    "/data/approval-receipts/${CALLBACK_SHORT}.sha256"
+if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve \
+    "$CALLBACK_SHORT" 42 42 "$CALLBACK_NEW_GENERATION" "$CALLBACK_MESSAGE_FROM_OLD_TICKET" >/dev/null 2>&1; then
+    echo "mixed callback message and replacement generation was accepted" >&2
+    exit 1
+fi
+[ ! -e "/data/approved/${CALLBACK_SHORT}.marker" ]
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve \
+    "$CALLBACK_SHORT" 42 42 "$CALLBACK_NEW_GENERATION" "$CALLBACK_NEW_MESSAGE_ID" >/dev/null
+jq -e --arg generation "$CALLBACK_NEW_GENERATION" \
+    '.approval_generation == $generation' "/data/approved/${CALLBACK_SHORT}.marker" >/dev/null
