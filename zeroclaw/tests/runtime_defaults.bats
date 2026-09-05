@@ -707,7 +707,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     for marker in \
         'state-cleanup.sh /data' \
         '/usr/local/bin/tg-callback-watcher >>/data/logs/telegram-broker.log 2>&1 &' \
-        'TODAY=$(curl -s "${GW}/api/cost"'; do
+        'TODAY_COST_MICROS=$(root_provider_cost_micros'; do
         run grep -F -B 6 "$marker" "$run_file"
         [ "$status" -eq 0 ]
         [[ "$output" == *"scrub_unrelated_child_credentials"* ]]
