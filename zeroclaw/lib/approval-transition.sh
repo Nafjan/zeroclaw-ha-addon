@@ -159,9 +159,14 @@ fi
 
 acquire_lock() {
     LOCK_ATTEMPTS=0
+    APPROVAL_LOCK_MAX_ATTEMPTS=600
     while ! mkdir "$LOCK" 2>/dev/null; do
         LOCK_ATTEMPTS=$((LOCK_ATTEMPTS + 1))
-        [ "$LOCK_ATTEMPTS" -lt 100 ] || fail "ticket ${SHORT} is already being transitioned"
+        # QEMU-backed acceptance and a cold HA start can make the durable
+        # approval transaction exceed the old ten-second ceiling. Keep the
+        # wait bounded, but allow valid concurrent callbacks to observe the
+        # committed idempotent result instead of being rejected mid-flight.
+        [ "$LOCK_ATTEMPTS" -lt "$APPROVAL_LOCK_MAX_ATTEMPTS" ] || fail "ticket ${SHORT} is already being transitioned"
         sleep 0.1
     done
     printf '%s\n' "$$" > "$LOCK/owner" || {
