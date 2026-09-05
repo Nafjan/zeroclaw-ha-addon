@@ -169,10 +169,11 @@ start_proxy() {
     profile_client_requests="${TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR:-120}"
     profile_input_tokens="${PROVIDER_MAX_INPUT_TOKENS:-16384}"
     profile_daily_cost_limit="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}"
+    profile_monthly_cost_limit="${TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS:-1000000000}"
     profile_total_timeout="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
     unset TEST_PROVIDER_MAX_REQUESTS_PER_HOUR TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR \
         PROVIDER_MAX_INPUT_TOKENS TEST_PROVIDER_DAILY_COST_LIMIT_MICROS \
-        TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS
+        TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
         PROVIDER_HEALTH_CLIENT_AUTH_TOKEN=provider-health-secret \
@@ -181,12 +182,13 @@ start_proxy() {
         PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="$profile_input_tokens" \
         PROVIDER_MAX_REQUESTS_PER_HOUR="$profile_max_requests" \
         PROVIDER_CLIENT_REQUESTS_PER_HOUR="$profile_client_requests" \
-        PROVIDER_DAILY_COST_LIMIT_MICROS="$profile_daily_cost_limit" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
+        PROVIDER_DAILY_COST_LIMIT_MICROS="$profile_daily_cost_limit" PROVIDER_MONTHLY_COST_LIMIT_MICROS="$profile_monthly_cost_limit" \
          PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 \
          PROVIDER_LEDGER_FILE="$LEDGER" \
          PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
          PROVIDER_CLIENT_RATE_FILE=/data/provider/profile-client-rate.json \
          PROVIDER_CLIENT_RATE_LOCK=/data/provider/.profile-client-rate.lock \
+         PROVIDER_COST_DEGRADED_FILE=/data/provider/cost-degraded \
          PROVIDER_RESERVATION_TTL_SECONDS=180 \
          PROVIDER_TOTAL_TIMEOUT_SECONDS="$profile_total_timeout" \
          /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 \
@@ -228,6 +230,7 @@ request_provider_health() {
 
 cleanup() {
     stop_listeners
+    rm -f /data/provider/cost-degraded
 }
 trap 'status=$?; trap - EXIT; if [ "$status" -ne 0 ]; then
     printf "provider profile fallback smoke failed (status %s, check %s)\n" "$status" "${CURRENT_CHECK-unknown}" >&2
@@ -457,6 +460,28 @@ grep -F '"model":"openrouter/free"' /data/provider/free-router-success.log >/dev
 ! grep -F '"tools"' /data/provider/free-router-success.log >/dev/null
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
+# Root-accounted cost degradation must be enforced by the provider broker, not
+# merely announced by the watchdog. Paid routes are skipped and an explicit
+# no-tools free route is still eligible.
+CURRENT_CHECK=cost-degraded-paid-route
+rm -f "$LEDGER" "$LOCK" /data/provider/cost-degraded /data/provider/cost-degraded-success.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="default-route|openrouter|paid-model|paid
+default-route|openrouter|openrouter/free|free"
+touch /data/provider/cost-degraded
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"cost-degraded-free-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
+    /data/provider/cost-degraded-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
+stop_listeners
+rm -f /data/provider/cost-degraded
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'cost-degraded-free-ok' >/dev/null
+grep -F '"model":"openrouter/free"' /data/provider/cost-degraded-success.log >/dev/null
+! grep -F '"model":"paid-model"' /data/provider/cost-degraded-success.log >/dev/null
+
 CURRENT_CHECK=tool-capable-free-block
 rm -f "$LEDGER" "$LOCK" /data/provider/free-blocked.log
 next_case_ports
@@ -674,12 +699,44 @@ ROUTE_SPEC="usage-floor-route|openrouter|usage-floor-model|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"usage-floor-ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}' \
     /data/provider/usage-floor.log
-start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 response=$(request_proxy '{"model":"usage-floor-route","messages":[{"role":"user","content":"hello"}]}')
 stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'usage-floor-ok' >/dev/null
 jq -e '[.records[] | select(.upstream_model == "usage-floor-model" and .usage_floor == true and .settled_input_tokens > 0 and .settled_tokens == 16)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# Monthly cost accounting must retain current-month settlements even when their
+# day window is older than the short token/log retention horizon.
+CURRENT_CHECK=monthly-ledger-retention
+rm -f "$LEDGER" "$LOCK" /data/provider/monthly-retention.log
+next_case_ports
+retention_now=$(date -u +%s)
+retention_day=$((retention_now / 86400 - 8))
+retention_hour=$((retention_now / 3600 - 192))
+retention_month=$(date -u +%Y-%m)
+jq -nc --argjson now "$retention_now" --argjson day "$retention_day" \
+    --argjson hour "$retention_hour" --arg month "$retention_month" \
+    '{schema:1,records:[{id:"month-retention-seed",created_at:($now - 691200),
+      expires_at:($now - 691000),hour_window:$hour,day_window:$day,month_window:$month,
+      route_id:"seed",profile_id:"openrouter",upstream_model:"seed-model",
+      reserved_tokens:16,reserved_input_tokens:328,settled_tokens:16,
+      settled_input_tokens:328,reserved_cost_micros:100000,settled_cost_micros:100000,
+      state:"settled",settlement:"seeded_month_retention",updated_at:($now - 691200)}],
+      profile_quarantine:[]}' > "$LEDGER"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="monthly-retention-route|openrouter|monthly-retention-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}]}' \
+    /data/provider/monthly-retention.log
+TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS=100000 PROVIDER_MAX_INPUT_TOKENS=1024 \
+    start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"monthly-retention-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/monthly-retention.log ]
+jq -e '[.records[] | select(.id == "month-retention-seed" and .month_window == (now | strftime("%Y-%m")))] | length == 1' \
     "$LEDGER" >/dev/null
 
 # A provider that exceeds the admitted completion/input reservation is a hard
@@ -693,7 +750,7 @@ ROUTE_SPEC="overrun-route|openrouter|overrun-model|paid"
 start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"overrun"}}],"usage":{"prompt_tokens":1,"completion_tokens":32,"total_tokens":33}}' \
     /data/provider/overrun.log
-start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 overrun_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"hello"}]}' )
 stop_listeners
 printf '%s' "$overrun_response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
@@ -705,7 +762,7 @@ jq -e '.profile_quarantine | any(.[]; .profile_id == "openrouter" and .reason ==
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
 ROUTE_SPEC="overrun-route|openrouter|overrun-second-model|paid"
-start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 overrun_second_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"retry"}]}' )
 stop_listeners
 printf '%s' "$overrun_second_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null

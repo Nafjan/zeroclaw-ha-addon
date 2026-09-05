@@ -544,6 +544,18 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'migrated_reserved_max' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'month_window:$month' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F '(.month_window // "") == $month' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'COST_DEGRADED_FILE="${PROVIDER_COST_DEGRADED_FILE:-/run/zeroclaw/cost-degraded}"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'cost watchdog requires a free fallback' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'root_provider_cost_micros()' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'root-owned provider ledger' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'must use an explicit :free model slug' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
@@ -850,6 +862,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'never removes an unexpired ticket' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
     [ "$status" -eq 0 ]
     run grep -F 'CLAIM_GRACE_SECONDS=3600' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'TICKET_NONCE_DIR="${RECEIPT_DIR}/ticket-nonces"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'rmdir "$nonce_path"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
     [ "$status" -eq 0 ]
 }
 

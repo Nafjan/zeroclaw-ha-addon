@@ -11,6 +11,7 @@ setup() {
     mkdir -p "$DATA_DIR/approval-receipts/tickets" \
         "$DATA_DIR/approval-receipts/.claims" \
         "$DATA_DIR/approval-receipts/.locks" \
+        "$DATA_DIR/approval-receipts/ticket-nonces" \
         "$DATA_DIR/approved" "$DATA_DIR/pending" "$DATA_DIR/capability" \
         "$DATA_DIR/provider" "$DATA_DIR/audit/planner"
     NOW="$(date -u +%s)"
@@ -34,6 +35,7 @@ teardown() {
     printf '{"expires_at":%s}\n' "$((NOW - 1))" \
         > "$DATA_DIR/approval-receipts/tickets/deadbeef.json"
     mkdir "$DATA_DIR/approval-receipts/.claims/deadbeef.claim"
+    mkdir "$DATA_DIR/approval-receipts/ticket-nonces/deadbeef"
     touch -t 200001010000 "$DATA_DIR/approval-receipts/.claims/deadbeef.claim"
     printf 'receipt\n' > "$DATA_DIR/approval-receipts/deadbeef.sha256"
     printf '{}\n' > "$DATA_DIR/approved/deadbeef.marker"
@@ -44,6 +46,7 @@ teardown() {
     [ ! -e "$DATA_DIR/approval-receipts/tickets/deadbeef.json" ]
     [ ! -e "$DATA_DIR/approval-receipts/.claims/deadbeef.claim" ]
     [ ! -e "$DATA_DIR/approval-receipts/deadbeef.sha256" ]
+    [ ! -e "$DATA_DIR/approval-receipts/ticket-nonces/deadbeef" ]
     [ ! -e "$DATA_DIR/approved/deadbeef.marker" ]
     # Pending drafts are planner-owned. Root cleanup must not delete through
     # that attacker-controlled path; the unprivileged planner cleanup handles
@@ -56,12 +59,14 @@ teardown() {
         > "$DATA_DIR/approval-receipts/tickets/c0ffee12.json"
     printf 'receipt\n' > "$DATA_DIR/approval-receipts/c0ffee12.sha256"
     printf '{}\n' > "$DATA_DIR/approved/c0ffee12.marker"
+    mkdir "$DATA_DIR/approval-receipts/ticket-nonces/c0ffee12"
 
     run_cleanup
     [ "$status" -eq 0 ]
     [ -f "$DATA_DIR/approval-receipts/tickets/c0ffee12.json" ]
     [ -f "$DATA_DIR/approval-receipts/c0ffee12.sha256" ]
     [ -f "$DATA_DIR/approved/c0ffee12.marker" ]
+    [ -d "$DATA_DIR/approval-receipts/ticket-nonces/c0ffee12" ]
 }
 
 @test "old orphaned approval artifacts and locks are reclaimed" {
@@ -69,11 +74,13 @@ teardown() {
     printf '{}\n' > "$DATA_DIR/approved/feedcafe.marker"
     mkdir "$DATA_DIR/approval-receipts/.claims/badc0de1.claim"
     mkdir "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock"
+    mkdir "$DATA_DIR/approval-receipts/ticket-nonces/feedcafe"
     touch -t 200001010000 \
         "$DATA_DIR/approval-receipts/feedcafe.sha256" \
         "$DATA_DIR/approved/feedcafe.marker" \
         "$DATA_DIR/approval-receipts/.claims/badc0de1.claim" \
-        "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock"
+        "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock" \
+        "$DATA_DIR/approval-receipts/ticket-nonces/feedcafe"
 
     run_cleanup
     [ "$status" -eq 0 ]
@@ -81,6 +88,7 @@ teardown() {
     [ ! -e "$DATA_DIR/approved/feedcafe.marker" ]
     [ ! -e "$DATA_DIR/approval-receipts/.claims/badc0de1.claim" ]
     [ ! -e "$DATA_DIR/approval-receipts/.locks/approval-badc0de1.lock" ]
+    [ ! -e "$DATA_DIR/approval-receipts/ticket-nonces/feedcafe" ]
 }
 
 @test "expired correction receipts are removed" {

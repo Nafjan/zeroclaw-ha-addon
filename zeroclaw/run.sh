@@ -3527,27 +3527,65 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     ) &
 fi
 
+# The planner-facing cost endpoint is intentionally not authoritative.  The
+# root watchdog reads the root-owned provider ledger that the broker reconciles
+# under its own lock, so a planner cannot suppress or inflate the degradation
+# decision through the loopback API.
+root_provider_cost_micros() {
+    [ -f /data/provider/quota.json ] && [ ! -L /data/provider/quota.json ] || return 1
+    root_cost_now=$(date -u +%s)
+    root_cost_day=$((root_cost_now / 86400))
+    jq -er --argjson day "$root_cost_day" '
+        select(
+            .schema == 1 and
+            (.records | type == "array") and
+            all(.records[];
+                (.day_window | type == "number" and floor == . and . >= 0) and
+                ((.settled_cost_micros // .reserved_cost_micros // 0) |
+                    type == "number" and floor == . and . >= 0)
+            )
+        ) |
+        [ .records[] | select(.day_window == $day) |
+            (.settled_cost_micros // .reserved_cost_micros // 0) ] |
+        add // 0 |
+        select(type == "number" and floor == . and . >= 0) |
+        tostring
+    ' /data/provider/quota.json
+}
+
 # ==============================================================
-# Cost watchdog: every 5 min, set degrade flag if >80% of daily limit
+# Cost watchdog: every 5 min, root-accounted spend disables paid routes >80%
 # ==============================================================
 (
     scrub_unrelated_child_credentials
     while true; do
         sleep 300
-        TODAY=$(curl -s "${GW}/api/cost" 2>/dev/null | jq -r '.today_cost_usd // 0')
-        LIMIT="${DAILY_COST_LIMIT}"
-        OVER=$(awk -v t="$TODAY" -v l="$LIMIT" 'BEGIN{print (t > 0.8*l) ? 1 : 0}')
-        if [ "$OVER" = "1" ] && [ ! -f /run/zeroclaw/cost-degraded ]; then
-            touch /run/zeroclaw/cost-degraded
-            if [ "${TELEGRAM_ENABLED}" = "true" ]; then
-                /usr/local/bin/tg-system-notify \
-                    "⚠️ Cost watchdog: today's spend \$${TODAY} > 80% of \$${LIMIT}. Routing to cheap model only." >/dev/null 2>&1 || true
+        TODAY_COST_MICROS=$(root_provider_cost_micros 2>/dev/null || true)
+        case "$TODAY_COST_MICROS" in
+            ''|*[!0-9]*)
+                bashio::log.warning "Cost watchdog could not read the root provider ledger; retaining the current route-degradation state"
+                continue
+                ;;
+        esac
+        WARNING_COST_MICROS=$((DAILY_COST_LIMIT_MICROS * 80 / 100))
+        if [ "$TODAY_COST_MICROS" -gt "$WARNING_COST_MICROS" ]; then
+            cost_degraded_new=0
+            if [ ! -e /run/zeroclaw/cost-degraded ] && [ ! -L /run/zeroclaw/cost-degraded ]; then
+                cost_degraded_tmp=$(mktemp /run/zeroclaw/.cost-degraded.XXXXXX 2>/dev/null || true)
+                if [ -n "$cost_degraded_tmp" ]; then
+                    chmod 0600 "$cost_degraded_tmp"
+                    mv -f "$cost_degraded_tmp" /run/zeroclaw/cost-degraded
+                    cost_degraded_new=1
+                fi
             fi
-        fi
-        # Reset flag at midnight UTC (fresh day)
-        H=$(date -u +%H); M=$(date -u +%M)
-        if [ "$H" = "00" ] && [ "$M" -lt 5 ]; then
-            rm -f /run/zeroclaw/cost-degraded 2>/dev/null
+            if [ "$cost_degraded_new" -eq 1 ] && [ "${TELEGRAM_ENABLED}" = "true" ]; then
+                TODAY=$(awk -v micros="$TODAY_COST_MICROS" 'BEGIN { printf "%.6f", micros / 1000000 }')
+                LIMIT="${DAILY_COST_LIMIT}"
+                /usr/local/bin/tg-system-notify \
+                    "⚠️ Cost watchdog: today's root-accounted spend \$${TODAY} > 80% of \$${LIMIT}. Paid routes are disabled; an explicit free fallback may serve read-only turns." >/dev/null 2>&1 || true
+            fi
+        elif [ -e /run/zeroclaw/cost-degraded ] || [ -L /run/zeroclaw/cost-degraded ]; then
+            rm -f -- /run/zeroclaw/cost-degraded 2>/dev/null || true
         fi
     done
 ) &

@@ -17,6 +17,7 @@ REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
 CALLBACK_CACHE_DIR="${DATA_DIR}/capability/telegram-callbacks"
 ACTION_ADMISSION_DIR="${DATA_DIR}/capability/action-admissions"
 APPROVAL_OUTCOME_DIR="${RECEIPT_DIR}/outcomes"
+TICKET_NONCE_DIR="${RECEIPT_DIR}/ticket-nonces"
 OUTCOME_FILE="${DATA_DIR}/capability/last-outcome.json"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
@@ -107,6 +108,10 @@ remove_expired_ticket() {
     if [ -d "$claim" ]; then
         rmdir "$claim" 2>/dev/null || true
     fi
+    nonce_path="${TICKET_NONCE_DIR}/${short}"
+    if [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ]; then
+        rmdir "$nonce_path" 2>/dev/null || true
+    fi
     rmdir "$lock" 2>/dev/null || true
 }
 
@@ -127,6 +132,24 @@ if [ -d "$TICKET_DIR" ]; then
         esac
         [ "$expires" -lt "$NOW" ] || continue
         remove_expired_ticket "$ticket" "$short"
+    done
+fi
+
+# Nonces are empty replay barriers, not durable approval evidence.  Remove the
+# nonce with its expired ticket and reclaim only old orphan directories after
+# the same bounded recovery grace.  rmdir is intentional: unexpected contents
+# make cleanup fail closed instead of deleting evidence or attacker data.
+if [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ]; then
+    for nonce_path in "$TICKET_NONCE_DIR"/*; do
+        [ -d "$nonce_path" ] || [ -L "$nonce_path" ] || continue
+        [ -L "$nonce_path" ] && continue
+        short=$(basename "$nonce_path")
+        valid_short "$short" || continue
+        if [ -e "${TICKET_DIR}/${short}.json" ] || [ -L "${TICKET_DIR}/${short}.json" ]; then
+            continue
+        fi
+        old_enough "$nonce_path" "$CLAIM_GRACE_SECONDS" || continue
+        rmdir "$nonce_path" 2>/dev/null || true
     done
 fi
 
