@@ -27,6 +27,12 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
     run grep -F 'http://127.0.0.1:42620/health' "$health_file"
     [ "$status" -eq 0 ]
+    run grep -F 'pid_is_live /run/zeroclaw/telegram-watcher.pid tg-callback-watcher' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-heartbeat' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram_now - telegram_heartbeat' "$health_file"
+    [ "$status" -eq 0 ]
     run grep -F 'provider-health-auth' "$health_file"
     [ "$status" -eq 0 ]
     run grep -F '/usr/local/bin/ha-health-read' "$health_file"
@@ -686,14 +692,25 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
     for marker in \
         'state-cleanup.sh /data' \
-        '/usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do' \
+        '/usr/local/bin/tg-callback-watcher >>/data/logs/telegram-broker.log 2>&1 &' \
         'TODAY=$(curl -s "${GW}/api/cost"'; do
-        run grep -F -B 3 "$marker" "$run_file"
+        run grep -F -B 6 "$marker" "$run_file"
         [ "$status" -eq 0 ]
         [[ "$output" == *"scrub_unrelated_child_credentials"* ]]
     done
 
     run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram readiness follows successful polling and records watcher identity" {
+    run grep -F 'if ! RESP=\$(telegram_curl getUpdates' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "jq -e '.ok == true'" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'mark_telegram_ready' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'watcher_child_pid=$!' "$run_file"
     [ "$status" -eq 0 ]
 }
 

@@ -7,6 +7,13 @@
 set -eu
 export LC_ALL=C
 
+# Capture the Supervisor credential as a private shell variable and remove its
+# exported form before any request parsing or error serialization can invoke a
+# child process.  Error paths must have the same custody boundary as success.
+unset HA_TOKEN_VALUE
+HA_TOKEN_VALUE="${HA_TOKEN:-}"
+unset HA_TOKEN
+
 if [ -r /opt/zeroclaw/lib/bounded-read.sh ]; then
     # shellcheck disable=SC1091
     . /opt/zeroclaw/lib/bounded-read.sh
@@ -70,29 +77,12 @@ esac
 [ -n "$request" ] || json_error "empty broker request"
 [ "${#request}" -le 32768 ] || json_error "broker request too large"
 [ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
-provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
-    json_error "broker client authentication failed" "broker_auth_failed"
-auth_class=planner
-if [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
-    auth_class=planner
-elif [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$HEALTH_CLIENT_AUTH_TOKEN" ]; then
-    auth_class=health
-else
-    json_error "broker client authentication failed" "broker_auth_failed"
-fi
-request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
-    json_error "broker request is not valid JSON" "invalid_request"
-[ -n "${HA_TOKEN:-}" ] || json_error "broker is not configured"
 
-# curl supports @file header sources. Keep the credential in a root-owned
-# temporary file so it is not present in the curl child process argv.
-HA_AUTH_FILE=$(mktemp)
-chmod 0600 "$HA_AUTH_FILE"
-printf 'Authorization: Bearer %s\n' "$HA_TOKEN" > "$HA_AUTH_FILE"
-# The credential is now sealed in the root-only curl config. Do not let jq,
-# curl, policy, or audit children inherit the Supervisor token through the
-# broker process environment.
-unset HA_TOKEN
+# Seal the Supervisor credential in a root-only curl header before invoking any
+# external parser.  The broker must not expose HA_TOKEN to jq (or any future
+# child added before request dispatch), even while it is authenticating the
+# planner's local request.
+HA_AUTH_FILE=""
 quota_lock_held=0
 quota_tmp=""
 read_quota_lock_held=0
@@ -101,7 +91,11 @@ planner_audit_lock_held=0
 planner_audit_tmp=""
 HA_RESPONSE_FILE=""
 cleanup() {
-    rm -f "$HA_AUTH_FILE" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"
+    for cleanup_file in "${HA_AUTH_FILE:-}" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"; do
+        if [ -n "$cleanup_file" ]; then
+            rm -f -- "$cleanup_file" 2>/dev/null || true
+        fi
+    done
     if [ "$quota_lock_held" -eq 1 ]; then
         rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
@@ -116,6 +110,28 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+[ -n "$HA_TOKEN_VALUE" ] || json_error "broker is not configured"
+HA_AUTH_FILE=$(mktemp) || json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+chmod 0600 "$HA_AUTH_FILE" || json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+printf 'Authorization: Bearer %s\n' "$HA_TOKEN_VALUE" > "$HA_AUTH_FILE" || \
+    json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+# From this point onward, jq, curl, policy, and audit children cannot inherit
+# the Supervisor token through the broker environment.
+unset HA_TOKEN_VALUE
+
+provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+auth_class=planner
+if [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
+    auth_class=planner
+elif [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$HEALTH_CLIENT_AUTH_TOKEN" ]; then
+    auth_class=health
+else
+    json_error "broker client authentication failed" "broker_auth_failed"
+fi
+request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
+    json_error "broker request is not valid JSON" "invalid_request"
 
 if ! operation=$(printf '%s' "$request" | jq -er '.operation | select(type == "string")'); then
     json_error "operation must be a string"

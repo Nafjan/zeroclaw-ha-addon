@@ -1184,7 +1184,8 @@ chmod 0600 "${TELEGRAM_TOKEN_FILE}"
 TELEGRAM_ENABLED_FILE="/run/zeroclaw/telegram-enabled"
 TELEGRAM_WATCHER_PID_FILE="/run/zeroclaw/telegram-watcher.pid"
 TELEGRAM_READY_FILE="/data/capability/telegram-ready"
-rm -f "${TELEGRAM_ENABLED_FILE}" "${TELEGRAM_WATCHER_PID_FILE}" "${TELEGRAM_READY_FILE}"
+TELEGRAM_HEARTBEAT_FILE="/data/capability/telegram-heartbeat"
+rm -f "${TELEGRAM_ENABLED_FILE}" "${TELEGRAM_WATCHER_PID_FILE}" "${TELEGRAM_READY_FILE}" "${TELEGRAM_HEARTBEAT_FILE}"
 if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     printf '%s\n' true > "${TELEGRAM_ENABLED_FILE}"
     chown root:root "${TELEGRAM_ENABLED_FILE}"
@@ -1336,8 +1337,10 @@ BOT_ID_FILE="/data/capability/telegram-bot-id"
 BOT_ID=""
 BOT_ID_READY=false
 READY_FILE="${TELEGRAM_READY_FILE}"
+HEARTBEAT_FILE="${TELEGRAM_HEARTBEAT_FILE}"
 rm -f -- "\$READY_FILE"
-trap 'rm -f -- "\$READY_FILE"' EXIT
+rm -f -- "\$HEARTBEAT_FILE"
+trap 'rm -f -- "\$READY_FILE" "\$HEARTBEAT_FILE"' EXIT
 [ ! -L "\$BOT_ID_FILE" ] || exit 1
 if [ -e "\$BOT_ID_FILE" ] && [ ! -f "\$BOT_ID_FILE" ]; then
     exit 1
@@ -1501,17 +1504,40 @@ load_bot_identity() {
         return 1
     }
     sync
-    ready_tmp="\${READY_FILE}.tmp.\$\$"
-    printf '%s\n' "\$new_bot_id" > "\$ready_tmp" || return 1
-    chown root:root "\$ready_tmp"
-    chmod 0600 "\$ready_tmp"
-    mv -f "\$ready_tmp" "\$READY_FILE" || {
-        rm -f "\$ready_tmp"
-        return 1
-    }
-    sync
     BOT_ID="\$new_bot_id"
     BOT_ID_READY=true
+}
+
+mark_telegram_ready() {
+    # Identity alone is not readiness: the watcher must have completed cursor
+    # bootstrap and received a structurally valid polling response before HA
+    # may treat Telegram approvals as available.
+    [ "\$BOT_ID_READY" = true ] || return 1
+    [ ! -L "\$READY_FILE" ] || return 1
+    ready_tmp="\${READY_FILE}.tmp.\$\$"
+    if ! printf '%s\n' "\$BOT_ID" > "\$ready_tmp"; then
+        rm -f "\$ready_tmp"
+        return 1
+    fi
+    if ! chown root:root "\$ready_tmp" || ! chmod 0600 "\$ready_tmp"; then
+        rm -f "\$ready_tmp"
+        return 1
+    fi
+    if ! mv -f "\$ready_tmp" "\$READY_FILE"; then
+        rm -f "\$ready_tmp"
+        return 1
+    fi
+    heartbeat_tmp="\${HEARTBEAT_FILE}.tmp.\$\$"
+    if ! printf '%s\n' "\$(date -u +%s)" > "\$heartbeat_tmp"; then
+        rm -f "\$heartbeat_tmp" "\$READY_FILE"
+        return 1
+    fi
+    if ! chown root:root "\$heartbeat_tmp" || ! chmod 0600 "\$heartbeat_tmp" ||
+        ! mv -f "\$heartbeat_tmp" "\$HEARTBEAT_FILE"; then
+        rm -f "\$heartbeat_tmp" "\$READY_FILE"
+        return 1
+    fi
+    sync
 }
 
 answer_cb() {
@@ -1935,23 +1961,33 @@ while true; do
     esac
     # Long-poll up to 25s for both message + callback_query updates.
     # We are the SOLE poller for this bot — ZC's telegram channel is disabled.
-    RESP=\$(telegram_curl getUpdates -s --max-time 30 --get \\
+    if ! RESP=\$(telegram_curl getUpdates -s --max-time 30 --get \\
         --data-urlencode "offset=\$OFFSET" \\
         --data-urlencode "timeout=25" \\
         --data-urlencode 'allowed_updates=["message","callback_query"]' \\
-        2>/dev/null)
+        2>/dev/null); then
+        printf '%s\n' 'Telegram polling transport failed; refusing to acknowledge queued updates' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
     if telegram_polling_conflict "\$RESP"; then
         printf '%s\n' 'Telegram polling conflict; refusing to run alongside another poller.' >>/data/logs/telegram-broker.log
         exit 42
     fi
-    OK=\$(printf '%s' "\$RESP" | jq -r '.ok // false' 2>/dev/null)
-    if [ "\$OK" != "true" ]; then
+    if ! printf '%s' "\$RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+        printf '%s\n' 'Telegram response was not a successful boolean result; refusing to acknowledge queued updates' >>/data/logs/telegram-broker.log
         sleep 5
         continue
     fi
 
     if ! printf '%s' "\$RESP" | jq -e '.result | type == "array"' >/dev/null 2>&1; then
         printf '%s\n' 'Telegram response had no valid result array; refusing to acknowledge it' >>/data/logs/telegram-broker.log
+        sleep 5
+        continue
+    fi
+
+    if ! mark_telegram_ready; then
+        printf '%s\n' 'Telegram polling is valid but readiness could not be persisted; refusing to acknowledge the batch' >>/data/logs/telegram-broker.log
         sleep 5
         continue
     fi
@@ -3461,10 +3497,22 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
     (
         scrub_unrelated_child_credentials
         while true; do
-            /usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do
-                bashio::log.info "[tg-cb] $line"
-            done
-            watcher_status=${PIPESTATUS[0]}
+            # Track the actual polling process, not this restart supervisor.
+            # Health must go not-ready when the watcher dies or is replaced.
+            /usr/local/bin/tg-callback-watcher >>/data/logs/telegram-broker.log 2>&1 &
+            watcher_child_pid=$!
+            if ! printf '%s\n' "${watcher_child_pid}" > "${TELEGRAM_WATCHER_PID_FILE}" ||
+                ! chown root:root "${TELEGRAM_WATCHER_PID_FILE}" ||
+                ! chmod 0600 "${TELEGRAM_WATCHER_PID_FILE}"; then
+                kill "${watcher_child_pid}" 2>/dev/null || true
+                wait "${watcher_child_pid}" 2>/dev/null || true
+                rm -f -- "${TELEGRAM_WATCHER_PID_FILE}"
+                bashio::log.fatal "could not publish Telegram watcher liveness"
+                exit 1
+            fi
+            watcher_status=0
+            wait "${watcher_child_pid}" || watcher_status=$?
+            rm -f -- "${TELEGRAM_WATCHER_PID_FILE}"
             if [ "$watcher_status" -eq 42 ]; then
                 printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) Telegram polling conflict" > "${TELEGRAM_CONFLICT_FILE}"
                 printf '%s\n' "${TELEGRAM_TOKEN_HASH}" > "${TELEGRAM_CONFLICT_TOKEN_FILE}"
@@ -3477,10 +3525,6 @@ if [ "${TELEGRAM_ENABLED}" = "true" ]; then
             sleep 5
         done
     ) &
-    TELEGRAM_WATCHER_PID=$!
-    printf '%s\n' "${TELEGRAM_WATCHER_PID}" > "${TELEGRAM_WATCHER_PID_FILE}"
-    chown root:root "${TELEGRAM_WATCHER_PID_FILE}"
-    chmod 0600 "${TELEGRAM_WATCHER_PID_FILE}"
 fi
 
 # ==============================================================
