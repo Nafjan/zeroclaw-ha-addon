@@ -13,6 +13,9 @@ smoke_failure_diagnostics() {
     if [ -n "${run_status-}" ]; then
         echo "startup smoke inner run status: ${run_status}" >&2
     fi
+    if [ -n "${smoke_phase-}" ]; then
+        echo "startup smoke phase: ${smoke_phase}" >&2
+    fi
     for diagnostic_file in \
         /tmp/zeroclaw-startup.log \
         /tmp/startup-plain.log \
@@ -366,6 +369,7 @@ export SUPERVISOR_TOKEN=supervisor-secret
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-120}"
 
 set +e
+smoke_phase=starting-entrypoint
 PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/bashio-test.sh >/tmp/zeroclaw-startup.log 2>&1
 run_status=$?
 set -e
@@ -384,10 +388,12 @@ if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
     exit 0
 fi
 
+smoke_phase=post-entrypoint
 [ "$run_status" -eq 124 ] || {
     echo "startup smoke expected timeout 124, actual=${run_status}" >&2
     exit 1
 }
+smoke_phase=credential-boundaries
 [ "$(cat /tmp/zeroclaw-helper-token-scan)" = CLEAN ] || {
     echo "startup smoke helper token scan did not pass" >&2
     exit 1
@@ -399,11 +405,13 @@ if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
     cat /data/logs/capability-broker.log >&2 || true
     exit 1
 fi
+smoke_phase=planner-identity
 planner_uid=$(cat /tmp/zeroclaw-planner-uid)
 [ "$planner_uid" -ne 0 ] || {
     echo "startup smoke planner unexpectedly ran as root: uid=${planner_uid}" >&2
     exit 1
 }
+smoke_phase=filesystem-boundaries
 assert_stat /data 0:1770
 assert_stat /data/approval-receipts/.locks 0:700
 assert_stat /data/approval-receipts/.claims 0:700
@@ -416,11 +424,13 @@ assert_stat /data/capability/telegram-replies 0:700
 assert_stat /run/zeroclaw 0:710
 assert_stat /data/capability/telegram-offset 0:600
 assert_stat /run/zeroclaw/telegram-users 0:600
+smoke_phase=installed-helpers
 assert_executable /usr/local/bin/ha-broker-entrypoint
 assert_executable /usr/local/bin/tg-broker-entrypoint
 assert_executable /usr/local/bin/telegram-render
 assert_executable /usr/local/bin/telegram-legacy-action
 if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
+    smoke_phase=real-daemon-config
     ansi_escape=$(printf '\033')
     sed -E "s/${ansi_escape}\\[[0-9;]*m//g" /tmp/zeroclaw-startup.log > /tmp/startup-plain.log
     assert_contains 'Config loaded path=/data/config.toml' /tmp/startup-plain.log
@@ -437,6 +447,7 @@ if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
         exit 1
     }
 fi
+smoke_phase=rendered-config
 assert_contains 'host = "127.0.0.1"' /data/config.toml
 assert_contains 'require_pairing = true' /data/config.toml
 assert_contains 'workspace_only = true' /data/config.toml
@@ -455,6 +466,7 @@ if [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
     assert_contains 'Authorization: Bearer provider-secret' /data/provider/roundtrip-upstream-request
     ! grep -F 'provider-secret' /tmp/zeroclaw-real-provider-response >/dev/null 2>&1
 fi
+smoke_phase=state-migration
 assert_file_value /data/.state-schema 1
 assert_file_value /data/.state-version schema-tombstone-1
 assert_stat /data/.state-version 0:600
@@ -463,10 +475,14 @@ migration_config=$(find /data/migrations -type f -name config.toml -print -quit 
     echo "startup smoke migration snapshot mismatch: expected=old-config actual=${migration_config}" >&2
     exit 1
 }
+smoke_phase=approval-transition
 run_child_smoke approval_transition /src/tests/approval_transition_smoke.sh
+smoke_phase=approval-concurrency
 run_child_smoke approval_concurrency /src/tests/approval_concurrency_smoke.sh
+smoke_phase=telegram-broker
 run_child_smoke telegram_broker /src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
+    smoke_phase=provider-broker
     run_child_smoke provider_broker /src/tests/provider_broker_smoke.sh
     run_child_smoke provider_profile_fallback /src/tests/provider_profile_fallback_smoke.sh
     [ -s /data/provider/provider-contract-report.json ] || {
