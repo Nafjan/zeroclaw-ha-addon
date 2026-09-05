@@ -161,26 +161,29 @@ configuration:
   provider_daily_token_budget:
     name: "Provider daily token budget"
     description: >-
-      Root broker reservation budget for requested output tokens. Requests
-      without max_tokens reserve the configured provider maximum.
+      Root broker reservation budget for input plus output tokens. Requests
+      without max_tokens reserve the configured provider maximum; the default
+      leaves room for a full-context primary reservation and one fallback.
   provider_openrouter_max_requests_per_hour:
     name: "OpenRouter requests per hour"
     description: "Independent root admission limit for the OpenRouter profile."
   provider_openrouter_daily_token_budget:
     name: "OpenRouter daily token budget"
-    description: "Independent root output-token budget for the OpenRouter profile."
+    description: >-
+      Independent root input-plus-output reservation budget for OpenRouter;
+      the default permits a failed full-context primary and one free fallback.
   provider_nvidia_max_requests_per_hour:
     name: "NVIDIA requests per hour"
     description: "Independent root admission limit for the NVIDIA profile."
   provider_nvidia_daily_token_budget:
     name: "NVIDIA daily token budget"
-    description: "Independent root output-token budget for the NVIDIA profile."
+    description: "Independent root input-plus-output reservation budget for the NVIDIA profile."
   provider_ark_max_requests_per_hour:
     name: "Ark requests per hour"
     description: "Independent root admission limit for the BytePlus ModelArk profile."
   provider_ark_daily_token_budget:
     name: "Ark daily token budget"
-    description: "Independent root output-token budget for the BytePlus ModelArk profile."
+    description: "Independent root input-plus-output reservation budget for the BytePlus ModelArk profile."
 
   # ─────── Agent runtime budgets ───────
   max_tool_iterations:
@@ -201,6 +204,12 @@ configuration:
     description: >-
       Cap on the model's response length. Tool-call-heavy turns need more —
       2048 is a good default; raise if you see truncated tool calls.
+  provider_max_input_tokens:
+    name: "Provider max input tokens"
+    description: >-
+      Hard root-broker ceiling for the complete JSON request, including the
+      system prompt and tools. The broker reserves this budget conservatively
+      and rejects oversized requests before contacting any provider.
   response_cache_ttl_minutes:
     name: "Response cache TTL (minutes)"
     description: "Identical user messages within this window return the cached reply."
@@ -253,12 +262,6 @@ configuration:
     description: "Migration-only; no ZeroClaw observer schedule is started."
 
   # ─────── Phase switches ───────
-  enable_creation_skill:
-    name: "Enable creation skill (v3.1)"
-    description: >-
-      Lets the agent draft scenes, automations, and routines through the
-      approval flow. Off by default — turn on once you've used v3.0 long
-      enough to trust the policy gate.
   enable_learning_loops:
     name: "Enable learning loops (v3.2)"
     description: >-

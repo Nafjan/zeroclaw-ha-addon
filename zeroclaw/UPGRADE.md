@@ -83,10 +83,18 @@ credential or credit failure, timeout, 429, or 5xx blocks that profile for the
 request and moves to the next eligible profile; the same credential is not
 retried after a provider-wide failure. A 404 may try another model on the same
 profile. The old `/data/provider/quota.json` counters are migrated into the
-durable reservation ledger, reservations settle to actual reported completion
-usage when valid, and crash/expiry/invalid usage is charged at the reserved
-maximum. Planner configuration cannot raise any of these limits at request
-time.
+durable reservation ledger. Provider usage is telemetry only: successful
+responses are charged at least the admitted input/output reservation, while
+crash/expiry/invalid usage is charged at the reserved maximum. Planner
+configuration cannot raise any of these limits at request time.
+
+The default daily/monthly cost ceilings are `$10`/`$40`. These are intentionally
+above the broker's conservative maximum reservation for one full-context
+request (65,536 input tokens plus 2,048 output tokens at the configured safety
+ceiling), while remaining configurable and enforced before any provider
+contact. Existing installations retain their saved Supervisor options during
+upgrade; review the saved cost limits when upgrading a canary or an older
+installation.
 
 The supplied free-tier routes (`nvidia/nemotron-3.5-lightning:free` followed by
 `openrouter/free`) are enabled by default. The broker permits them only for a
@@ -125,9 +133,9 @@ that the ticket is sealed and that a second approval cannot replay it.
 Do not enable NVIDIA or Ark fallback in the same canary as writes. First run
 the provider profile contract smoke with the exact configured model IDs and
 observe one forced OpenRouter 402/timeout path, then enable the relevant
-profile switch and repeat the canary. Keep free-tier fallback disabled unless
-you have intentionally configured a current model slug and accepted the
-no-tools-only behavior.
+  profile switch and repeat the canary. The shipped free-tier routes are
+  intentionally enabled by default; keep their explicit model slugs current
+  and accept that they are limited to no-tools-only turns.
 
 Do not enable creation, scheduling, observer reports, or broad HTTP access in
 the same change. Creation is explicitly blocked in this release because the

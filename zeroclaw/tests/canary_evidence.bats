@@ -32,7 +32,8 @@ setup() {
           },
           classification:{credit_exhausted_402:true,network_timeout:true,transient_5xx:true,credential_401_blocks_same_profile_fallback:true},
           safety:{free_route_no_tools_only:true,tool_capable_never_free:true},
-          accounting:{reservation_recorded:true,success_settlement_recorded:true,failure_settlement_recorded:true,budget_denied_before_upstream:true,ledger_schema:1,ledger_sha256:"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+          accounting:{reservation_recorded:true,success_settlement_recorded:true,failure_settlement_recorded:true,budget_denied_before_upstream:true,encoded_credential_reflection_blocked:true,ledger_schema:1,ledger_sha256:"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          limits:{max_input_tokens:65536,max_output_tokens:2048,profile_daily_token_budget:200000,global_daily_token_budget:200000,global_requests_per_hour:120,client_requests_per_hour:120,daily_cost_limit_micros:10000000,monthly_cost_limit_micros:40000000,max_cost_micros_per_1k_tokens:100000}
         }' > "$PROVIDER_REPORT"
     provider_report_sha=$(sha256sum "$PROVIDER_REPORT" | awk '{print $1}')
     jq -n \
@@ -120,4 +121,9 @@ teardown() {
     evidence_sha=$(sha256sum "$EVIDENCE" | awk '{print $1}')
     run bash "$VERIFIER" "$EVIDENCE" "$DIGEST" "$TAG" "$RUN_ID" "$COMMIT" "$evidence_sha" "$DESCRIPTOR_SHA256" "$provider_report_sha"
     [ "$status" -ne 0 ]
+}
+
+@test "promotion staleness gate includes deleted files" {
+    run grep -F -- '--diff-filter=ACDMRTUXB' "$BATS_TEST_DIRNAME/../../.github/workflows/promote-existing.yml"
+    [ "$status" -eq 0 ]
 }

@@ -116,6 +116,11 @@ jobs:
           set -euo pipefail
           printf '%s' "$SOURCE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
           printf '%s' "$CANDIDATE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$CANDIDATE_COMMIT" = "$GITHUB_SHA" || {
+            echo "candidate must be the exact current protected-master revision" >&2
+            exit 1
+          }
           printf '%s' "$CANDIDATE_TAG" | grep -Eq '^candidate-[0-9]+-[0-9a-f]{12}$'
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
           case "$BUILDER_MODE" in cross|trusted-aa) ;; *) echo "unsupported builder_mode=$BUILDER_MODE" >&2; exit 1 ;; esac
@@ -176,15 +181,27 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --predicate-type https://spdx.dev/Document/v2.3
-          if existing_digest="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+          target_error_file="$(mktemp)"
+          if existing_digest="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}' 2>"$target_error_file")"; then
             test "$existing_digest" = "$SOURCE_DIGEST" || {
+              cat "$target_error_file" >&2 || true
+              rm -f "$target_error_file"
               echo "refusing to retarget existing canary tag ${TARGET_TAG}" >&2
               exit 1
             }
+            rm -f "$target_error_file"
           else
-            docker buildx imagetools create \
-              --tag "${IMAGE}:${TARGET_TAG}" \
-              "${IMAGE}@${SOURCE_DIGEST}"
+            if grep -Eiq '(^|[^[:alnum:]])manifest unknown([^[:alnum:]]|$)|(^|[^[:alnum:]])name unknown([^[:alnum:]]|$)|(^|[^[:alnum:]])no such manifest([^[:alnum:]]|$)' "$target_error_file"; then
+              rm -f "$target_error_file"
+              docker buildx imagetools create \
+                --tag "${IMAGE}:${TARGET_TAG}" \
+                "${IMAGE}@${SOURCE_DIGEST}"
+            else
+              cat "$target_error_file" >&2 || true
+              rm -f "$target_error_file"
+              echo "could not safely determine whether immutable canary tag exists" >&2
+              exit 1
+            fi
           fi
           resolved="$(docker buildx imagetools inspect "${IMAGE}:${TARGET_TAG}" --format '{{.Manifest.Digest}}')"
           test "${resolved}" = "${SOURCE_DIGEST}"

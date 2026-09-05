@@ -10,6 +10,7 @@ ARG ZEROCLAW_SOURCE_DATE_EPOCH
 ARG ZEROCLAW_LLVM_RNG_SEED
 ARG REQUIRE_VERIFIED_ARTIFACT
 ARG ZEROCLAW_STATE_SCHEMA
+ARG ALLOW_TEST_PROVIDER_OVERRIDE=false
 
 # Every value that influences release identity or provenance is mandatory.  An
 # out-of-band build must fail before it can produce an installable image.
@@ -22,10 +23,12 @@ RUN set -eu; \
     printf '%s' "${ZEROCLAW_SOURCE_DATE_EPOCH}" | grep -Eq '^[1-9][0-9]+$'; \
     printf '%s' "${ZEROCLAW_LLVM_RNG_SEED}" | grep -Eq '^[0-9]+$'; \
     printf '%s' "${ZEROCLAW_STATE_SCHEMA}" | grep -Eq '^[1-9][0-9]{0,2}$'; \
-    case "${REQUIRE_VERIFIED_ARTIFACT}" in true|false) : ;; *) exit 1 ;; esac
+    case "${REQUIRE_VERIFIED_ARTIFACT}" in true|false) : ;; *) exit 1 ;; esac; \
+    case "${ALLOW_TEST_PROVIDER_OVERRIDE}" in true|false) : ;; *) exit 1 ;; esac
 
 ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"
 ENV ZEROCLAW_STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA}"
+ENV ZEROCLAW_ADDON_SOURCE_COMMIT="${ADDON_SOURCE_COMMIT}"
 
 LABEL \
     io.hass.version="${BUILD_VERSION}" \
@@ -63,6 +66,17 @@ RUN echo "${ZEROCLAW_SHA256}  /usr/local/bin/zeroclaw" | sha256sum -c - \
     && case "${REQUIRE_VERIFIED_ARTIFACT}" in true) test "$(jq -r '.artifact_status' /usr/share/zeroclaw/binary-manifest.json)" = "verified" ;; false) : ;; esac \
     && chmod +x /usr/local/bin/zeroclaw
 
+# The deterministic provider endpoint used by the arm64 acceptance test is a
+# test-image capability, never a runtime option. Release builds leave this
+# marker absent, so ambient SMOKE_* or ZEROCLAW_* variables cannot redirect a
+# production broker to an arbitrary endpoint.
+RUN if [ "${ALLOW_TEST_PROVIDER_OVERRIDE}" = "true" ]; then \
+        printf '%s\n' 'zeroclaw-ci-test-hooks-v1' > /usr/share/zeroclaw/test-hooks-enabled; \
+        chmod 0444 /usr/share/zeroclaw/test-hooks-enabled; \
+    else \
+        rm -f /usr/share/zeroclaw/test-hooks-enabled; \
+    fi
+
 # Policy library — pure-shell verdict decider, covered by bats tests
 COPY lib/ /opt/zeroclaw/lib/
 RUN chmod +x /opt/zeroclaw/lib/*.sh
@@ -73,7 +87,6 @@ RUN chmod +x /run.sh
 RUN mkdir -p /data/memory /data/logs /data/tools
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD test ! -e /data/capability/telegram-conflict && \
-        curl -fsS --max-time 3 http://127.0.0.1:42617/health >/dev/null || exit 1
+    CMD /opt/zeroclaw/lib/healthcheck.sh
 
 CMD ["/run.sh"]

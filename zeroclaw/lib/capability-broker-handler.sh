@@ -7,6 +7,13 @@
 set -eu
 export LC_ALL=C
 
+# Capture the Supervisor credential as a private shell variable and remove its
+# exported form before any request parsing or error serialization can invoke a
+# child process.  Error paths must have the same custody boundary as success.
+unset HA_TOKEN_VALUE
+HA_TOKEN_VALUE="${HA_TOKEN:-}"
+unset HA_TOKEN
+
 if [ -r /opt/zeroclaw/lib/bounded-read.sh ]; then
     # shellcheck disable=SC1091
     . /opt/zeroclaw/lib/bounded-read.sh
@@ -24,6 +31,7 @@ ACTION_ADMISSION_DIR="${CAPABILITY_ACTION_ADMISSION_DIR:-/data/capability/action
 OUTCOME_FILE="${ZEROCLAW_OUTCOME_FILE:-/data/capability/last-outcome.json}"
 APPROVAL_OUTCOME_DIR="${ZEROCLAW_APPROVAL_OUTCOME_DIR:-/data/approval-receipts/outcomes}"
 CLIENT_AUTH_TOKEN="${CAPABILITY_CLIENT_AUTH_TOKEN:-}"
+HEALTH_CLIENT_AUTH_TOKEN="${CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN:-}"
 # Read operations are intentionally bounded independently from write quotas.
 # The fixed response ceiling is applied before parsing so a hostile or noisy HA
 # endpoint cannot force an unbounded shell variable allocation.
@@ -69,19 +77,12 @@ esac
 [ -n "$request" ] || json_error "empty broker request"
 [ "${#request}" -le 32768 ] || json_error "broker request too large"
 [ -n "$CLIENT_AUTH_TOKEN" ] || json_error "broker client authentication is unavailable" "broker_auth_unavailable"
-provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
-    json_error "broker client authentication failed" "broker_auth_failed"
-[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
-    json_error "broker client authentication failed" "broker_auth_failed"
-request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
-    json_error "broker request is not valid JSON" "invalid_request"
-[ -n "${HA_TOKEN:-}" ] || json_error "broker is not configured"
 
-# curl supports @file header sources. Keep the credential in a root-owned
-# temporary file so it is not present in the curl child process argv.
-HA_AUTH_FILE=$(mktemp)
-chmod 0600 "$HA_AUTH_FILE"
-printf 'Authorization: Bearer %s\n' "$HA_TOKEN" > "$HA_AUTH_FILE"
+# Seal the Supervisor credential in a root-only curl header before invoking any
+# external parser.  The broker must not expose HA_TOKEN to jq (or any future
+# child added before request dispatch), even while it is authenticating the
+# planner's local request.
+HA_AUTH_FILE=""
 quota_lock_held=0
 quota_tmp=""
 read_quota_lock_held=0
@@ -90,15 +91,57 @@ planner_audit_lock_held=0
 planner_audit_tmp=""
 HA_RESPONSE_FILE=""
 cleanup() {
-    rm -f "$HA_AUTH_FILE" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"
-    [ "$quota_lock_held" -eq 1 ] && rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
-    [ "$read_quota_lock_held" -eq 1 ] && rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
-    [ "$planner_audit_lock_held" -eq 1 ] && rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+    for cleanup_file in "${HA_AUTH_FILE:-}" "${quota_tmp:-}" "${read_quota_tmp:-}" "${planner_audit_tmp:-}" "${HA_RESPONSE_FILE:-}"; do
+        if [ -n "$cleanup_file" ]; then
+            rm -f -- "$cleanup_file" 2>/dev/null || true
+        fi
+    done
+    if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+    fi
+    if [ "$read_quota_lock_held" -eq 1 ]; then
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+    fi
+    if [ "$planner_audit_lock_held" -eq 1 ]; then
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
+[ -n "$HA_TOKEN_VALUE" ] || json_error "broker is not configured"
+HA_AUTH_FILE=$(mktemp) || json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+chmod 0600 "$HA_AUTH_FILE" || json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+printf 'Authorization: Bearer %s\n' "$HA_TOKEN_VALUE" > "$HA_AUTH_FILE" || \
+    json_error "broker credential staging is unavailable" "broker_auth_unavailable"
+# From this point onward, jq, curl, policy, and audit children cannot inherit
+# the Supervisor token through the broker environment.
+unset HA_TOKEN_VALUE
+
+provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
+    json_error "broker client authentication failed" "broker_auth_failed"
+auth_class=planner
+if [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
+    auth_class=planner
+elif [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$HEALTH_CLIENT_AUTH_TOKEN" ]; then
+    auth_class=health
+else
+    json_error "broker client authentication failed" "broker_auth_failed"
+fi
+request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
+    json_error "broker request is not valid JSON" "invalid_request"
+
 if ! operation=$(printf '%s' "$request" | jq -er '.operation | select(type == "string")'); then
     json_error "operation must be a string"
+fi
+if [ "$auth_class" = health ]; then
+    [ "$operation" = health_read_sensors ] ||
+        json_error "health broker credential is restricted" "broker_auth_failed"
+else
+    [ "$operation" != health_read_sensors ] ||
+        json_error "health broker credential is restricted" "broker_auth_failed"
 fi
 
 valid_entity_value() {
@@ -151,6 +194,7 @@ bounded_ha_curl() {
 read_quota_release() {
     if [ "$read_quota_lock_held" -eq 1 ]; then
         read_quota_lock_held=0
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
     fi
 }
@@ -162,6 +206,15 @@ read_quota_acquire() {
         [ "$attempts" -le 20 ] || json_error "capability read quota is busy" "read_quota_busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$READ_QUOTA_LOCK/owner" || {
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability read quota lock is unavailable" "read_quota_unavailable"
+    }
+    chmod 0600 "$READ_QUOTA_LOCK/owner" || {
+        rm -f -- "$READ_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$READ_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability read quota lock is unavailable" "read_quota_unavailable"
+    }
     read_quota_lock_held=1
 }
 
@@ -219,6 +272,7 @@ reserve_read_quota() {
 planner_audit_quota_release() {
     if [ "$planner_audit_lock_held" -eq 1 ]; then
         planner_audit_lock_held=0
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
     fi
 }
@@ -236,6 +290,15 @@ planner_audit_quota_acquire() {
         [ "$attempts" -le 20 ] || json_error "planner audit quota is busy" "audit_quota_busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$PLANNER_AUDIT_QUOTA_LOCK/owner" || {
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+        json_error "planner audit quota lock is unavailable" "audit_quota_unavailable"
+    }
+    chmod 0600 "$PLANNER_AUDIT_QUOTA_LOCK/owner" || {
+        rm -f -- "$PLANNER_AUDIT_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$PLANNER_AUDIT_QUOTA_LOCK" 2>/dev/null || true
+        json_error "planner audit quota lock is unavailable" "audit_quota_unavailable"
+    }
     planner_audit_lock_held=1
 }
 
@@ -423,25 +486,31 @@ write_approval_outcome() {
     [ ! -L "$outcome_file" ] || return 1
     if [ -e "$outcome_file" ]; then
         jq -e --arg service "$outcome_service" --argjson payload "$outcome_payload" \
-            '.state == "applied" and .service == $service and .payload == $payload' \
+            '.state == "applied" and (.approval_generation | type == "string" and test("^[a-f0-9]{32}$")) and .service == $service and .payload == $payload' \
             "$outcome_file" >/dev/null 2>&1
         return $?
     fi
     outcome_ticket_file="${TICKET_DIR}/${outcome_ticket}.json"
     [ -f "$outcome_ticket_file" ] && [ ! -L "$outcome_ticket_file" ] || return 1
+    outcome_generation=$(jq -er '.approval_generation | select(type == "string" and test("^[a-f0-9]{32}$"))' \
+        "$outcome_ticket_file") || return 1
     outcome_actor=$(jq -er '.approval.actor_user_id | tostring' "$outcome_ticket_file") || return 1
     outcome_chat=$(jq -er '.approval.chat_id | tostring' "$outcome_ticket_file") || return 1
+    outcome_message_id=$(jq -er '.tg_message_id | tostring' "$outcome_ticket_file") || return 1
+    printf '%s' "$outcome_message_id" | grep -Eq '^[0-9]+$' || return 1
     outcome_summary=$(printf '%s' "$outcome_payload" | jq -rS -c --arg service "$outcome_service" \
         '($service + " | " + (tojson))') || return 1
     outcome_now=$(date -u +%s)
     outcome_tmp=$(mktemp "${APPROVAL_OUTCOME_DIR}/.${outcome_ticket}.XXXXXX") || return 1
     if ! jq -nc --arg ticket "$outcome_ticket" --arg service "$outcome_service" \
         --arg actor "$outcome_actor" --arg chat "$outcome_chat" \
+        --arg message_id "$outcome_message_id" \
+        --arg generation "$outcome_generation" \
         --arg summary "$outcome_summary" --argjson payload "$outcome_payload" \
         --argjson result "$outcome_result" --argjson now "$outcome_now" \
         '{version:1,state:"applied",ticket:$ticket,service:$service,payload:$payload,
           summary:$summary,result:$result,actor_user_id:$actor,chat_id:$chat,
-          applied_at:$now}' > "$outcome_tmp"; then
+          message_id:$message_id,approval_generation:$generation,applied_at:$now}' > "$outcome_tmp"; then
         rm -f "$outcome_tmp"
         return 1
     fi
@@ -546,6 +615,15 @@ acquire_action_quota_lock() {
         [ "$attempts" -le 20 ] || json_error "capability action quota is busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$ACTION_QUOTA_LOCK/owner" || {
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability action quota lock is unavailable"
+    }
+    chmod 0600 "$ACTION_QUOTA_LOCK/owner" || {
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        json_error "capability action quota lock is unavailable"
+    }
     quota_lock_held=1
 }
 
@@ -566,6 +644,7 @@ reserve_action_quota() {
     fi
     if ! printf '%s' "$quota" | jq -e 'type == "object"' >/dev/null 2>&1; then
         quota_lock_held=0
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
         json_error "capability action quota state is invalid"
     fi
@@ -574,12 +653,14 @@ reserve_action_quota() {
     case "$requests_hour" in
         ''|*[!0-9]*)
             quota_lock_held=0
+            rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
             rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
             json_error "capability action quota state is invalid"
             ;;
     esac
     [ "$requests_hour" -lt "$ACTION_LIMIT" ] || {
         quota_lock_held=0
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
         json_error "capability hourly action budget exceeded"
     }
@@ -592,6 +673,7 @@ reserve_action_quota() {
     mv -f "$quota_tmp" "$ACTION_QUOTA_FILE"
     quota_tmp=""
     quota_lock_held=0
+    rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
     rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
 }
 
@@ -778,6 +860,12 @@ case "$operation" in
     read_sensors)
         run_template '{% for s in states.sensor %}{% if "soil" in s.entity_id or "moisture" in s.entity_id or "temperature" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\n{% endif %}{% endfor %}'
         ;;
+    health_read_sensors)
+        # The Supervisor health process uses a root-only client credential and
+        # is intentionally exempt from the planner's read quota.  Keep the
+        # response bounded by the same broker template path.
+        run_template '{% for s in states.sensor %}{% if "soil" in s.entity_id or "moisture" in s.entity_id or "temperature" in s.entity_id %}{{ s.name }}: {{ s.state }}{{ s.attributes.unit_of_measurement }}\n{% endif %}{% endfor %}'
+        ;;
     get_state)
         entity=$(printf '%s' "$request" | jq -er '.entity_id | select(type == "string")' 2>/dev/null) || json_error "entity_id must be a string"
         valid_entity_value "\"${entity}\"" || json_error "entity_id is invalid"
@@ -791,6 +879,12 @@ case "$operation" in
         run_logbook "$entity"
         ;;
     get_error_log)
+        # Home Assistant's /error_log endpoint is an opaque plaintext body and
+        # may contain paths, usernames, tokens, request data, and exception
+        # payloads. It is not safe to forward that body across the broker to
+        # the untrusted planner/provider. Perform the bounded health check but
+        # return only a fixed, non-sensitive result; detailed diagnostics stay
+        # in the Home Assistant UI/logs.
         if ! bounded_ha_curl "Home Assistant error log request failed" "ha_response_failed" \
             -fsS --fail-with-body --connect-timeout 5 --max-time 30 \
             --header "@${HA_AUTH_FILE}" "${HA_URL}/error_log"; then
@@ -798,10 +892,9 @@ case "$operation" in
                 json_error "Home Assistant error log response is too large" "ha_response_too_large"
             json_error "Home Assistant error log request failed" "ha_response_failed"
         fi
-        result=$(cat "$HA_RESPONSE_FILE") || json_error "Home Assistant error log response could not be read" "ha_response_failed"
         rm -f "$HA_RESPONSE_FILE"
         HA_RESPONSE_FILE=""
-        json_text "$result"
+        json_value '{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
         ;;
     pending_count)
         run_pending_count

@@ -17,6 +17,30 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "healthcheck covers gateway, broker liveness, and Home Assistant reachability" {
+    health_file="$BATS_TEST_DIRNAME/../lib/healthcheck.sh"
+    run grep -F 'pid_is_live /run/zeroclaw/provider-broker.pid' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'pid_is_live /run/zeroclaw/capability-broker.pid' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42617/health' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42620/health' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'pid_is_live /run/zeroclaw/telegram-watcher.pid tg-callback-watcher' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-heartbeat' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram_now - telegram_heartbeat' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider-health-auth' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F '/usr/local/bin/ha-health-read' "$health_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'CMD /opt/zeroclaw/lib/healthcheck.sh' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
 @test "Dockerfile has no permissive release metadata defaults" {
     for argument in BUILD_VERSION BUILD_ARCH ZEROCLAW_SHA256 ZEROCLAW_SOURCE_COMMIT ADDON_SOURCE_COMMIT ZEROCLAW_SOURCE_DATE_EPOCH ZEROCLAW_LLVM_RNG_SEED REQUIRE_VERIFIED_ARTIFACT ZEROCLAW_STATE_SCHEMA; do
         run grep -E "^ARG ${argument}=" "$BATS_TEST_DIRNAME/../Dockerfile"
@@ -25,6 +49,56 @@ run_file="$BATS_TEST_DIRNAME/../run.sh"
     run grep -F 'printf '\''%s'\'' "${ZEROCLAW_STATE_SCHEMA}" | grep -Eq '\''^[1-9][0-9]{0,2}$'\''' "$BATS_TEST_DIRNAME/../Dockerfile"
     [ "$status" -eq 0 ]
     run grep -F 'COPY state-schema /usr/share/zeroclaw/state-schema' "$BATS_TEST_DIRNAME/../Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
+@test "provider test endpoint is image-gated and release builds do not enable it" {
+    dockerfile="$BATS_TEST_DIRNAME/../Dockerfile"
+    run grep -F 'ARG ALLOW_TEST_PROVIDER_OVERRIDE=false' "$dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'zeroclaw-ci-test-hooks-v1' "$dockerfile"
+    [ "$status" -eq 0 ]
+    run grep -F 'test-hooks-enabled' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'http://127.0.0.1:42633/v1/chat/completions' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--build-arg ALLOW_TEST_PROVIDER_OVERRIDE=true' "$BATS_TEST_DIRNAME/../../.github/workflows/test.yml"
+    [ "$status" -eq 0 ]
+    run grep -F 'ALLOW_TEST_PROVIDER_OVERRIDE=true' "$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
+    [ "$status" -ne 0 ]
+}
+
+@test "Telegram credentials are constrained before curl config serialization" {
+    telegram_file="$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    legacy_file="$BATS_TEST_DIRNAME/../lib/telegram-legacy-action.sh"
+    run grep -F 'telegram_bot_token contains unsupported characters' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Telegram broker credential has an invalid format' "$telegram_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TOKEN_BASE64_URLSAFE_UNPADDED' "$telegram_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TOKEN_PERCENT_MIXED_LOWER' "$telegram_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'case "\$TOKEN" in' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'token_percent_mixed_lower' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if [ "$(id -u)" -eq 0 ]; then' "$legacy_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'LEGACY_ACTION_GATE="/usr/local/bin/ha-action-guarded"' "$legacy_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram capability validates ticket ids before opening planner paths" {
+    capability_file="$BATS_TEST_DIRNAME/../lib/telegram-capability.sh"
+    run "$capability_file" send_approval ../options 42 "unexpected path"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"approval ticket id is invalid"* ]]
+    run grep -F 'ticket_id="$1"' "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F "grep -Eq '^[a-f0-9]{8}$'" "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ticket_json:(input|tojson)' "$capability_file"
     [ "$status" -eq 0 ]
 }
 agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
@@ -47,7 +121,11 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "runtime enforces the Supervisor version floor before scrubbing the token" {
     run grep -F 'http://supervisor/supervisor/info' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Authorization: Bearer ${SUPERVISOR_TOKEN}' "$run_file"
+    # The token must be written to a short-lived 0600 header file rather than
+    # appearing in the curl argv or command text.
+    run grep -F 'Authorization: Bearer %s' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--header "@${supervisor_auth_file}"' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'below the supported floor 2026.04.0' "$run_file"
     [ "$status" -eq 0 ]
@@ -66,6 +144,99 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
 @test "generated Telegram watcher preserves jq actor bindings" {
     run grep -F '.actor_user_id == \$actor and .chat_id == \$chat' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "text approvals are bound to a root-sealed generation" {
+    approval_format_file="$BATS_TEST_DIRNAME/../lib/telegram-approval-format.sh"
+    run grep -F '. /opt/zeroclaw/lib/telegram-approval-format.sh' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'Reply YES %s %s or NO %s %s' "$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'This approval reply is missing its one-time code' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'rmdir "$nonce_path"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches()' "$approval_format_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'GENERATION="${5:-}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'MESSAGE_ID="${6:-}"' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'verify_supplied_generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'verify_supplied_message_id' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation:$generation' "$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation:$generation' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_generation_matches "\$ticket_file" "\$approval_generation"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'approval_marker_ready' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
+@test "Telegram callbacks stay bound to the delivered approval message" {
+    run grep -F 'STORED_MSG_ID=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.tg_message_id // empty' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'This approval message is no longer valid.' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '(.message_id | tostring) == \$message' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition approve "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition reject "\$SHORT" "\$FROM" "\$CHAT_ID" "\$TICKET_GENERATION" "\$MSG_ID"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'message_id:$message_id' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "approval admission and ticket identifiers are serialized and monotonic" {
+    broker_file="$BATS_TEST_DIRNAME/../lib/telegram-broker-handler.sh"
+    transition_file="$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    run grep -F 'acquire_approval_admission_lock' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'release_approval_admission_lock' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'reserve_ticket_nonce' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'TICKET_NONCE_DIR=' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F '.restore_epoch == $epoch' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F '. + {restore_epoch:$restore_epoch,approval_generation:$generation}' "$broker_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'APPROVAL_LOCK_MAX_ATTEMPTS=600' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'if mkdir "$nonce_path" 2>/dev/null; then' "$transition_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore invalidates approval state and rewinds the Telegram cursor" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'restore_epoch=$((restore_epoch + 1))' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F "printf '%s\\n' '-1' > \"\$restore_offset_tmp\"" "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'state_restore_identity_override' "$restore_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "retired creation option is not exposed by the Supervisor schema" {
+    run grep -F 'enable_creation_skill' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -ne 0 ]
+    run grep -F 'enable_creation_skill' "$BATS_TEST_DIRNAME/../translations/en.yaml"
+    [ "$status" -ne 0 ]
+    run grep -F 'LEGACY_ENABLE_CREATION=' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'enable_creation_skill is retired in this release' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -177,7 +348,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'exit 42' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'PIPESTATUS[0]' "$run_file"
+    run grep -F 'watcher_child_pid=$!' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'wait "${watcher_child_pid}" || watcher_status=$?' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'Telegram polling conflict is latched' "$run_file"
     [ "$status" -eq 0 ]
@@ -290,6 +463,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'PROVIDER_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'PROVIDER_HEALTH_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'CAPABILITY_CLIENT_AUTH_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'TELEGRAM_CLIENT_AUTH_TOKEN' "$run_file"
@@ -324,6 +499,48 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "system Telegram auth is not placed in jq argv" {
+    run grep -F 'jq -nc --rawfile auth "$AUTH_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -nc --arg auth "$AUTH"' "$run_file"
+    [ "$status" -ne 0 ]
+}
+
+@test "HA error-log capability never forwards raw diagnostic contents" {
+    capability_file="$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    run grep -F 'json_value '\''{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'\''' "$capability_file"
+    [ "$status" -eq 0 ]
+    error_result='{"available":true,"detail":"Detailed Home Assistant error logs remain in Home Assistant Settings > System > Logs."}'
+    run jq -e '.available == true and (.detail | type == "string")' <<< "$error_result"
+    [ "$status" -eq 0 ]
+    run awk '
+        /^    get_error_log\)/ { inside=1 }
+        inside && /json_text "\$result"/ { found=1 }
+        inside && /^    pending_count\)/ { inside=0 }
+        END { exit (found ? 1 : 0) }
+    ' "$capability_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'RESULT=$(/usr/local/bin/ha-capability get_error_log)' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -r '\''.detail // "Home Assistant logs are unavailable"'\''' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "privileged persistent state uses bounded, serialized maintenance" {
+    inventory_file="$BATS_TEST_DIRNAME/../lib/state-inventory.sh"
+    migrate_file="$BATS_TEST_DIRNAME/../lib/state-migrate.sh"
+    run grep -F 'STATE_INVENTORY_MAX_NODES=40000' "$inventory_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'STATE_INVENTORY_MAX_BYTES=268435456' "$inventory_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'acquire_runtime_lock' "$migrate_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'STATE_MIGRATION_LOCK_HELD=true /opt/zeroclaw/lib/state-migrate.sh' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'backup new_version does not match new_schema' "$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "provider fallback is root-owned, profile-bound, and safely enabled by default" {
     run grep -F 'default_model: "~deepseek/deepseek-v4-flash-latest"' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
@@ -341,7 +558,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'provider_free_fallback_enabled: true' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
-    run grep -F 'provider_max_input_tokens: 32768' "$BATS_TEST_DIRNAME/../config.yaml"
+    run grep -F 'provider_max_input_tokens: 65536' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_openrouter_daily_token_budget: 200000' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_nvidia_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
@@ -367,6 +586,18 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'migrated_reserved_max' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'month_window:$month' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F '(.month_window // "") == $month' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'COST_DEGRADED_FILE="${PROVIDER_COST_DEGRADED_FILE:-/run/zeroclaw/cost-degraded}"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'cost watchdog requires a free fallback' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'root_provider_cost_micros()' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'root-owned provider ledger' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'must use an explicit :free model slug' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
@@ -375,7 +606,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'input token estimate exceeds the broker limit' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
-    run grep -F 'conservative half-byte estimate' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    run grep -F 'byte-for-token upper bound' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F 'input_chars=$(wc -c < "$body_file"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
@@ -433,7 +664,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 @test "only the HA capability broker retains the Supervisor token" {
     run grep -F 'unset SUPERVISOR_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'export HA_TOKEN HA_URL' "$run_file"
     [ "$status" -eq 0 ]
@@ -501,11 +732,11 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 }
 
 @test "typed brokers scrub unrelated credential classes" {
-    run grep -F 'unset SUPERVISOR_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
-    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN \' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'OPENROUTER_KEY NVIDIA_KEY ARK_KEY LEGACY_HA_TOKEN' "$run_file"
     [ "$status" -eq 0 ]
@@ -517,14 +748,25 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
 
     for marker in \
         'state-cleanup.sh /data' \
-        '/usr/local/bin/tg-callback-watcher 2>&1 | while read -r line; do' \
-        'TODAY=$(curl -s "${GW}/api/cost"'; do
-        run grep -F -B 3 "$marker" "$run_file"
+        '/usr/local/bin/tg-callback-watcher >>/data/logs/telegram-broker.log 2>&1 &' \
+        'TODAY_COST_MICROS=$(root_provider_cost_micros'; do
+        run grep -F -B 6 "$marker" "$run_file"
         [ "$status" -eq 0 ]
         [[ "$output" == *"scrub_unrelated_child_credentials"* ]]
     done
 
-    run grep -F 'unset SUPERVISOR_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    run grep -F 'unset SUPERVISOR_TOKEN HOMEASSISTANT_TOKEN HASSIO_TOKEN HA_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "Telegram readiness follows successful polling and records watcher identity" {
+    run grep -F 'if ! RESP=\$(telegram_curl getUpdates' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "jq -e '.ok == true'" "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'mark_telegram_ready' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'watcher_child_pid=$!' "$run_file"
     [ "$status" -eq 0 ]
 }
 
@@ -663,6 +905,50 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'CLAIM_GRACE_SECONDS=3600' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
     [ "$status" -eq 0 ]
+    run grep -F 'TICKET_NONCE_DIR="${RECEIPT_DIR}/ticket-nonces"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'rmdir "$nonce_path"' "$BATS_TEST_DIRNAME/../lib/state-cleanup.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore preserves monotonic quota, admission, provider, and audit state" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'preserve_current_file capability/quota.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file provider/quota.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_tree capability/action-admissions' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_tree audit' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-approval-rate.json' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-conflict' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'preserve_current_file capability/telegram-conflict.token' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'state-restore.sh recover' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore recovery is journaled before live state mutation" {
+    restore_file="$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    run grep -F 'write_transaction_state prepared' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'write_transaction_state mutating' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'write_transaction_state committed' "$restore_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'recover_incomplete_restore' "$restore_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "approval transition authenticates the ticket restore epoch" {
+    transition_file="$BATS_TEST_DIRNAME/../lib/approval-transition.sh"
+    run grep -F 'ticket ${SHORT} belongs to a prior restore epoch' "$transition_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ticket_restore_epoch' "$transition_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "the broker enforces the write feature flag independently of the client" {
@@ -727,6 +1013,45 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "Telegram retries reconcile a durable applied outcome before reporting uncertainty" {
+    run grep -F 'prefer that truthful receipt over an unconfirmed message' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'replay_approval_outcome "\$SHORT" "\$CB_ID" "\$CHAT_ID" "\$MSG_ID" "\$FROM"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'zc-approval-transition complete "\$short"' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
+@test "transient broker locks carry owners and restore clears only fixed locks" {
+    run grep -F 'ACTION_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'READ_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'PLANNER_AUDIT_QUOTA_LOCK/owner' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'LOCK="${AUDIT_DIR}/.lock"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F '"$LOCK/owner"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'clear_transient_runtime_lock' "$BATS_TEST_DIRNAME/../lib/state-restore.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "healthcheck uses a root-only quota-exempt broker lane" {
+    run grep -F 'health_read_sensors' "$BATS_TEST_DIRNAME/../lib/ha-capability.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'CAPABILITY_HEALTH_CLIENT_AUTH_TOKEN' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'health broker credential is restricted' "$BATS_TEST_DIRNAME/../lib/capability-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider health credential is required' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'telegram-ready' "$BATS_TEST_DIRNAME/../lib/healthcheck.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'chmod 0700 /usr/local/bin/ha-health-read' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "policy strings are kept out of generated shell and reloaded from root state" {
     run grep -F 'policy runtime file is not a regular file' "$run_file"
     [ "$status" -eq 0 ]
@@ -777,7 +1102,9 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F '(.head_sha == $commit)' "$promote_file"
     [ "$status" -eq 0 ]
-    run grep -F 'Rebuild, attest, and sign candidate digest' "$promote_file"
+    run grep -F 'Reproducible candidate build' "$promote_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Rebuild twice with isolated direct pinned builders' "$promote_file"
     [ "$status" -eq 0 ]
     run grep -F 'zeroclaw-release-linux-x64' "$promote_file"
     [ "$status" -eq 0 ]

@@ -4,20 +4,33 @@ set -eu
 
 NOW=$(date -u +%s)
 SHORT=feedcafe
-mkdir -p /data/pending /data/approved /data/approval-receipts /data/approval-receipts/.locks /data/approval-receipts/tickets /tmp/zc-approval-race
+GENERATION=66666666666666666666666666666666
+CLAIM_GENERATION=77777777777777777777777777777777
+APPLY_GENERATION=88888888888888888888888888888888
+failure_phase=setup
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "approval concurrency failure phase: ${failure_phase}" >&2; for output_file in /tmp/zc-approval-race/*.out; do [ -f "$output_file" ] || continue; printf "%s: " "$output_file" >&2; tr "\n" "," < "$output_file" >&2; echo >&2; error_file="${output_file%.out}.err"; if [ -s "$error_file" ]; then printf "%s error: " "$output_file" >&2; tr "\n" "," < "$error_file" >&2; echo >&2; fi; done; fi; exit "$status"' EXIT
+mkdir -p /data/pending /data/approved /data/approval-receipts \
+    /data/approval-receipts/.locks /data/approval-receipts/tickets \
+    /data/approval-receipts/ticket-nonces /data/capability /tmp/zc-approval-race
+if [ ! -f /data/.approval-restore-epoch ]; then
+    printf '%s\n' 0 > /data/.approval-restore-epoch
+    chmod 0600 /data/.approval-restore-epoch
+fi
 mkdir -p /run/zeroclaw
 printf '%s\n' capability-client-secret > /run/zeroclaw/capability-client-auth
 chmod 0600 /run/zeroclaw/capability-client-auth
-jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$GENERATION" \
+    '{uuid:"feedcafe",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${SHORT}.sha256"
 
 pids=""
+failure_phase=racing-approvals
 for n in $(seq 1 12); do
     (
-        if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 >/dev/null 2>&1; then
-            echo success
+        error_file="/tmp/zc-approval-race/${n}.err"
+        if result=$(ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$SHORT" 42 42 "$GENERATION" 2>"$error_file"); then
+            printf '%s\n' "$result"
         else
             echo rejected
         fi
@@ -29,21 +42,31 @@ for pid in $pids; do
     wait "$pid" || true
 done
 
-successes=$(grep -l '^success$' /tmp/zc-approval-race/*.out | wc -l)
-rejections=$(grep -l '^rejected$' /tmp/zc-approval-race/*.out | wc -l)
-[ "$successes" -eq 1 ]
-[ "$rejections" -eq 11 ]
+failure_phase=approval-result-counts
+first_approvals=$(grep -l '^APPROVED feedcafe$' /tmp/zc-approval-race/*.out | wc -l)
+duplicate_approvals=$(grep -l '^ALREADY_APPROVED feedcafe$' /tmp/zc-approval-race/*.out | wc -l)
+[ "$first_approvals" -eq 1 ] || {
+    echo "approval result count mismatch: approved=${first_approvals} expected=1" >&2
+    exit 1
+}
+[ "$duplicate_approvals" -eq 11 ] || {
+    echo "approval result count mismatch: already_approved=${duplicate_approvals} expected=11" >&2
+    exit 1
+}
+failure_phase=approved-ticket-verification
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh verify "$SHORT" >/dev/null
 test -f "/data/approved/${SHORT}.marker"
 
 # A second apply claim is one-shot: a concurrent or replayed executor must not
 # be able to run the approved Home Assistant service twice.
 CLAIM_SHORT=c0ffee12
-jq -nc --argjson exp "$((NOW + 300))" \
-    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+failure_phase=claim-setup
+jq -nc --argjson exp "$((NOW + 300))" --arg generation "$CLAIM_GENERATION" \
+    '{uuid:"c0ffee12",service:"light/turn_off",payload:{entity_id:"light.kitchen"},expires_at:$exp,restore_epoch:0,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > "/data/approval-receipts/tickets/${CLAIM_SHORT}.json"
 sha256sum "/data/approval-receipts/tickets/${CLAIM_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${CLAIM_SHORT}.sha256"
-ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$CLAIM_SHORT" 42 42 >/dev/null
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$CLAIM_SHORT" 42 42 "$CLAIM_GENERATION" >/dev/null
+failure_phase=one-shot-claim
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$CLAIM_SHORT" >/dev/null
 if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh claim "$CLAIM_SHORT" >/dev/null 2>&1; then
     echo "duplicate apply claim was accepted" >&2
@@ -54,6 +77,7 @@ if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh verify 
     exit 1
 fi
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh verify_claim "$CLAIM_SHORT" >/dev/null
+failure_phase=claim-completion
 ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh complete "$CLAIM_SHORT" >/dev/null
 [ ! -e "/data/approval-receipts/.claims/${CLAIM_SHORT}.claim" ]
 [ ! -e "/data/approval-receipts/tickets/${CLAIM_SHORT}.json" ]
@@ -65,25 +89,36 @@ if [ "${SMOKE_ENABLE_WRITES:-false}" = "true" ]; then
     APPLY_SHORT=a11e0d01
     APPLY_PORT=42638
     HA_PORT=42639
-    jq -nc --argjson exp "$((NOW + 300))" \
-        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
+    jq -nc --argjson exp "$((NOW + 300))" --arg generation "$APPLY_GENERATION" \
+        '{uuid:"a11e0d01",service:"switch/turn_on",payload:{entity_id:"switch.kitchen"},expires_at:$exp,restore_epoch:0,tg_message_id:123,approval_generation:$generation,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
         > "/data/approval-receipts/tickets/${APPLY_SHORT}.json"
     sha256sum "/data/approval-receipts/tickets/${APPLY_SHORT}.json" | cut -d' ' -f1 > "/data/approval-receipts/${APPLY_SHORT}.sha256"
-    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 >/dev/null
+    ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve "$APPLY_SHORT" 42 42 "$APPLY_GENERATION" >/dev/null
 
     cat > /tmp/approval-fake-ha <<'FAKE_HA'
 #!/bin/sh
 set -eu
-IFS= read -r request_line || exit 0
-case "$request_line" in
-    *" /core/api/services/switch/turn_on"*) body='[]' ;;
-    *) body='{}' ;;
-esac
+    IFS= read -r request_line || exit 0
+    case "$request_line" in
+        *" /core/api/services/switch/turn_on"*) body='[]' ;;
+        *" /core/api/states/"*) body='{"entity_id":"switch.kitchen","state":"off","attributes":{}}' ;;
+        *) body='{}' ;;
+    esac
 length=$(printf '%s' "$body" | wc -c)
 printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "$length" "$body"
 FAKE_HA
     chmod +x /tmp/approval-fake-ha
-    /bin/busybox nc -l -p "$HA_PORT" -s 127.0.0.1 -e /tmp/approval-fake-ha &
+    (
+        # The guarded apply path makes one broker/HA request for the undo
+        # snapshot and a second request for the service call. Keep the fake
+        # endpoints available for both connections instead of accidentally
+        # turning a successful first request into a transport failure.
+        for _ in 1 2; do
+            while ! /bin/busybox nc -l -p "$HA_PORT" -s 127.0.0.1 -e /tmp/approval-fake-ha; do
+                sleep 1
+            done
+        done
+    ) &
     ha_pid=$!
     sleep 1
     (
@@ -93,7 +128,11 @@ FAKE_HA
         export ENABLE_WRITE_ACTIONS=true
         export POLICY_MODE=balanced POLICY_QUIET_CONFIRM=true POLICY_BULK_THRESHOLD=3 POLICY_CLIMATE_DELTA=3
         export QUIET_HOURS=23:00-06:00 EXTRA_DENY= EXTRA_CONFIRM= EXTRA_ALLOW=
-        /bin/busybox nc -l -p "$APPLY_PORT" -s 127.0.0.1 -e /usr/local/bin/ha-broker-entrypoint
+        for _ in 1 2; do
+            while ! /bin/busybox nc -l -p "$APPLY_PORT" -s 127.0.0.1 -e /usr/local/bin/ha-broker-entrypoint; do
+                sleep 1
+            done
+        done
     ) &
     broker_pid=$!
     sleep 1

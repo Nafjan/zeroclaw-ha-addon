@@ -23,7 +23,75 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$TEST_ROOT"
+    if [ "$(id -u)" -eq 0 ]; then
+        rm -rf "$TEST_ROOT"
+    else
+        sudo -n rm -rf "$TEST_ROOT"
+    fi
+}
+
+restore_state() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    else
+        sudo -n "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    fi
+}
+
+restore_state_with_failure() {
+    if [ "$(id -u)" -eq 0 ]; then
+        STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    else
+        sudo -n env STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@"
+    fi
+}
+
+restore_state_with_kill() {
+    kill_phase="$1"
+    shift
+    if [ "$(id -u)" -eq 0 ]; then
+        STATE_RESTORE_TEST_KILL_PHASE="$kill_phase" \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@" &
+    else
+        sudo -n env STATE_RESTORE_TEST_KILL_PHASE="$kill_phase" \
+            "$BATS_TEST_DIRNAME/../lib/state-restore.sh" "$@" &
+    fi
+    restore_pid=$!
+    wait "$restore_pid"
+}
+
+restore_recovery() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" recover "$@"
+    else
+        sudo -n "$BATS_TEST_DIRNAME/../lib/state-restore.sh" recover "$@"
+    fi
+}
+
+root_find() {
+    if [ "$(id -u)" -eq 0 ]; then
+        find "$@"
+    else
+        sudo -n find "$@"
+    fi
+}
+
+root_cat() {
+    if [ "$(id -u)" -eq 0 ]; then
+        cat "$@"
+    else
+        sudo -n cat "$@"
+    fi
+}
+
+root_test_size() {
+    if [ "$(id -u)" -eq 0 ]; then
+        test -s "$1"
+    else
+        sudo -n test -s "$1"
+    fi
 }
 
 @test "restore verifies the snapshot and replaces the full persistent inventory" {
@@ -36,7 +104,7 @@ teardown() {
     printf 'new-ticket\n' > "$DATA_DIR/approval-receipts/tickets/ticket-1"
     printf 'new-audit\n' > "$DATA_DIR/audit/2026-09-01.jsonl"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -eq 0 ]
     [[ "$output" == *"restored_schema=0 restored_version=3.1.3.3"* ]]
@@ -46,21 +114,79 @@ teardown() {
     [ "$(cat "$DATA_DIR/options.json")" = old-options ]
     [ "$(cat "$DATA_DIR/provider/profile")" = old-provider ]
     [ "$(cat "$DATA_DIR/capability/state")" = old-capability ]
-    [ "$(cat "$DATA_DIR/approval-receipts/tickets/ticket-1")" = old-ticket ]
-    [ "$(cat "$DATA_DIR/audit/2026-09-01.jsonl")" = old-audit ]
+    [ ! -e "$DATA_DIR/approval-receipts/tickets/ticket-1" ]
+    [ "$(cat "$DATA_DIR/audit/2026-09-01.jsonl")" = new-audit ]
     [ ! -e "$DATA_DIR/.state-schema" ]
     [ "$(cat "$DATA_DIR/.state-version")" = 3.1.3.3 ]
+    [ "$(root_cat "$DATA_DIR/capability/telegram-offset")" = -1 ]
+    [ "$(root_cat "$DATA_DIR/.approval-restore-epoch")" = 1 ]
 
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ "$(cat "$rollback_dir/brain.db")" = new-brain ]
-    [ "$(cat "$rollback_dir/options.json")" = new-options ]
-    [ "$(cat "$rollback_dir/provider/profile")" = new-provider ]
-    [ "$(cat "$rollback_dir/audit/2026-09-01.jsonl")" = new-audit ]
-    [ "$(cat "$rollback_dir/.state-schema")" = 1 ]
+    [ "$(root_cat "$rollback_dir/brain.db")" = new-brain ]
+    [ "$(root_cat "$rollback_dir/options.json")" = new-options ]
+    [ "$(root_cat "$rollback_dir/provider/profile")" = new-provider ]
+    [ "$(root_cat "$rollback_dir/audit/2026-09-01.jsonl")" = new-audit ]
+    [ "$(root_cat "$rollback_dir/.state-schema")" = 1 ]
     [ ! -e "$rollback_dir/.state-version" ]
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore preserves current monotonic quotas, admissions, and audit history" {
+    printf '{"hour_window":123,"requests_hour":17}\n' > "$DATA_DIR/capability/quota.json"
+    printf '{"schema":1,"records":[{"id":"current-ledger","profile_id":"openrouter","reserved_tokens":1,"reserved_input_tokens":2,"settled_tokens":3,"settled_input_tokens":4,"reserved_cost_micros":5,"settled_cost_micros":5,"state":"settled","hour_window":123,"day_window":1,"month_window":"1970-01","created_at":1,"expires_at":1,"updated_at":2}],"profile_quarantine":[]}\n' \
+        > "$DATA_DIR/provider/quota.json"
+    mkdir -p "$DATA_DIR/capability/action-admissions" "$DATA_DIR/audit/planner"
+    printf '{"ticket":"cafe0001","hour_window":123}\n' \
+        > "$DATA_DIR/capability/action-admissions/cafe0001.json"
+    printf '{"hour_window":123,"units_hour":9}\n' > "$DATA_DIR/capability/read-quota.json"
+    printf '{"schema":1,"window_start":1,"clients":{"42":3}}\n' \
+        > "$DATA_DIR/capability/telegram-approval-rate.json"
+    printf '{"hour_window":123,"events_hour":4,"bytes_day":5}\n' \
+        > "$DATA_DIR/audit/planner/.quota.json"
+    printf 'current-audit\n' > "$DATA_DIR/audit/2026-09-02.jsonl"
+    printf 'polling-conflict\n' > "$DATA_DIR/capability/telegram-conflict"
+    printf 'current-bot-token-hash\n' > "$DATA_DIR/capability/telegram-conflict.token"
+
+    run restore_state "$DATA_DIR" "$BACKUP_DIR"
+    [ "$status" -eq 0 ]
+    [ "$(root_cat "$DATA_DIR/capability/quota.json")" = '{"hour_window":123,"requests_hour":17}' ]
+    [[ "$(root_cat "$DATA_DIR/provider/quota.json")" == *'current-ledger'* ]]
+    [ "$(root_cat "$DATA_DIR/capability/action-admissions/cafe0001.json")" = '{"ticket":"cafe0001","hour_window":123}' ]
+    [ "$(root_cat "$DATA_DIR/capability/read-quota.json")" = '{"hour_window":123,"units_hour":9}' ]
+    [[ "$(root_cat "$DATA_DIR/capability/telegram-approval-rate.json")" == *'"42":3'* ]]
+    [ "$(root_cat "$DATA_DIR/audit/planner/.quota.json")" = '{"hour_window":123,"events_hour":4,"bytes_day":5}' ]
+    [ "$(root_cat "$DATA_DIR/audit/2026-09-02.jsonl")" = current-audit ]
+    [ "$(root_cat "$DATA_DIR/audit/2026-09-01.jsonl")" = old-audit ]
+    [ "$(root_cat "$DATA_DIR/capability/telegram-conflict")" = polling-conflict ]
+    [ "$(root_cat "$DATA_DIR/capability/telegram-conflict.token")" = current-bot-token-hash ]
+}
+
+@test "an interrupted restore is recovered from its durable journal" {
+    for kill_phase in before-remove after-remove after-install after-invalidate; do
+        printf 'current-%s\n' "$kill_phase" > "$DATA_DIR/brain.db"
+        run restore_state_with_kill "$kill_phase" "$DATA_DIR" "$BACKUP_DIR"
+        [ "$status" -ne 0 ]
+        run restore_recovery "$DATA_DIR"
+        [ "$status" -eq 0 ]
+        [ "$(cat "$DATA_DIR/brain.db")" = "current-${kill_phase}" ]
+        [ -z "$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+            -type d -name '.restore-transaction-*' -print -quit)" ]
+    done
+}
+
+@test "a restore committed before interruption is only cleaned up on recovery" {
+    printf 'current-before-commit\n' > "$DATA_DIR/brain.db"
+    run restore_state_with_kill after-commit "$DATA_DIR" "$BACKUP_DIR"
+    [ "$status" -ne 0 ]
+    run restore_recovery "$DATA_DIR"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DATA_DIR/brain.db")" = old-brain ]
+    [ -z "$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+        -type d -name '.restore-transaction-*' -print -quit)" ]
 }
 
 @test "restore of a fresh snapshot removes the schema marker and remains recoverable" {
@@ -73,17 +199,19 @@ teardown() {
     [ -n "$fresh_backup" ]
     printf 'new-brain\n' > "$DATA_DIR/brain.db"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$fresh_backup"
     [ "$status" -eq 0 ]
     [[ "$output" == *"restored_schema=0 restored_version=fresh"* ]]
     [ "$(cat "$DATA_DIR/brain.db")" = old-brain ]
     [ ! -e "$DATA_DIR/.state-schema" ]
     [ ! -e "$DATA_DIR/.state-version" ]
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
 }
 
 @test "a failed restore repairs live state from the durable rollback snapshot" {
@@ -91,8 +219,7 @@ teardown() {
     printf 'new-config\n' > "$DATA_DIR/config.toml"
     printf 'new-session\n' > "$DATA_DIR/workspace/sessions-1/state.db"
 
-    run env STATE_RESTORE_TEST_FAIL_AFTER_MUTATION=true \
-        "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state_with_failure \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -ne 0 ]
     [[ "$output" == *"live state was restored from rollback snapshot"* ]]
@@ -101,17 +228,19 @@ teardown() {
     [ "$(cat "$DATA_DIR/workspace/sessions-1/state.db")" = new-session ]
     [ "$(cat "$DATA_DIR/.state-schema")" = 1 ]
     [ ! -e "$DATA_DIR/.state-version" ]
-    rollback_dir="$(find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
+    rollback_dir="$(root_find "$DATA_DIR/migrations" -mindepth 1 -maxdepth 1 \
         -type d -name 'rollback-*' -print -quit)"
-    [ -s "$rollback_dir/manifest" ]
-    [ -s "$rollback_dir/checksums" ]
+    run root_test_size "$rollback_dir/manifest"
+    [ "$status" -eq 0 ]
+    run root_test_size "$rollback_dir/checksums"
+    [ "$status" -eq 0 ]
 }
 
 @test "a tampered snapshot is rejected before live state moves" {
     printf 'tampered\n' > "$BACKUP_DIR/brain.db"
     printf 'current\n' > "$DATA_DIR/brain.db"
 
-    run "$BATS_TEST_DIRNAME/../lib/state-restore.sh" \
+    run restore_state \
         "$DATA_DIR" "$BACKUP_DIR"
     [ "$status" -ne 0 ]
     [ "$(cat "$DATA_DIR/brain.db")" = current ]

@@ -8,7 +8,14 @@
 # model text as shell and never grants an approval or bypasses policy.
 set -u
 
-LEGACY_ACTION_GATE="${ZEROCLAW_LEGACY_ACTION_GATE:-/usr/local/bin/ha-action-guarded}"
+# The callback watcher is root-owned in production; do not let an ambient
+# environment variable redirect privileged legacy actions. Non-root tests and
+# controlled migration tooling may still inject a gate explicitly.
+if [ "$(id -u)" -eq 0 ]; then
+    LEGACY_ACTION_GATE="/usr/local/bin/ha-action-guarded"
+else
+    LEGACY_ACTION_GATE="${ZEROCLAW_LEGACY_ACTION_GATE:-/usr/local/bin/ha-action-guarded}"
+fi
 
 [ "$#" -eq 1 ] || exit 2
 REPLY="$1"
@@ -70,7 +77,7 @@ case "$GATE_STATUS" in
     2)
         TICKET=$(printf '%s\n' "$GATE_OUTPUT" | sed -nE 's/.*ticket=([a-f0-9]{8}).*/\1/p' | head -n 1)
         if [ -n "$TICKET" ]; then
-            echo "Approval needed (id $TICKET). Reply YES $TICKET to proceed."
+            echo "Approval needed (id $TICKET). Reply with the exact YES/NO form shown in the Telegram approval message."
         else
             echo "Approval is required before that action can run."
         fi

@@ -6,6 +6,91 @@
 
 set -eu
 
+smoke_failure_diagnostics() {
+    status="$1"
+    [ "$status" -eq 0 ] && return 0
+    echo "startup smoke assertion failed (status ${status})" >&2
+    if [ -n "${run_status-}" ]; then
+        echo "startup smoke inner run status: ${run_status}" >&2
+    fi
+    if [ -n "${smoke_phase-}" ]; then
+        echo "startup smoke phase: ${smoke_phase}" >&2
+    fi
+    for diagnostic_file in \
+        /tmp/zeroclaw-startup.log \
+        /tmp/startup-plain.log \
+        /tmp/zeroclaw-raw-debug \
+        /tmp/zeroclaw-ha-debug \
+        /tmp/zeroclaw-broker-test \
+        /tmp/zeroclaw-helper-token-scan \
+        /tmp/zeroclaw-planner-uid \
+        /tmp/zeroclaw-real-provider-pid \
+        /tmp/zeroclaw-real-provider-response \
+        /data/logs/capability-broker.log \
+        /data/logs/provider-broker.log \
+        /data/provider/quota.json \
+        /data/provider/roundtrip-upstream-request; do
+        if [ -f "$diagnostic_file" ]; then
+            echo "--- ${diagnostic_file} ---" >&2
+            tail -80 "$diagnostic_file" 2>/dev/null |
+                sed -E 's/(Bearer )[[:graph:]]+/\1[redacted]/g; s/(legacy|supervisor|telegram|provider)-secret/[redacted]/g' >&2 || true
+        fi
+    done
+}
+
+assert_stat() {
+    stat_path="$1"
+    expected_stat="$2"
+    actual_stat=$(stat -c '%u:%a' "$stat_path" 2>/dev/null) || {
+        echo "startup smoke stat missing: ${stat_path} (expected ${expected_stat})" >&2
+        return 1
+    }
+    if [ "$actual_stat" != "$expected_stat" ]; then
+        echo "startup smoke stat mismatch: ${stat_path} expected=${expected_stat} actual=${actual_stat}" >&2
+        return 1
+    fi
+}
+
+assert_executable() {
+    executable_path="$1"
+    [ -x "$executable_path" ] || {
+        echo "startup smoke executable missing or not executable: ${executable_path}" >&2
+        return 1
+    }
+}
+
+assert_contains() {
+    expected_text="$1"
+    inspected_file="$2"
+    grep -F "$expected_text" "$inspected_file" >/dev/null || {
+        echo "startup smoke text missing: file=${inspected_file} expected=${expected_text}" >&2
+        return 1
+    }
+}
+
+assert_file_value() {
+    value_path="$1"
+    expected_value="$2"
+    [ -f "$value_path" ] || {
+        echo "startup smoke file missing: ${value_path} (expected ${expected_value})" >&2
+        return 1
+    }
+    actual_value=$(cat "$value_path")
+    [ "$actual_value" = "$expected_value" ] || {
+        echo "startup smoke value mismatch: file=${value_path} expected=${expected_value} actual=${actual_value}" >&2
+        return 1
+    }
+}
+
+run_child_smoke() {
+    child_name="$1"
+    shift
+    "$@" || {
+        echo "startup smoke child failed: ${child_name}" >&2
+        return 1
+    }
+}
+
 # The image test provides a synthetic Supervisor credential so the entrypoint
 # exercises its real fail-closed preflight against the fake Supervisor below.
 : "${SUPERVISOR_TOKEN:=supervisor-secret}"
@@ -32,16 +117,16 @@ cat > /data/options.json <<'JSON'
   "provider_nvidia_fallback_enabled": false,
   "provider_ark_fallback_enabled": false,
   "log_level": "info",
-  "daily_cost_limit_usd": 5.0,
-  "monthly_cost_limit_usd": 20.0,
+  "daily_cost_limit_usd": 10.0,
+  "monthly_cost_limit_usd": 40.0,
   "max_actions_per_hour": 200,
   "provider_max_requests_per_hour": 120,
-  "provider_daily_token_budget": 100000,
+  "provider_daily_token_budget": 200000,
   "max_tool_iterations": 8,
   "max_history_messages": 30,
   "max_context_tokens": 16000,
   "provider_max_tokens": 2048,
-  "provider_max_input_tokens": 32768,
+  "provider_max_input_tokens": 65536,
   "response_cache_ttl_minutes": 2,
   "conversation_retention_days": 30,
   "home_location": "Test Home",
@@ -140,7 +225,7 @@ cleanup() {
         wait "$PROVIDER_UPSTREAM_PID" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT
+trap 'status=$?; failed_command="${BASH_COMMAND-}"; trap - EXIT; if [ "$status" -ne 0 ]; then printf "startup smoke last command: %s\n" "$failed_command" >&2; fi; cleanup; smoke_failure_diagnostics "$status"; exit "$status"' EXIT
 
 # Minimal local HA endpoint so the smoke test exercises the broker transport
 # without contacting the real Supervisor.
@@ -197,6 +282,7 @@ if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
             /usr/local/bin/zeroclaw --config-dir /data agent -m 'provider round-trip probe' \
                 >/tmp/zeroclaw-real-provider-response 2>&1 || true
         ) &
+        printf '%s\n' "$!" > /tmp/zeroclaw-real-provider-pid
     fi
     exec /usr/local/bin/zeroclaw "$@"
 fi
@@ -218,7 +304,7 @@ if [ "${1:-}" = daemon ]; then
         printf 'OPTIONS_READABLE\n' > /tmp/zeroclaw-broker-test
     elif [ -r /run/zeroclaw/telegram-token ]; then
         printf 'TELEGRAM_TOKEN_READABLE\n' > /tmp/zeroclaw-broker-test
-    elif printf 'forged\n' > /data/.state-version 2>/dev/null; then
+    elif (printf 'forged\n' > /data/.state-version) 2>/dev/null; then
         printf 'VERSION_MARKER_WRITABLE_TO_PLANNER\n' > /tmp/zeroclaw-broker-test
     elif touch /data/audit/.planner-write-test 2>/dev/null; then
         rm -f /data/audit/.planner-write-test
@@ -283,6 +369,7 @@ export SUPERVISOR_TOKEN=supervisor-secret
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-120}"
 
 set +e
+smoke_phase=starting-entrypoint
 PATH="/tmp/zeroclaw-test-bin:${PATH}" timeout "$SMOKE_TIMEOUT" /bin/bash /tmp/bashio-test.sh >/tmp/zeroclaw-startup.log 2>&1
 run_status=$?
 set -e
@@ -301,8 +388,16 @@ if [ "${SMOKE_EXPECT_STARTUP_FAILURE:-false}" = "true" ]; then
     exit 0
 fi
 
-[ "$run_status" -eq 124 ]
-[ "$(cat /tmp/zeroclaw-helper-token-scan)" = CLEAN ]
+smoke_phase=post-entrypoint
+[ "$run_status" -eq 124 ] || {
+    echo "startup smoke expected timeout 124, actual=${run_status}" >&2
+    exit 1
+}
+smoke_phase=credential-boundaries
+[ "$(cat /tmp/zeroclaw-helper-token-scan)" = CLEAN ] || {
+    echo "startup smoke helper token scan did not pass" >&2
+    exit 1
+}
 if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
     echo "broker smoke failed: $(cat /tmp/zeroclaw-broker-test)" >&2
     cat /tmp/zeroclaw-raw-debug >&2 || true
@@ -310,62 +405,96 @@ if [ "$(cat /tmp/zeroclaw-broker-test)" != BROKER_OK ]; then
     cat /data/logs/capability-broker.log >&2 || true
     exit 1
 fi
-[ "$(cat /tmp/zeroclaw-planner-uid)" -ne 0 ]
-test "$(stat -c '%u:%a' /data)" = "0:1770"
-test "$(stat -c '%u:%a' /data/approval-receipts/.locks)" = "0:700"
-test "$(stat -c '%u:%a' /data/approval-receipts/.claims)" = "0:700"
-test "$(stat -c '%u:%a' /data/approval-receipts/tickets)" = "0:700"
-test "$(stat -c '%u:%a' /data/audit)" = "0:750"
-test "$(stat -c '%u:%a' /data/logs)" = "0:750"
-test "$(stat -c '%u:%a' /data/provider)" = "0:700"
-test "$(stat -c '%u:%a' /data/capability)" = "0:700"
-test "$(stat -c '%u:%a' /data/capability/telegram-replies)" = "0:700"
-test "$(stat -c '%u:%a' /run/zeroclaw)" = "0:710"
-test "$(stat -c '%u:%a' /data/capability/telegram-offset)" = "0:600"
-test "$(stat -c '%u:%a' /run/zeroclaw/telegram-users)" = "0:600"
-test -x /usr/local/bin/ha-broker-entrypoint
-test -x /usr/local/bin/tg-broker-entrypoint
-test -x /usr/local/bin/telegram-render
-test -x /usr/local/bin/telegram-legacy-action
+smoke_phase=planner-identity
+planner_uid=$(cat /tmp/zeroclaw-planner-uid)
+[ "$planner_uid" -ne 0 ] || {
+    echo "startup smoke planner unexpectedly ran as root: uid=${planner_uid}" >&2
+    exit 1
+}
+smoke_phase=filesystem-boundaries
+assert_stat /data 0:1770
+assert_stat /data/approval-receipts/.locks 0:700
+assert_stat /data/approval-receipts/.claims 0:700
+assert_stat /data/approval-receipts/tickets 0:700
+assert_stat /data/audit 0:750
+assert_stat /data/logs 0:750
+assert_stat /data/provider 0:700
+assert_stat /data/capability 0:700
+assert_stat /data/capability/telegram-replies 0:700
+assert_stat /run/zeroclaw 0:710
+assert_stat /data/capability/telegram-offset 0:600
+assert_stat /run/zeroclaw/telegram-users 0:600
+smoke_phase=installed-helpers
+assert_executable /usr/local/bin/ha-broker-entrypoint
+assert_executable /usr/local/bin/tg-broker-entrypoint
+assert_executable /usr/local/bin/telegram-render
+assert_executable /usr/local/bin/telegram-legacy-action
 if [ "${SMOKE_USE_REAL_BINARY:-false}" = "true" ]; then
+    smoke_phase=real-daemon-config
     ansi_escape=$(printf '\033')
     sed -E "s/${ansi_escape}\\[[0-9;]*m//g" /tmp/zeroclaw-startup.log > /tmp/startup-plain.log
-    grep -F 'Config loaded path=/data/config.toml' /tmp/startup-plain.log >/dev/null
-    ! grep -F 'Unknown config key' /tmp/startup-plain.log >/dev/null 2>&1
-    ! grep -F 'Binding to 0.0.0.0' /tmp/startup-plain.log >/dev/null 2>&1
-    grep -E 'Pairing:[[:space:]]+enabled' /tmp/startup-plain.log >/dev/null
+    assert_contains 'Config loaded path=/data/config.toml' /tmp/startup-plain.log
+    ! grep -F 'Unknown config key' /tmp/startup-plain.log >/dev/null 2>&1 || {
+        echo 'startup smoke real daemon reported an unknown config key' >&2
+        exit 1
+    }
+    ! grep -F 'Binding to 0.0.0.0' /tmp/startup-plain.log >/dev/null 2>&1 || {
+        echo 'startup smoke real daemon bound beyond loopback' >&2
+        exit 1
+    }
+    grep -E 'Pairing:[[:space:]]+enabled' /tmp/startup-plain.log >/dev/null || {
+        echo 'startup smoke real daemon did not enable pairing' >&2
+        exit 1
+    }
 fi
-grep -F 'host = "127.0.0.1"' /data/config.toml >/dev/null
-grep -F 'require_pairing = true' /data/config.toml >/dev/null
-grep -F 'workspace_only = true' /data/config.toml >/dev/null
-grep -F 'allowed_domains = []' /data/config.toml >/dev/null
+smoke_phase=rendered-config
+assert_contains 'host = "127.0.0.1"' /data/config.toml
+assert_contains 'require_pairing = true' /data/config.toml
+assert_contains 'workspace_only = true' /data/config.toml
+assert_contains 'allowed_domains = []' /data/config.toml
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
-    grep -F 'fallback = "custom:http://127.0.0.1:42620/v1"' /data/config.toml >/dev/null
-    grep -F '[providers.models."custom:http://127.0.0.1:42620/v1"]' /data/config.toml >/dev/null
-    grep -F 'model = "~deepseek/deepseek-v4-flash-latest"' /data/config.toml >/dev/null
-    grep -F 'model = "openrouter/fusion"' /data/config.toml >/dev/null
-    grep -F '[[providers.model_routes]]' /data/config.toml >/dev/null
-    test -x /usr/local/bin/provider-broker-handler
-    test -x /usr/local/bin/provider-broker-entrypoint
+    assert_contains 'fallback = "custom:http://127.0.0.1:42620/v1"' /data/config.toml
+    assert_contains '[providers.models."custom:http://127.0.0.1:42620/v1"]' /data/config.toml
+    assert_contains 'model = "~deepseek/deepseek-v4-flash-latest"' /data/config.toml
+    assert_contains 'model = "openrouter/fusion"' /data/config.toml
+    assert_contains '[[providers.model_routes]]' /data/config.toml
+    assert_executable /usr/local/bin/provider-broker-handler
+    assert_executable /usr/local/bin/provider-broker-entrypoint
 fi
 if [ "${SMOKE_REAL_PROVIDER_ROUNDTRIP:-false}" = "true" ]; then
-    grep -F 'provider-roundtrip-ok' /tmp/zeroclaw-real-provider-response >/dev/null
-    grep -F 'Authorization: Bearer provider-secret' /data/provider/roundtrip-upstream-request >/dev/null
+    assert_contains 'provider-roundtrip-ok' /tmp/zeroclaw-real-provider-response
+    assert_contains 'Authorization: Bearer provider-secret' /data/provider/roundtrip-upstream-request
     ! grep -F 'provider-secret' /tmp/zeroclaw-real-provider-response >/dev/null 2>&1
 fi
-test -f /data/.state-schema
-test "$(cat /data/.state-schema)" = 1
-test -f /data/.state-version
-test "$(cat /data/.state-version)" = schema-tombstone-1
-test "$(stat -c '%u:%a' /data/.state-version)" = "0:600"
-[ "$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)" = old-config ]
-/src/tests/approval_transition_smoke.sh
-/src/tests/approval_concurrency_smoke.sh
-/src/tests/telegram_broker_smoke.sh
+smoke_phase=state-migration
+assert_file_value /data/.state-schema 1
+assert_file_value /data/.state-version schema-tombstone-1
+assert_stat /data/.state-version 0:600
+migration_config=$(find /data/migrations -type f -name config.toml -print -quit | xargs cat)
+[ "$migration_config" = old-config ] || {
+    echo "startup smoke migration snapshot mismatch: expected=old-config actual=${migration_config}" >&2
+    exit 1
+}
+smoke_phase=approval-transition
+run_child_smoke approval_transition /src/tests/approval_transition_smoke.sh
+smoke_phase=approval-concurrency
+run_child_smoke approval_concurrency /src/tests/approval_concurrency_smoke.sh
+smoke_phase=telegram-broker
+run_child_smoke telegram_broker /src/tests/telegram_broker_smoke.sh
 if [ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]; then
-    /src/tests/provider_broker_smoke.sh
-    /src/tests/provider_profile_fallback_smoke.sh
-    test -s /data/provider/provider-contract-report.json
-    jq -e '.schema_version == 1 and .status == "passed" and (.routes | length) >= 6 and (.classification | type) == "object" and (.safety | type) == "object" and (.accounting | type) == "object"' /data/provider/provider-contract-report.json >/dev/null
-    ! grep -E -i 'provider-secret|telegram-secret|supervisor-secret|legacy-secret' /data/provider/provider-contract-report.json >/dev/null 2>&1
+    smoke_phase=provider-broker
+    run_child_smoke provider_broker /src/tests/provider_broker_smoke.sh
+    run_child_smoke provider_profile_fallback /src/tests/provider_profile_fallback_smoke.sh
+    [ -s /data/provider/provider-contract-report.json ] || {
+        echo 'startup smoke provider contract report is missing or empty' >&2
+        exit 1
+    }
+    jq -e '.schema_version == 1 and .status == "passed" and (.routes | length) >= 6 and (.classification | type) == "object" and (.safety | type) == "object" and (.accounting | type) == "object"' /data/provider/provider-contract-report.json >/dev/null || {
+        echo 'startup smoke provider contract report failed schema validation' >&2
+        exit 1
+    }
+    ! grep -E -i 'provider-secret|telegram-secret|supervisor-secret|legacy-secret' /data/provider/provider-contract-report.json >/dev/null 2>&1 || {
+        echo 'startup smoke provider contract report contains a credential marker' >&2
+        exit 1
+    }
 fi
