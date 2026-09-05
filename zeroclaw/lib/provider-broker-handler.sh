@@ -55,6 +55,7 @@ LOG_FILE="${PROVIDER_LOG_FILE:-/data/logs/provider-broker.log}"
 RESERVATION_TTL="${PROVIDER_RESERVATION_TTL_SECONDS:-180}"
 TOTAL_TIMEOUT="${PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
 PROFILE_QUARANTINE_SECONDS="${PROVIDER_PROFILE_QUARANTINE_SECONDS:-86400}"
+COST_DEGRADED_FILE="${PROVIDER_COST_DEGRADED_FILE:-/run/zeroclaw/cost-degraded}"
 
 respond() {
     status="$1"
@@ -724,25 +725,28 @@ migrate_legacy_ledger() {
     legacy_day=$(printf '%s' "$legacy" | jq -r '.day_window')
     legacy_requests=$(printf '%s' "$legacy" | jq -r '.requests_hour')
     legacy_tokens=$(printf '%s' "$legacy" | jq -r '.tokens_day')
+    legacy_month=$(date -u -d "@$((legacy_day * 86400))" +%Y-%m 2>/dev/null) || return 1
+    printf '%s' "$legacy_month" | grep -Eq '^[0-9]{4}-[0-9]{2}$' || return 1
     [ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ] || return 1
     [ "$legacy_tokens" -le "$DAILY_TOKEN_BUDGET" ] || return 1
     migrated=$(jq -nc \
         --arg profile "$legacy_profile" \
         --argjson hour "$legacy_hour" \
         --argjson day "$legacy_day" \
+        --arg month "$legacy_month" \
         --argjson requests "$legacy_requests" \
         --argjson tokens "$legacy_tokens" \
         '{schema:1,records:(
             [range(0;$requests) as $i |
                 {id:("legacy-hour-" + ($i|tostring)),created_at:0,expires_at:0,
-                 hour_window:$hour,day_window:$day,route_id:"legacy",profile_id:$profile,
+                 hour_window:$hour,day_window:$day,month_window:$month,route_id:"legacy",profile_id:$profile,
                  upstream_model:"legacy",reserved_tokens:0,reserved_input_tokens:0,
                  settled_tokens:0,settled_input_tokens:0,
                  reserved_cost_micros:0,settled_cost_micros:0,
                  state:"settled",settlement:"migrated_request_count",updated_at:0}] +
             (if $tokens > 0 then
                 [{id:"legacy-tokens",created_at:0,expires_at:0,hour_window:$hour,
-                  day_window:$day,route_id:"legacy",profile_id:$profile,
+                  day_window:$day,month_window:$month,route_id:"legacy",profile_id:$profile,
                   upstream_model:"legacy",reserved_tokens:$tokens,reserved_input_tokens:0,
                   settled_tokens:$tokens,settled_input_tokens:0,
                   reserved_cost_micros:0,settled_cost_micros:0,
@@ -784,7 +788,8 @@ load_and_reconcile_ledger() {
     ' >/dev/null 2>&1 || return 1
     now=$(date -u +%s)
     day_window=$((now / 86400))
-    reconciled=$(printf '%s' "$ledger" | jq --argjson now "$now" --argjson keep_day "$((day_window - 7))" '
+    month_window=$(date -u +%Y-%m)
+    reconciled=$(printf '%s' "$ledger" | jq --argjson now "$now" --argjson keep_day "$((day_window - 7))" --arg month "$month_window" '
         .profile_quarantine = ((.profile_quarantine // []) | map(select(.until > $now))) |
         .records |= map(
             if .state == "reserved" and (.expires_at | tonumber) <= $now then
@@ -796,7 +801,11 @@ load_and_reconcile_ledger() {
                 .updated_at = $now
             else . end
         ) |
-        .records |= map(select(.state == "reserved" or (.day_window | tonumber) >= $keep_day))
+        .records |= map(select(
+            .state == "reserved" or
+            (.month_window // "") == $month or
+            (.day_window | tonumber) >= $keep_day
+        ))
     ') || return 1
     ledger="$reconciled"
     write_ledger "$ledger" || return 1
@@ -1346,6 +1355,15 @@ mark_credit_exhausted() {
 while IFS='|' read -r route_id profile_id upstream_model tier; do
     [ -n "$route_id" ] || continue
     [ "$route_id" = "$requested_model" ] || continue
+    if [ "$tier" = "paid" ] && { [ -e "$COST_DEGRADED_FILE" ] || [ -L "$COST_DEGRADED_FILE" ]; }; then
+        # The root watchdog publishes this marker only after reconciling the
+        # root-owned provider ledger.  During degradation, paid routes are not
+        # eligible; an explicitly configured free route may still serve a
+        # read-only request, otherwise the broker returns a budget response.
+        budget_denied_seen=1
+        last_failure="cost watchdog requires a free fallback"
+        continue
+    fi
     case "$tier" in
         paid) ;;
         free)
