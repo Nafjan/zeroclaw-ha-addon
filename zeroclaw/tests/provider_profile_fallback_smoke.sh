@@ -256,7 +256,20 @@ PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$
 ROUTE_SPEC="health-route|openrouter|health-model|paid"
 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 health_response=$(request_provider_health provider-health-secret)
+stop_listeners
+
+# BusyBox nc -l handles one connection and exits. Keep each assertion on a
+# fresh listener so the health contract is tested independently rather than
+# depending on a multi-request listener implementation.
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 planner_health_response=$(request_provider_health provider-client-secret)
+stop_listeners
+
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
 health_chat_response=$(request_proxy '{"model":"health-model","messages":[{"role":"user","content":"health credential must not chat"}]}' provider-health-secret)
 stop_listeners
 printf '%s' "$health_response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
