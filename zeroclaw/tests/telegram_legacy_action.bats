@@ -68,7 +68,7 @@ SCRIPT
     run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" GATE_RESULT=confirm \
         "$legacy_file" "ha.action_guarded 'scene/reload' '{}'"
     [ "$status" -eq 0 ]
-    [ "$output" = "Approval needed (id deadbeef). Reply YES deadbeef to proceed." ]
+    [ "$output" = "Approval needed (id deadbeef). Reply with the exact YES/NO form shown in the Telegram approval message." ]
 }
 
 @test "turns a policy denial into a truthful safe reply" {

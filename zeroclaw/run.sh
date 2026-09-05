@@ -1324,6 +1324,7 @@ APPROVAL_CHAT="${FIRST_USER}"
 . /opt/zeroclaw/lib/telegram-session.sh
 . /opt/zeroclaw/lib/telegram-agent-turn.sh
 . /opt/zeroclaw/lib/telegram-message-guard.sh
+. /opt/zeroclaw/lib/telegram-approval-format.sh
 [ ! -L "\$REPLY_CACHE_DIR" ] || exit 1
 if [ ! -d "\$REPLY_CACHE_DIR" ]; then
     mkdir -m 0700 "\$REPLY_CACHE_DIR" 2>/dev/null || exit 1
@@ -1738,14 +1739,6 @@ valid_chat_id() {
     esac
 }
 
-approval_id() {
-    printf '%s' "\$1" | sed -nE 's/^[[:space:]]*[Yy][Ee][Ss][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p'
-}
-
-rejection_id() {
-    printf '%s' "\$1" | sed -nE 's/^[[:space:]]*[Nn][Oo][[:space:]]+([a-f0-9]{8})[[:space:]]*$/\1/p'
-}
-
 apply_approved_ticket() {
     short="\$1"; actor="\$2"; chat="\$3"
     ticket="/data/approval-receipts/tickets/\${short}.json"
@@ -1796,20 +1789,34 @@ handle_message() {
     fi
     [ -z "\$text" ] && return
 
-    APPROVE_ID=\$(approval_id "\$text")
-    REJECT_ID=\$(rejection_id "\$text")
+    APPROVE_REQUEST=\$(approval_request "\$text" 2>/dev/null || true)
+    REJECT_REQUEST=\$(rejection_request "\$text" 2>/dev/null || true)
+    APPROVE_ID=""
+    APPROVE_GENERATION=""
+    REJECT_ID=""
+    REJECT_GENERATION=""
+    if [ -n "\$APPROVE_REQUEST" ]; then
+        APPROVE_ID="\${APPROVE_REQUEST%% *}"
+        APPROVE_GENERATION="\${APPROVE_REQUEST#* }"
+    fi
+    if [ -n "\$REJECT_REQUEST" ]; then
+        REJECT_ID="\${REJECT_REQUEST%% *}"
+        REJECT_GENERATION="\${REJECT_REQUEST#* }"
+    fi
     if [ -n "\$APPROVE_ID" ] || [ -n "\$REJECT_ID" ]; then
         SHORT="\${APPROVE_ID:-\$REJECT_ID}"
+        APPROVAL_GENERATION="\${APPROVE_GENERATION:-\$REJECT_GENERATION}"
         if [ "\$from_id" != "\$APPROVAL_USER" ] || [ "\$chat_id" != "\$APPROVAL_CHAT" ]; then
             if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "This approval belongs to the configured approval owner."; then return 1; fi
             return 0
         fi
         TICKET="/data/approval-receipts/tickets/\${SHORT}.json"
         if [ ! -f "\$TICKET" ]; then
-            if [ -n "\$APPROVE_ID" ] && replay_approval_message "\$SHORT" "\$update_id" "\$chat_id" "\$from_id"; then
-                return 0
-            fi
             if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Ticket \${SHORT} is expired or already actioned."; then return 1; fi
+            return 0
+        fi
+        if ! approval_generation_matches "\$TICKET" "\$APPROVAL_GENERATION"; then
+            if ! send_and_cache "\$update_id" "\$chat_id" "That approval code is no longer valid for ticket \${SHORT}. Use the exact YES/NO form shown in the current Telegram approval message."; then return 1; fi
             return 0
         fi
         SUMMARY=\$(canonical_ticket_summary "\$TICKET") || return 1
@@ -1846,6 +1853,13 @@ handle_message() {
         else
             if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "Rejection for \${SHORT} could not be applied."; then return 1; fi
         fi
+        return 0
+    fi
+
+    LEGACY_APPROVAL_ID=\$(legacy_approval_id "\$text" 2>/dev/null || true)
+    LEGACY_REJECTION_ID=\$(legacy_rejection_id "\$text" 2>/dev/null || true)
+    if [ -n "\$LEGACY_APPROVAL_ID" ] || [ -n "\$LEGACY_REJECTION_ID" ]; then
+        if ! send_and_cache "\$update_id" "\$chat_id" "\$from_id" "This approval reply is missing its one-time code. Use the exact YES/NO form shown in the Telegram approval message."; then return 1; fi
         return 0
     fi
 
@@ -2407,11 +2421,11 @@ case "\$KIND" in
           '{uuid:\$uuid,service:\$svc,payload:\$p,summary:\$sum,expires_at:\$exp,created_at:\$cre,verdict:\$verdict,approval:{actor_user_id:\$approval_user,chat_id:\$approval_chat,channel:"telegram"}}' \\
           > "\$TICKET_TMP"
         mv "\$TICKET_TMP" "\$TICKET"
-        # v3.1.2: send with inline-keyboard chips. Falls back gracefully
-        # to text-only "YES <id>"/"NO <id>" if Telegram refuses markup.
+        # v3.1.2: send with inline-keyboard chips. The root broker renders the
+        # exact generation-bound text form if an operator needs text fallback.
         MSG="⚠️ Approval needed (\${SHORT})
 \${SUMMARY}
-Tap a chip below — or reply YES \${SHORT} / NO \${SHORT}.
+Tap a chip below — or use the exact YES/NO form shown in the root Telegram message.
 Expires in 30 min."
         if ! /usr/local/bin/tg-send-approval "\${SHORT}" "\$MSG" >/dev/null 2>&1; then
             /usr/local/bin/zc-audit-write confirm_failed "\$SERVICE" "\$BODY" "ticket=\${SHORT};notification_failed" || true
@@ -3104,14 +3118,15 @@ You CANNOT call ha-action-raw directly. Every action goes through ha-action-guar
 The gate returns one of three things:
 
   exit 0 → executed. Write the outcome line. e.g. "Study AC → 24°C."
-  exit 2 → CONFIRM_PENDING ticket=<id8>. Tell the user:
-           "Approval needed (id <id8>). Reply YES <id8> on Telegram to proceed."
+  exit 2 → CONFIRM_PENDING ticket=<id8>. Tell the user that approval is pending
+           and they must use the exact YES/NO form shown in the root Telegram message.
   exit 1 → DENIED. Show the user the policy reason. Don't retry.
 
-When the user replies "YES <id>" or "NO <id>", the root-owned Telegram
-adapter validates the actor/chat binding and applies the transition. Never ask
-the model to manufacture an approval or call an approval bridge. After a
-successful approval, the adapter applies the ticket and reports the outcome.
+When the user replies using the exact generation-bound YES/NO form shown in the
+root-owned Telegram message, the adapter validates the actor/chat binding and
+applies the transition. Never ask the model to manufacture an approval or call
+an approval bridge. After a successful approval, the adapter applies the ticket
+and reports the outcome.
 
 ## AC actions — pre-check first
 Before set_temperature / set_hvac_mode, use the shell tool with ha-state. If state already matches request,
