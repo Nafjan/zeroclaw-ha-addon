@@ -106,6 +106,10 @@ jobs:
             echo "inline promotion is disabled; run release.yml with promote=false, commit post-canary evidence, then use promote-existing.yml" >&2
             exit 1
           fi
+          if [ "$GITHUB_REF" != "refs/heads/master" ] || [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "privileged candidate publication requires a workflow_dispatch run from refs/heads/master" >&2
+            exit 1
+          fi
           # RELEASE_TAG is supplied by the workflow environment above; keep
           # the lowercase local separate from the input name for shellcheck.
           # shellcheck disable=SC2153
@@ -1020,6 +1024,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "Nafjan/zeroclaw-ha-addon"
+          test "$GITHUB_REF" = "refs/heads/master"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test "$PROMOTE" = "false"
           test "$CANDIDATE_COMMIT" = "$GITHUB_SHA"
           test "$RELEASE_TAG" = "$RELEASE_TAG_INPUT"
@@ -1410,11 +1416,11 @@ jobs:
     needs: [candidate, canary]
     if: ${{ inputs.promote == true }}
     runs-on: ubuntu-latest
-    # Share the version-keyed lock with promote-existing.yml.  The candidate
-    # build may run concurrently, but immutable tag creation and Git release
-    # tagging must be one serialized operation per release tag.
+    # Share the production lock with promote-existing.yml. GitHub expression
+    # keys cannot canonicalize both vX and X spellings of one release tag, so
+    # immutable tag creation and Git release tagging use one global lock.
     concurrency:
-      group: zeroclaw-promotion-${{ needs.candidate.outputs.release_tag }}
+      group: zeroclaw-promotion-production
       cancel-in-progress: false
     environment:
       name: production

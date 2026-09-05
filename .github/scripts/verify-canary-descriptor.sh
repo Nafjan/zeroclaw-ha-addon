@@ -62,6 +62,33 @@ grep -F -x "slug: ${CANARY_SLUG}" "$DESCRIPTOR" >/dev/null || {
     echo "descriptor does not use the isolated canary slug" >&2
     exit 1
 }
+top_level_allowlist='^(name|version|slug|description|url|image|arch|init|startup|boot|homeassistant_api|hassio_api|hassio_role|options|schema):'
+while IFS= read -r descriptor_line; do
+    case "$descriptor_line" in
+        ''|'#'*) continue ;;
+    esac
+    if [[ "$descriptor_line" =~ ^([A-Za-z0-9_-]+): ]]; then
+        printf '%s' "${BASH_REMATCH[1]}:" | grep -Eq "$top_level_allowlist" || {
+            echo "descriptor contains an unapproved top-level Supervisor field" >&2
+            exit 1
+        }
+    fi
+done < "$DESCRIPTOR"
+# These manifest capabilities are intentionally absent from this canary. A
+# future descriptor must not gain them merely because the canonical config or
+# renderer starts copying a new field.
+if grep -Eiq '^[[:space:]]*(privileged|host_network|host_pid|host_ipc|devices|map|usb|gpio|uart|audio|video|ports|ports_description|cap_add|cap_drop|security_opt|apparmor|full_access):' "$DESCRIPTOR"; then
+    echo "descriptor requests an unapproved privileged or host capability" >&2
+    exit 1
+fi
+grep -F -x 'init: false' "$DESCRIPTOR" >/dev/null || {
+    echo "descriptor must disable the init process" >&2
+    exit 1
+}
+grep -F -x 'hassio_role: default' "$DESCRIPTOR" >/dev/null || {
+    echo "descriptor must use the default least-privilege Supervisor role" >&2
+    exit 1
+}
 grep -F -x 'name: ZeroClaw Canary' "$DESCRIPTOR" >/dev/null || {
     echo "descriptor does not identify the canary app" >&2
     exit 1

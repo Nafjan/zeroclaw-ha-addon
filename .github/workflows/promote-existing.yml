@@ -146,6 +146,20 @@ jobs:
           test "$candidate_commit_prefix" = "${CANDIDATE_COMMIT:0:12}"
           git cat-file -e "${CANDIDATE_COMMIT}^{commit}"
           git merge-base --is-ancestor "$CANDIDATE_COMMIT" HEAD
+          # The candidate image must represent the exact source tree that was
+          # reviewed and built. Only the redacted post-canary evidence bundle
+          # may be committed after the candidate; source/workflow changes make
+          # this promotion request stale and require a new candidate build.
+          while IFS= read -r changed_file; do
+            case "$changed_file" in
+              zeroclaw/CANARY-EVIDENCE.md|zeroclaw/canary-evidence.json|zeroclaw/canary-config.yaml|zeroclaw/canary-identity.json|zeroclaw/provider-contract-report.json) ;;
+              '') ;;
+              *)
+                echo "candidate is stale: non-evidence file changed after the candidate: $changed_file" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only --diff-filter=ACDMRTUXB "$CANDIDATE_COMMIT" HEAD)
           # A signed image and valid attestations are not sufficient for
           # production.  Bind the supplied candidate run to the exact
           # trusted reproducible-builder job; otherwise a hosted/cross/direct
@@ -162,9 +176,10 @@ jobs:
              (.conclusion == "success")' >/dev/null
           candidate_jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/jobs?per_page=100")"
           printf '%s' "$candidate_jobs_json" | jq -e \
-            '([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")] | length == 1) and
-             ([.jobs[] | select(.name == "Rebuild, attest, and sign candidate digest")][0].labels |
-              index("zeroclaw-release-linux-x64") != null)' >/dev/null
+            '([.jobs[] | select(.name == "Reproducible candidate build")] | length == 1) and
+             ([.jobs[] | select(.name == "Reproducible candidate build")][0] |
+              (.labels | index("zeroclaw-release-linux-x64") != null) and
+              ([.steps[] | select(.name == "Rebuild twice with isolated direct pinned builders")][0].conclusion == "success"))' >/dev/null
           candidate_resolved="$(docker buildx imagetools inspect "${image}:${CANDIDATE_TAG}" --format '{{.Manifest.Digest}}')"
           canary_resolved="$(docker buildx imagetools inspect "${image}:${CANARY_TAG}" --format '{{.Manifest.Digest}}')"
           test "$candidate_resolved" = "$CANDIDATE_DIGEST"
@@ -200,6 +215,20 @@ jobs:
           descriptor_revision="${descriptor_revision%%/*}"
           provider_report_revision="${CANARY_PROVIDER_REPORT#"$raw_prefix"}"
           provider_report_revision="${provider_report_revision%%/*}"
+          for checked_revision in "$evidence_revision" "$descriptor_revision" "$provider_report_revision"; do
+            printf '%s' "$checked_revision" | grep -Eq '^[0-9a-f]{40}$' || {
+              echo "canary evidence revision is not a full commit" >&2
+              exit 1
+            }
+            git cat-file -e "${checked_revision}^{commit}" || {
+              echo "canary evidence revision is not present in the checked-out repository" >&2
+              exit 1
+            }
+            git merge-base --is-ancestor "$checked_revision" HEAD || {
+              echo "canary evidence revision is not an ancestor of protected master" >&2
+              exit 1
+            }
+          done
           test "$descriptor_revision" = "$evidence_revision"
           test "$provider_report_revision" = "$evidence_revision"
           evidence_file="$RUNNER_TEMP/zeroclaw-canary-evidence.json"
@@ -232,11 +261,11 @@ jobs:
     name: Promote the already-canaryed digest
     needs: verify
     runs-on: ubuntu-latest
-    # This group is shared with release.yml's promote job.  The entire
-    # check/create/tag sequence must be serialized per release tag so two
-    # approved entry points cannot interleave on the same version.
+    # This group is shared with release.yml's promote job. Serialize the
+    # entire check/create/tag sequence globally: GitHub expression keys cannot
+    # canonicalize both vX and X spellings of the same release tag.
     concurrency:
-      group: zeroclaw-promotion-${{ inputs.release_tag }}
+      group: zeroclaw-promotion-production
       cancel-in-progress: false
     environment:
       name: production

@@ -17,6 +17,7 @@ REPLY_CACHE_DIR="${DATA_DIR}/capability/telegram-replies"
 CALLBACK_CACHE_DIR="${DATA_DIR}/capability/telegram-callbacks"
 ACTION_ADMISSION_DIR="${DATA_DIR}/capability/action-admissions"
 APPROVAL_OUTCOME_DIR="${RECEIPT_DIR}/outcomes"
+TICKET_NONCE_DIR="${RECEIPT_DIR}/ticket-nonces"
 OUTCOME_FILE="${DATA_DIR}/capability/last-outcome.json"
 NOW=$(date -u +%s)
 CLAIM_GRACE_SECONDS=3600
@@ -37,12 +38,56 @@ old_enough() {
     path="$1"
     grace="$2"
     [ -e "$path" ] || [ -L "$path" ] || return 1
-    mtime=$(stat -c %Y "$path" 2>/dev/null || echo 0)
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || return 1
     case "$mtime" in
         ''|*[!0-9]*) return 1 ;;
     esac
     [ "$mtime" -le $((NOW - grace)) ]
 }
+
+runtime_lock_is_stale() {
+    runtime_lock="$1"
+    runtime_parent=$(dirname -- "$runtime_lock")
+    [ -d "$runtime_parent" ] && [ ! -L "$runtime_parent" ] || return 1
+    [ -d "$runtime_lock" ] && [ ! -L "$runtime_lock" ] || return 1
+
+    runtime_owner_file="${runtime_lock}/owner"
+    if [ -e "$runtime_owner_file" ] || [ -L "$runtime_owner_file" ]; then
+        [ -f "$runtime_owner_file" ] && [ ! -L "$runtime_owner_file" ] || return 1
+        runtime_owner_pid=$(cat "$runtime_owner_file" 2>/dev/null || true)
+        case "$runtime_owner_pid" in
+            ''|0|*[!0-9]*) return 1 ;;
+        esac
+        # A live owner keeps the lock.  An owner-less lock is supported for
+        # upgrades from older releases and is reclaimed only after the grace
+        # period below.
+        kill -0 "$runtime_owner_pid" 2>/dev/null && return 1
+    fi
+    old_enough "$runtime_lock" "$LOCK_GRACE_SECONDS"
+}
+
+remove_stale_runtime_lock() {
+    runtime_lock="$1"
+    runtime_lock_is_stale "$runtime_lock" || return 0
+    # These are fixed broker lock paths.  Remove only the known owner marker;
+    # an unexpected entry makes rmdir fail closed rather than deleting data.
+    rm -f -- "${runtime_lock}/owner" 2>/dev/null || true
+    rmdir "$runtime_lock" 2>/dev/null || true
+}
+
+# Capability and audit quota locks are transient coordination state, not
+# durable evidence. A crash can strand them after EXIT cleanup is skipped;
+# reclaim only a dead/owner-less lock after the bounded transition grace.
+for runtime_lock in \
+    "${DATA_DIR}/capability/.quota.lock" \
+    "${DATA_DIR}/capability/.read-quota.lock" \
+    "${DATA_DIR}/capability/.telegram-approval-rate.lock" \
+    "${DATA_DIR}/capability/.telegram-approval-admission.lock" \
+    "${DATA_DIR}/provider/.ledger.lock" \
+    "${DATA_DIR}/audit/.lock" \
+    "${DATA_DIR}/audit/planner/.quota.lock"; do
+    remove_stale_runtime_lock "$runtime_lock"
+done
 
 remove_expired_ticket() {
     ticket="$1"
@@ -59,10 +104,13 @@ remove_expired_ticket() {
     fi
 
     rm -f "$ticket" "${MARKER_DIR}/${short}.marker" \
-        "${RECEIPT_DIR}/${short}.sha256" \
-        "${DATA_DIR}/pending/${short}.json"
+        "${RECEIPT_DIR}/${short}.sha256"
     if [ -d "$claim" ]; then
         rmdir "$claim" 2>/dev/null || true
+    fi
+    nonce_path="${TICKET_NONCE_DIR}/${short}"
+    if [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ]; then
+        rmdir "$nonce_path" 2>/dev/null || true
     fi
     rmdir "$lock" 2>/dev/null || true
 }
@@ -84,6 +132,24 @@ if [ -d "$TICKET_DIR" ]; then
         esac
         [ "$expires" -lt "$NOW" ] || continue
         remove_expired_ticket "$ticket" "$short"
+    done
+fi
+
+# Nonces are empty replay barriers, not durable approval evidence.  Remove the
+# nonce with its expired ticket and reclaim only old orphan directories after
+# the same bounded recovery grace.  rmdir is intentional: unexpected contents
+# make cleanup fail closed instead of deleting evidence or attacker data.
+if [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ]; then
+    for nonce_path in "$TICKET_NONCE_DIR"/*; do
+        [ -d "$nonce_path" ] || [ -L "$nonce_path" ] || continue
+        [ -L "$nonce_path" ] && continue
+        short=$(basename "$nonce_path")
+        valid_short "$short" || continue
+        if [ -e "${TICKET_DIR}/${short}.json" ] || [ -L "${TICKET_DIR}/${short}.json" ]; then
+            continue
+        fi
+        old_enough "$nonce_path" "$CLAIM_GRACE_SECONDS" || continue
+        rmdir "$nonce_path" 2>/dev/null || true
     done
 fi
 
@@ -140,8 +206,7 @@ if [ -d "$LOCK_DIR" ]; then
     for lock in "$LOCK_DIR"/approval-*.lock; do
         [ -d "$lock" ] || [ -L "$lock" ] || continue
         [ -L "$lock" ] && continue
-        old_enough "$lock" "$LOCK_GRACE_SECONDS" || continue
-        rmdir "$lock" 2>/dev/null || true
+        remove_stale_runtime_lock "$lock"
     done
 fi
 

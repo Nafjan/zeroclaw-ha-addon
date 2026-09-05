@@ -17,6 +17,7 @@ LEDGER=/data/provider/profile-ledger.json
 LOCK=/data/provider/.profile-ledger.lock
 PROFILE_DAILY_BUDGET=32768
 REPORT_OUTPUT="${PROVIDER_CONTRACT_REPORT_OUTPUT:-/data/provider/provider-contract-report.json}"
+CURRENT_CHECK=setup
 mkdir -p /data/provider
 install -m 0755 /opt/zeroclaw/lib/provider-broker-handler.sh /usr/local/bin/provider-broker-handler
 install -m 0755 /opt/zeroclaw/lib/provider-broker-entrypoint.sh /usr/local/bin/provider-broker-entrypoint
@@ -48,6 +49,11 @@ if [ "$content_length" -gt 0 ]; then
 fi
 printf '\n' >> "$log_file"
 body="${FAKE_BODY:-}"
+if [ -n "${FAKE_REFLECT_VALUE:-}" ]; then
+    reflected_value=$(printf '%s' "$FAKE_REFLECT_VALUE" | base64 | tr -d '\r\n')
+    body=$(jq -nc --arg reflected "$reflected_value" \
+        '{choices:[{message:{content:$reflected}}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}')
+fi
 [ -n "$body" ] || body='{"error":"fake failure"}'
 if [ "${FAKE_DELAY:-0}" -gt 0 ]; then
     sleep "${FAKE_DELAY}"
@@ -110,6 +116,8 @@ next_case_ports() {
     OPENROUTER_PORT=$((PROXY_PORT + 1))
     NVIDIA_PORT=$((PROXY_PORT + 2))
     CASE_INDEX=$((CASE_INDEX + 1))
+    rm -f /data/provider/profile-client-rate.json \
+        /data/provider/.profile-client-rate.lock
 }
 
 start_upstream() {
@@ -119,6 +127,7 @@ start_upstream() {
     upstream_body="$4"
     upstream_log="$5"
     upstream_delay="${6:-0}"
+    upstream_reflect_value="${7:-}"
     if [ "$upstream_port" -eq "$OPENROUTER_PORT" ]; then
         OPENROUTER_PID=0
     else
@@ -126,6 +135,7 @@ start_upstream() {
     fi
     FAKE_STATUS="$upstream_status" FAKE_REASON="$upstream_reason" \
     FAKE_BODY="$upstream_body" FAKE_LOG="$upstream_log" FAKE_DELAY="$upstream_delay" \
+    FAKE_REFLECT_VALUE="$upstream_reflect_value" \
         /bin/busybox nc -l -p "$upstream_port" -s 127.0.0.1 \
         -e /tmp/provider-profile-fake-upstream &
     if [ "$upstream_port" -eq "$OPENROUTER_PORT" ]; then
@@ -151,17 +161,36 @@ start_credit_then_free_upstream() {
 start_proxy() {
     profile_spec="$1"
     route_spec="$2"
+    # BusyBox ash may retain an assignment preceding a shell function after
+    # the function returns. Capture each per-case override and clear it before
+    # launching the background listener so a narrow test fixture cannot alter
+    # every later provider case in this process.
+    profile_max_requests="${TEST_PROVIDER_MAX_REQUESTS_PER_HOUR:-120}"
+    profile_client_requests="${TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR:-120}"
+    profile_input_tokens="${PROVIDER_MAX_INPUT_TOKENS:-16384}"
+    profile_daily_cost_limit="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}"
+    profile_monthly_cost_limit="${TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS:-1000000000}"
+    profile_total_timeout="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
+    unset TEST_PROVIDER_MAX_REQUESTS_PER_HOUR TEST_PROVIDER_CLIENT_REQUESTS_PER_HOUR \
+        PROVIDER_MAX_INPUT_TOKENS TEST_PROVIDER_DAILY_COST_LIMIT_MICROS \
+        TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS
     PROVIDER_PROFILE_SPEC="$profile_spec" PROVIDER_ROUTE_SPEC="$route_spec" \
         PROVIDER_CLIENT_AUTH_TOKEN=provider-client-secret \
+        PROVIDER_HEALTH_CLIENT_AUTH_TOKEN=provider-health-secret \
         PROVIDER_FALLBACK_ENABLED=true PROVIDER_FREE_FALLBACK_ENABLED=true \
         PROVIDER_FUSION_PRESET=general-budget PROVIDER_AUTO_COST_TIER=medium \
-        PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-16384}" \
-        PROVIDER_DAILY_COST_LIMIT_MICROS="${TEST_PROVIDER_DAILY_COST_LIMIT_MICROS:-100000000}" PROVIDER_MONTHLY_COST_LIMIT_MICROS=1000000000 \
+        PROVIDER_MAX_TOKENS=16 PROVIDER_MAX_INPUT_TOKENS="$profile_input_tokens" \
+        PROVIDER_MAX_REQUESTS_PER_HOUR="$profile_max_requests" \
+        PROVIDER_CLIENT_REQUESTS_PER_HOUR="$profile_client_requests" \
+        PROVIDER_DAILY_COST_LIMIT_MICROS="$profile_daily_cost_limit" PROVIDER_MONTHLY_COST_LIMIT_MICROS="$profile_monthly_cost_limit" \
          PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS=100000 \
          PROVIDER_LEDGER_FILE="$LEDGER" \
          PROVIDER_LEDGER_LOCK="$LOCK" PROVIDER_LOG_FILE=/data/provider/profile.log \
+         PROVIDER_CLIENT_RATE_FILE=/data/provider/profile-client-rate.json \
+         PROVIDER_CLIENT_RATE_LOCK=/data/provider/.profile-client-rate.lock \
+         PROVIDER_COST_DEGRADED_FILE=/data/provider/cost-degraded \
          PROVIDER_RESERVATION_TTL_SECONDS=180 \
-         PROVIDER_TOTAL_TIMEOUT_SECONDS="${TEST_PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}" \
+         PROVIDER_TOTAL_TIMEOUT_SECONDS="$profile_total_timeout" \
          /bin/busybox nc -l -p "$PROXY_PORT" -s 127.0.0.1 \
         -e /usr/local/bin/provider-broker-entrypoint &
     PROXY_PID=$!
@@ -182,24 +211,75 @@ stop_listeners() {
 
 request_proxy() {
     request_body="$1"
+    request_auth="${2:-provider-client-secret}"
     body_length=$(printf '%s' "$request_body" | wc -c | tr -d ' ')
     {
         printf 'POST /v1/chat/completions HTTP/1.1\r\n'
-        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer provider-client-secret\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
-            "$body_length" "$request_body"
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' \
+            "$request_auth" "$body_length" "$request_body"
+    } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
+}
+
+request_provider_health() {
+    request_auth="$1"
+    {
+        printf 'GET /health HTTP/1.1\r\n'
+        printf 'Host: 127.0.0.1\r\nAuthorization: Bearer %s\r\n\r\n' "$request_auth"
     } | /bin/busybox nc -w "${PROVIDER_TEST_CLIENT_TIMEOUT:-15}" 127.0.0.1 "$PROXY_PORT"
 }
 
 cleanup() {
     stop_listeners
+    rm -f /data/provider/cost-degraded
 }
-trap cleanup EXIT
+trap 'status=$?; trap - EXIT; if [ "$status" -ne 0 ]; then
+    printf "provider profile fallback smoke failed (status %s, check %s)\n" "$status" "${CURRENT_CHECK-unknown}" >&2
+    for diagnostic_file in /data/provider/profile.log /data/provider/profile-ledger.json; do
+        if [ -f "$diagnostic_file" ]; then
+            echo "--- ${diagnostic_file} ---" >&2
+            tail -80 "$diagnostic_file" 2>/dev/null |
+                sed -E "s/(Bearer )[[:graph:]]+/\\1[redacted]/g; s/(openrouter|nvidia)-secret/[redacted]/g" >&2 || true
+        fi
+    done
+fi; cleanup; exit "$status"' EXIT
 
+CURRENT_CHECK=initial-credit-fallback
 rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-credit.log \
     /data/provider/nvidia-success.log /data/provider/free-success.log
 NOW=$(date -u +%s)
 printf '{"hour_window":%s,"day_window":%s,"requests_hour":1,"tokens_day":40}\n' \
     "$((NOW / 3600))" "$((NOW / 86400))" > "$LEDGER"
+
+# The protected provider health endpoint must prove the handler is serving,
+# without contacting an upstream or consuming a client/provider budget slot.
+CURRENT_CHECK=authenticated-provider-health
+rm -f "$LOCK"
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="health-route|openrouter|health-model|paid"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+health_response=$(request_provider_health provider-health-secret)
+stop_listeners
+
+# BusyBox nc -l handles one connection and exits. Keep each assertion on a
+# fresh listener so the health contract is tested independently rather than
+# depending on a multi-request listener implementation.
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+planner_health_response=$(request_provider_health provider-client-secret)
+stop_listeners
+
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+health_chat_response=$(request_proxy '{"model":"health-model","messages":[{"role":"user","content":"health credential must not chat"}]}' provider-health-secret)
+stop_listeners
+printf '%s' "$health_response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$health_response" | grep -F '{"status":"ok"}' >/dev/null
+printf '%s' "$planner_health_response" | grep -F 'HTTP/1.1 401 Unauthorized' >/dev/null
+printf '%s' "$health_chat_response" | grep -F 'HTTP/1.1 401 Unauthorized' >/dev/null
+[ ! -e /data/provider/profile-client-rate.json ]
 
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
@@ -227,11 +307,49 @@ jq -e '[.records[] | select(.settlement == "migrated_reserved_max")] | length ==
     "$LEDGER" >/dev/null
 jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "primary-model")] | length == 1 and .[0].settlement == "reserved_max_credit_exhausted"' \
     "$LEDGER" >/dev/null
-jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 3' \
+jq -e '[.records[] | select(.profile_id == "nvidia")] | length == 1 and .[0].settled_tokens == 16 and .[0].settled_input_tokens == 328 and .[0].usage_floor == true' \
     "$LEDGER" >/dev/null
+
+# The hourly request ceiling is global to the provider ledger, not a separate
+# allowance per profile. A failed primary must therefore prevent a fallback
+# attempt when the single global slot is already consumed.
+CURRENT_CHECK=global-hour-admission
+rm -f "$LEDGER" "$LOCK" /data/provider/global-hour-primary.log /data/provider/global-hour-fallback.log
+next_case_ports
+# Seed an already-settled request in the current global hour. This keeps the
+# admission test deterministic even if a disposable BusyBox listener from the
+# preceding case takes a moment to exit; the scenario is specifically about a
+# consumed global slot preventing every later profile, not about re-testing
+# failed-request settlement.
+global_hour_now=$(date -u +%s)
+jq -nc --argjson now "$global_hour_now" --argjson hour "$((global_hour_now / 3600))" \
+    --argjson day "$((global_hour_now / 86400))" --arg month "$(date -u +%Y-%m)" \
+    '{schema:1,records:[{id:"seed-global-hour",created_at:$now,expires_at:($now + 180),
+      hour_window:$hour,day_window:$day,month_window:$month,route_id:"seed",
+      profile_id:"openrouter",upstream_model:"seed-model",reserved_tokens:16,
+      reserved_input_tokens:328,settled_tokens:16,settled_input_tokens:328,
+      reserved_cost_micros:34400,settled_cost_micros:34400,state:"settled",
+      settlement:"seeded_global_hour",updated_at:$now}],profile_quarantine:[]}' > "$LEDGER"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
+nvidia|http://127.0.0.1:$NVIDIA_PORT/v1/chat/completions|$NVIDIA_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="global-hour-route|openrouter|global-hour-primary|paid
+global-hour-route|nvidia|global-hour-fallback|paid"
+start_upstream "$OPENROUTER_PORT" 402 "Payment Required" \
+    '{"error":{"code":"insufficient_quota","message":"credits exhausted"}}' \
+    /data/provider/global-hour-primary.log
+start_upstream "$NVIDIA_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}]}' \
+    /data/provider/global-hour-fallback.log
+TEST_PROVIDER_MAX_REQUESTS_PER_HOUR=1 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+global_hour_response=$(request_proxy '{"model":"global-hour-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$global_hour_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/global-hour-fallback.log ]
+jq -e '[.records[] | select(.hour_window == (now / 3600 | floor))] | length == 1' "$LEDGER" >/dev/null
 
 # A transient 5xx is classified separately from credit exhaustion and can
 # reach an explicitly configured alternate profile.
+CURRENT_CHECK=transient-5xx-fallback
 rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-5xx.log \
     /data/provider/nvidia-5xx-success.log
 next_case_ports
@@ -255,6 +373,7 @@ jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "
 
 # A credential failure blocks every later route on the same profile; it is not
 # silently treated as a transient or credit-exhaustion fallback.
+CURRENT_CHECK=credential-invalid-block
 rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-401.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -271,6 +390,7 @@ jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "
 
 # A real upstream timeout/network failure is settled and classified before the
 # broker tries to return its fail-closed response.
+CURRENT_CHECK=network-timeout
 rm -f "$LEDGER" "$LOCK" /data/provider/openrouter-timeout.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -289,6 +409,7 @@ jq -e '[.records[] | select(.profile_id == "openrouter" and .upstream_model == "
 # A paid OpenRouter credit failure must still reach an explicitly configured
 # free route on the same root-owned profile. This is the user-facing
 # out-of-credits fallback path, and it remains limited to a no-tools request.
+CURRENT_CHECK=same-profile-free-fallback
 rm -f "$LEDGER" "$LOCK" /data/provider/same-profile-free.state /data/provider/same-profile-free.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -303,6 +424,7 @@ printf '%s' "$response" | grep -F 'same-profile-free-ok' >/dev/null
 [ "$(cat /data/provider/same-profile-free.state)" = 2 ]
 grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/same-profile-free.log >/dev/null
 
+CURRENT_CHECK=cross-profile-free-fallback
 rm -f "$LEDGER" "$LOCK" /data/provider/free-success.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}
@@ -321,6 +443,7 @@ grep -F '"model":"nvidia/nemotron-3.5-lightning:free"' /data/provider/free-succe
 ! grep -F '"tools"' /data/provider/free-success.log >/dev/null
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
+CURRENT_CHECK=free-router-fallback
 rm -f "$LEDGER" "$LOCK" /data/provider/free-router-success.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -337,6 +460,29 @@ grep -F '"model":"openrouter/free"' /data/provider/free-router-success.log >/dev
 ! grep -F '"tools"' /data/provider/free-router-success.log >/dev/null
 ! printf '%s' "$response" | grep -F 'openrouter-secret' >/dev/null
 
+# Root-accounted cost degradation must be enforced by the provider broker, not
+# merely announced by the watchdog. Paid routes are skipped and an explicit
+# no-tools free route is still eligible.
+CURRENT_CHECK=cost-degraded-paid-route
+rm -f "$LEDGER" "$LOCK" /data/provider/cost-degraded /data/provider/cost-degraded-success.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="default-route|openrouter|paid-model|paid
+default-route|openrouter|openrouter/free|free"
+touch /data/provider/cost-degraded
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"cost-degraded-free-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}' \
+    /data/provider/cost-degraded-success.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"default-route","messages":[{"role":"user","content":"status"}]}')
+stop_listeners
+rm -f /data/provider/cost-degraded
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'cost-degraded-free-ok' >/dev/null
+grep -F '"model":"openrouter/free"' /data/provider/cost-degraded-success.log >/dev/null
+! grep -F '"model":"paid-model"' /data/provider/cost-degraded-success.log >/dev/null
+
+CURRENT_CHECK=tool-capable-free-block
 rm -f "$LEDGER" "$LOCK" /data/provider/free-blocked.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -352,6 +498,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 
 # Legacy OpenAI function-calling fields are also tool-capable. They must not
 # be downgraded to a free route when the modern tools field is absent.
+CURRENT_CHECK=legacy-function-free-block
 rm -f "$LEDGER" "$LOCK" /data/provider/function-blocked.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -378,6 +525,7 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
 
 # Router aliases are shaped by the root broker so the planner cannot choose
 # a more expensive Fusion preset or an unbounded Auto tier.
+CURRENT_CHECK=router-alias-shaping
 rm -f "$LEDGER" "$LOCK" /data/provider/deepseek-latest-success.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -424,6 +572,7 @@ grep -F '"cost_tier":"medium"' /data/provider/auto-success.log >/dev/null
 
 # The configured complex paid fallback is also bound to the root OpenRouter
 # profile and must be shaped as the exact upstream model ID.
+CURRENT_CHECK=complex-paid-model-shaping
 rm -f "$LEDGER" "$LOCK" /data/provider/pro-model-success.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -438,8 +587,10 @@ printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'pro-model-shaped' >/dev/null
 grep -F '"model":"deepseek/deepseek-v4-pro"' /data/provider/pro-model-success.log >/dev/null
 
-# The root broker must reject an oversized input estimate before contacting an
-# upstream.  This protects both provider spend and the durable token budget.
+# The root broker must reject an input whose raw byte size cannot fit within the
+# conservative byte-for-token reservation before contacting an upstream. This
+# protects both provider spend and the durable token budget.
+CURRENT_CHECK=input-limit
 rm -f "$LEDGER" "$LOCK" /data/provider/input-limit.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -453,12 +604,35 @@ large_body=$(jq -nc --arg content "$large_content" \
     '{model:"input-limit-route",messages:[{role:"user",content:$content}]}' )
 response=$(request_proxy "$large_body")
 stop_listeners
-printf '%s' "$response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
-printf '%s' "$response" | grep -F 'provider input token estimate exceeds the broker limit' >/dev/null
+printf '%s' "$response" | grep -F 'HTTP/1.1 413 Payload Too Large' >/dev/null
+printf '%s' "$response" | grep -F 'provider input is too large' >/dev/null
 [ ! -f /data/provider/input-limit.log ]
+
+# Exercise the real near-boundary default instead of only a reduced fixture
+# limit. The complete JSON envelope must fit under the 65,536-token admission
+# ceiling and still reach the upstream.
+CURRENT_CHECK=input-boundary
+rm -f "$LEDGER" "$LOCK" /data/provider/input-boundary.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|200000"
+ROUTE_SPEC="input-boundary-route|openrouter|input-boundary-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"input-boundary-ok"}}]}' \
+    /data/provider/input-boundary.log
+PROVIDER_MAX_INPUT_TOKENS=65536 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+boundary_content=$(head -c 64800 /dev/zero | tr '\0' x)
+boundary_body=$(jq -nc --arg content "$boundary_content" \
+    '{model:"input-boundary-route",messages:[{role:"user",content:$content}]}' )
+response=$(request_proxy "$boundary_body")
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'input-boundary-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "input-boundary-model" and .reserved_input_tokens >= 65000 and .reserved_input_tokens <= 65536)] | length == 1' \
+    "$LEDGER" >/dev/null
 
 # The root broker must reject fan-out requests instead of forwarding n>1 while
 # reserving only one completion budget.
+CURRENT_CHECK=fanout-rejection
 rm -f "$LEDGER" "$LOCK" /data/provider/n-invalid.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -472,10 +646,11 @@ stop_listeners
 printf '%s' "$n_invalid_response" | grep -F 'HTTP/1.1 400 Bad Request' >/dev/null
 [ ! -f /data/provider/n-invalid.log ]
 
-# The estimate must also leave room for provider tokenizer overhead.  The
-# fake upstream reports more prompt tokens than the old bytes/4 heuristic but
-# less than the conservative reservation above; a valid response must remain
-# successful and settle the prompt usage durably.
+# The byte-for-token reservation must leave room for provider tokenizer
+# overhead. The fake upstream reports more prompt tokens than the old bytes/4
+# heuristic but less than the conservative reservation above; a valid response
+# must remain successful and settle the prompt usage durably.
+CURRENT_CHECK=input-overhead
 rm -f "$LEDGER" "$LOCK" /data/provider/input-overhead.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
@@ -484,19 +659,139 @@ start_upstream "$OPENROUTER_PORT" 200 OK \
     '{"choices":[{"message":{"content":"input-overhead-ok"}}],"usage":{"prompt_tokens":260,"completion_tokens":1,"total_tokens":261}}' \
     /data/provider/input-overhead.log
 PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
-overhead_content=$(head -c 800 /dev/zero | tr '\0' x)
+overhead_content=$(head -c 400 /dev/zero | tr '\0' x)
 overhead_body=$(jq -nc --arg content "$overhead_content" \
     '{model:"input-overhead-route",messages:[{role:"user",content:$content}]}' )
 response=$(request_proxy "$overhead_body")
 stop_listeners
 printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
 printf '%s' "$response" | grep -F 'input-overhead-ok' >/dev/null
-jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens == 260)] | length == 1' \
+jq -e '[.records[] | select(.upstream_model == "input-overhead-model" and .settled_input_tokens >= 260 and .settled_tokens == 16)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# A compromised upstream must not be able to reflect a provider credential in
+# an encoded form. Exercise the real response scanner with a base64 payload and
+# require a bounded failure settlement before the response leaves the broker.
+CURRENT_CHECK=encoded-credential-reflection
+rm -f "$LEDGER" "$LOCK" /data/provider/encoded-reflection.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="encoded-reflection-route|openrouter|encoded-reflection-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"unused"}}]}' \
+    /data/provider/encoded-reflection.log 0 openrouter-secret
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+encoded_reflection_response=$(request_proxy '{"model":"encoded-reflection-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$encoded_reflection_response" | grep -F 'HTTP/1.1 502 Bad Gateway' >/dev/null
+! printf '%s' "$encoded_reflection_response" | grep -F 'openrouter-secret' >/dev/null
+jq -e '[.records[] | select(.profile_id == "openrouter" and .settlement == "reserved_max_credential_leak")] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# Provider usage is telemetry, not permission to release a durable reservation.
+# A successful response that under-reports both dimensions remains charged at
+# least the admitted input/output reservation.
+CURRENT_CHECK=usage-floor
+rm -f "$LEDGER" "$LOCK" /data/provider/usage-floor.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="usage-floor-route|openrouter|usage-floor-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"usage-floor-ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}' \
+    /data/provider/usage-floor.log
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"usage-floor-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'usage-floor-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "usage-floor-model" and .usage_floor == true and .settled_input_tokens > 0 and .settled_tokens == 16)] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# Monthly cost accounting must retain current-month settlements even when their
+# day window is older than the short token/log retention horizon.
+CURRENT_CHECK=monthly-ledger-retention
+rm -f "$LEDGER" "$LOCK" /data/provider/monthly-retention.log
+next_case_ports
+retention_now=$(date -u +%s)
+retention_day=$((retention_now / 86400 - 8))
+retention_hour=$((retention_now / 3600 - 192))
+retention_month=$(date -u +%Y-%m)
+jq -nc --argjson now "$retention_now" --argjson day "$retention_day" \
+    --argjson hour "$retention_hour" --arg month "$retention_month" \
+    '{schema:1,records:[{id:"month-retention-seed",created_at:($now - 691200),
+      expires_at:($now - 691000),hour_window:$hour,day_window:$day,month_window:$month,
+      route_id:"seed",profile_id:"openrouter",upstream_model:"seed-model",
+      reserved_tokens:16,reserved_input_tokens:328,settled_tokens:16,
+      settled_input_tokens:328,reserved_cost_micros:100000,settled_cost_micros:100000,
+      state:"settled",settlement:"seeded_month_retention",updated_at:($now - 691200)}],
+      profile_quarantine:[]}' > "$LEDGER"
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="monthly-retention-route|openrouter|monthly-retention-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"must-not-run"}}]}' \
+    /data/provider/monthly-retention.log
+TEST_PROVIDER_DAILY_COST_LIMIT_MICROS=100000 TEST_PROVIDER_MONTHLY_COST_LIMIT_MICROS=100000 \
+    PROVIDER_MAX_INPUT_TOKENS=1024 \
+    start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"monthly-retention-route","messages":[{"role":"user","content":"hello"}]}')
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/monthly-retention.log ]
+jq -e '[.records[] | select(.id == "month-retention-seed" and .month_window == (now | strftime("%Y-%m")))] | length == 1' \
+    "$LEDGER" >/dev/null
+
+# A provider that exceeds the admitted completion/input reservation is a hard
+# anomaly.  Quarantine the profile durably so a fresh broker connection cannot
+# immediately retry against the same untrusted accounting boundary.
+CURRENT_CHECK=accounting-overrun-quarantine
+rm -f "$LEDGER" "$LOCK" /data/provider/overrun.log /data/provider/overrun-second.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="overrun-route|openrouter|overrun-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"overrun"}}],"usage":{"prompt_tokens":1,"completion_tokens":32,"total_tokens":33}}' \
+    /data/provider/overrun.log
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+overrun_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$overrun_response" | grep -F 'HTTP/1.1 503 Service Unavailable' >/dev/null
+jq -e '[.records[] | select(.profile_id == "openrouter" and .settlement == "usage_overrun")] | length == 1' \
+    "$LEDGER" >/dev/null
+jq -e '.profile_quarantine | any(.[]; .profile_id == "openrouter" and .reason == "usage_overrun" and .until > now)' \
+    "$LEDGER" >/dev/null
+
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|2000"
+ROUTE_SPEC="overrun-route|openrouter|overrun-second-model|paid"
+PROVIDER_MAX_INPUT_TOKENS=1024 start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+overrun_second_response=$(request_proxy '{"model":"overrun-route","messages":[{"role":"user","content":"retry"}]}' )
+stop_listeners
+printf '%s' "$overrun_second_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
+[ ! -f /data/provider/overrun-second.log ]
+
+# Provider-reported paid cost is untrusted. A syntactically valid understated
+# value must not reduce the conservative cost reservation used by later budget
+# admission decisions.
+CURRENT_CHECK=cost-floor
+rm -f "$LEDGER" "$LOCK" /data/provider/cost-floor.log
+next_case_ports
+PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
+ROUTE_SPEC="cost-floor-route|openrouter|cost-floor-model|paid"
+start_upstream "$OPENROUTER_PORT" 200 OK \
+    '{"choices":[{"message":{"content":"cost-floor-ok"}}],"usage":{"prompt_tokens":331,"completion_tokens":16,"total_tokens":347,"cost":0}}' \
+    /data/provider/cost-floor.log
+start_proxy "$PROFILE_SPEC" "$ROUTE_SPEC"
+response=$(request_proxy '{"model":"cost-floor-route","messages":[{"role":"user","content":"hello"}]}' )
+stop_listeners
+printf '%s' "$response" | grep -F 'HTTP/1.1 200 OK' >/dev/null
+printf '%s' "$response" | grep -F 'cost-floor-ok' >/dev/null
+jq -e '[.records[] | select(.upstream_model == "cost-floor-model" and .settled_cost_micros > 0 and .settlement == "reserved_cost_floor")] | length == 1' \
     "$LEDGER" >/dev/null
 
 # Dollar limits are enforced by the root broker before the upstream call. A
 # request whose conservative reservation exceeds the configured daily cap
 # must not spend provider credits or contact the upstream.
+CURRENT_CHECK=cost-limit
 rm -f "$LEDGER" "$LOCK" /data/provider/cost-limit.log
 next_case_ports
 PROFILE_SPEC="openrouter|http://127.0.0.1:$OPENROUTER_PORT/v1/chat/completions|$OPENROUTER_KEY_FILE|10|${PROFILE_DAILY_BUDGET}"
@@ -510,6 +805,7 @@ stop_listeners
 printf '%s' "$cost_limit_response" | grep -F 'HTTP/1.1 429 Too Many Requests' >/dev/null
 [ ! -f /data/provider/cost-limit.log ]
 
+CURRENT_CHECK=contract-report
 suite_sha256=$(sha256sum "$0" | awk '{print $1}')
 ledger_sha256=$(sha256sum "$LEDGER" | awk '{print $1}')
 tested_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -537,7 +833,8 @@ jq -n \
         credit_exhausted_402: true,
         network_timeout: true,
         transient_5xx: true,
-        credential_401_blocks_same_profile_fallback: true
+        credential_401_blocks_same_profile_fallback: true,
+        profile_quarantine_after_accounting_overrun: true
       },
       safety: {
         free_route_no_tools_only: true,
@@ -548,8 +845,20 @@ jq -n \
         success_settlement_recorded: true,
         failure_settlement_recorded: true,
         budget_denied_before_upstream: true,
+        encoded_credential_reflection_blocked: true,
         ledger_schema: 1,
         ledger_sha256: $ledger_sha256
+      },
+      limits: {
+        max_input_tokens: 65536,
+        max_output_tokens: 2048,
+        profile_daily_token_budget: 200000,
+        global_daily_token_budget: 200000,
+        global_requests_per_hour: 120,
+        client_requests_per_hour: 120,
+        daily_cost_limit_micros: 10000000,
+        monthly_cost_limit_micros: 40000000,
+        max_cost_micros_per_1k_tokens: 100000
       }
     }' > "$report_tmp"
 chmod 0640 "$report_tmp"

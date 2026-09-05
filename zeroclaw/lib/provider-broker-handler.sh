@@ -20,13 +20,17 @@ fi
 
 UPSTREAM_URL="${PROVIDER_UPSTREAM_URL:-https://openrouter.ai/api/v1/chat/completions}"
 MAX_BODY=262144
-MAX_RESPONSE=1048576
+# Keep the planner-facing response bounded and below the request body ceiling.
+# The response is projected to the small OpenAI-compatible subset consumed by
+# the planner before it leaves the root broker.
+MAX_RESPONSE=262144
 MAX_RESPONSE_BLOCKS=$(( (MAX_RESPONSE + 511) / 512 ))
 MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
-MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-32768}"
+MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-65536}"
 MAX_INPUT_CHARS="${PROVIDER_MAX_INPUT_CHARS:-65536}"
 MAX_REQUESTS_PER_HOUR="${PROVIDER_MAX_REQUESTS_PER_HOUR:-120}"
-DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-100000}"
+CLIENT_REQUESTS_PER_HOUR="${PROVIDER_CLIENT_REQUESTS_PER_HOUR:-$MAX_REQUESTS_PER_HOUR}"
+DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-200000}"
 DAILY_COST_LIMIT_MICROS="${PROVIDER_DAILY_COST_LIMIT_MICROS:-}"
 MONTHLY_COST_LIMIT_MICROS="${PROVIDER_MONTHLY_COST_LIMIT_MICROS:-}"
 MAX_COST_MICROS_PER_1K_TOKENS="${PROVIDER_MAX_COST_MICROS_PER_1K_TOKENS:-100000}"
@@ -38,12 +42,20 @@ FREE_FALLBACK_ENABLED="${PROVIDER_FREE_FALLBACK_ENABLED:-false}"
 FUSION_PRESET="${PROVIDER_FUSION_PRESET:-general-budget}"
 AUTO_COST_TIER="${PROVIDER_AUTO_COST_TIER:-medium}"
 CLIENT_AUTH_TOKEN="${PROVIDER_CLIENT_AUTH_TOKEN:-}"
+HEALTH_CLIENT_AUTH_TOKEN="${PROVIDER_HEALTH_CLIENT_AUTH_TOKEN:-}"
 LEDGER_FILE="${PROVIDER_LEDGER_FILE:-${PROVIDER_QUOTA_FILE:-/data/provider/ledger.json}}"
 LEDGER_FILE=$(printf '%s' "$LEDGER_FILE" | sed 's/[[:space:]]*$//')
 LEDGER_LOCK="${PROVIDER_LEDGER_LOCK:-${PROVIDER_QUOTA_LOCK:-/data/provider/.ledger.lock}}"
+LEDGER_LOCK_STALE_SECONDS=120
+CLIENT_RATE_FILE="${PROVIDER_CLIENT_RATE_FILE:-/run/zeroclaw/provider-client-rate.json}"
+CLIENT_RATE_LOCK="${PROVIDER_CLIENT_RATE_LOCK:-/run/zeroclaw/.provider-client-rate.lock}"
+CLIENT_RATE_LOCK_STALE_SECONDS=120
+CLIENT_RATE_LOCK_HELD=0
 LOG_FILE="${PROVIDER_LOG_FILE:-/data/logs/provider-broker.log}"
 RESERVATION_TTL="${PROVIDER_RESERVATION_TTL_SECONDS:-180}"
 TOTAL_TIMEOUT="${PROVIDER_TOTAL_TIMEOUT_SECONDS:-70}"
+PROFILE_QUARANTINE_SECONDS="${PROVIDER_PROFILE_QUARANTINE_SECONDS:-86400}"
+COST_DEGRADED_FILE="${PROVIDER_COST_DEGRADED_FILE:-/run/zeroclaw/cost-degraded}"
 
 respond() {
     status="$1"
@@ -60,11 +72,144 @@ log_event() {
     printf '%s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-case "$MAX_TOKENS:$MAX_INPUT_TOKENS:$MAX_INPUT_CHARS:$MAX_REQUESTS_PER_HOUR:$DAILY_TOKEN_BUDGET:$RESERVATION_TTL:$TOTAL_TIMEOUT" in
+# Count every authenticated client request before reading or parsing its body.
+# This is intentionally separate from provider reservations: rejected route or
+# envelope requests must not be able to consume unbounded broker CPU/temporary
+# file work without advancing an admission counter.
+client_rate_lock_is_stale() {
+    [ -d "$CLIENT_RATE_LOCK" ] && [ ! -L "$CLIENT_RATE_LOCK" ] || return 1
+    client_rate_owner_file="$CLIENT_RATE_LOCK/owner"
+    if [ -e "$client_rate_owner_file" ]; then
+        [ -f "$client_rate_owner_file" ] && [ ! -L "$client_rate_owner_file" ] || return 1
+        client_rate_owner_pid=$(cat "$client_rate_owner_file" 2>/dev/null || true)
+        case "$client_rate_owner_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "$client_rate_owner_pid" 2>/dev/null && return 1
+    fi
+    client_rate_lock_mtime=$(stat -c '%Y' "$CLIENT_RATE_LOCK" 2>/dev/null || true)
+    client_rate_lock_now=$(date -u +%s)
+    case "$client_rate_lock_mtime:$client_rate_lock_now" in
+        ''|*[!0-9:]*|*:*:*) return 1 ;;
+    esac
+    [ "$client_rate_lock_now" -ge "$client_rate_lock_mtime" ] || return 1
+    [ $((client_rate_lock_now - client_rate_lock_mtime)) -ge "$CLIENT_RATE_LOCK_STALE_SECONDS" ]
+}
+
+acquire_client_rate_lock() {
+    client_rate_attempts=0
+    while ! mkdir "$CLIENT_RATE_LOCK" 2>/dev/null; do
+        if client_rate_lock_is_stale; then
+            rm -f -- "$CLIENT_RATE_LOCK/owner" 2>/dev/null || true
+            rmdir "$CLIENT_RATE_LOCK" 2>/dev/null || true
+            continue
+        fi
+        client_rate_attempts=$((client_rate_attempts + 1))
+        [ "$client_rate_attempts" -le 10 ] || return 1
+        sleep 1
+    done
+    printf '%s\n' "$$" > "$CLIENT_RATE_LOCK/owner" || {
+        rmdir "$CLIENT_RATE_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "$CLIENT_RATE_LOCK/owner"
+    CLIENT_RATE_LOCK_HELD=1
+    return 0
+}
+
+release_client_rate_lock() {
+    if [ "$CLIENT_RATE_LOCK_HELD" -eq 1 ]; then
+        rm -f -- "$CLIENT_RATE_LOCK/owner" 2>/dev/null || true
+        rmdir "$CLIENT_RATE_LOCK" 2>/dev/null || true
+        CLIENT_RATE_LOCK_HELD=0
+    fi
+}
+
+write_client_rate() {
+    [ ! -L "$CLIENT_RATE_FILE" ] || return 1
+    if [ -e "$CLIENT_RATE_FILE" ] && [ ! -f "$CLIENT_RATE_FILE" ]; then
+        return 1
+    fi
+    client_rate_tmp="${CLIENT_RATE_FILE}.tmp.$$"
+    printf '%s\n' "$1" > "$client_rate_tmp" || return 1
+    chmod 0600 "$client_rate_tmp" || {
+        rm -f "$client_rate_tmp"
+        return 1
+    }
+    sync -f "$client_rate_tmp" || {
+        rm -f "$client_rate_tmp"
+        return 1
+    }
+    mv -f "$client_rate_tmp" "$CLIENT_RATE_FILE" || return 1
+    sync -f "$(dirname -- "$CLIENT_RATE_FILE")" || return 1
+}
+
+admit_client_request() {
+    [ -n "$CLIENT_RATE_FILE" ] && [ -n "$CLIENT_RATE_LOCK" ] || \
+        respond 503 "Service Unavailable" '{"error":"provider client admission is unavailable"}'
+    acquire_client_rate_lock || \
+        respond 503 "Service Unavailable" '{"error":"provider client admission lock is unavailable"}'
+    if [ -e "$CLIENT_RATE_FILE" ]; then
+        [ -f "$CLIENT_RATE_FILE" ] && [ ! -L "$CLIENT_RATE_FILE" ] || {
+            release_client_rate_lock
+            respond 503 "Service Unavailable" '{"error":"provider client admission state is invalid"}'
+        }
+        client_rate_state=$(cat "$CLIENT_RATE_FILE" 2>/dev/null || true)
+        printf '%s' "$client_rate_state" | jq -e '
+            type == "object" and .schema == 1 and
+            (.hour_window | type == "number" and floor == .) and
+            (.count | type == "number" and floor == . and . >= 0)
+        ' >/dev/null 2>&1 || {
+            release_client_rate_lock
+            respond 503 "Service Unavailable" '{"error":"provider client admission state is invalid"}'
+        }
+    else
+        client_rate_state='{"schema":1,"hour_window":0,"count":0}'
+    fi
+    client_rate_now=$(date -u +%s)
+    client_rate_hour=$((client_rate_now / 3600))
+    client_rate_state_hour=$(printf '%s' "$client_rate_state" | jq -r '.hour_window')
+    client_rate_count=$(printf '%s' "$client_rate_state" | jq -r '.count')
+    case "$client_rate_hour:$client_rate_state_hour:$client_rate_count" in
+        *[!0-9:]*|*:*:*:*)
+            release_client_rate_lock
+            respond 503 "Service Unavailable" '{"error":"provider client admission state is invalid"}'
+            ;;
+    esac
+    [ "$client_rate_state_hour" -le "$client_rate_hour" ] || {
+        release_client_rate_lock
+        respond 503 "Service Unavailable" '{"error":"provider client admission clock state is invalid"}'
+    }
+    if [ "$client_rate_state_hour" -lt "$client_rate_hour" ]; then
+        client_rate_count=0
+    fi
+    [ "$client_rate_count" -lt "$CLIENT_REQUESTS_PER_HOUR" ] || {
+        release_client_rate_lock
+        log_event "provider client admission exhausted hour=${client_rate_hour} limit=${CLIENT_REQUESTS_PER_HOUR}"
+        respond 429 "Too Many Requests" '{"error":"provider client request rate exhausted","retry_after":60}'
+    }
+    client_rate_next=$(jq -nc --argjson hour "$client_rate_hour" \
+        --argjson count "$((client_rate_count + 1))" \
+        '{schema:1,hour_window:$hour,count:$count}') || {
+        release_client_rate_lock
+        respond 503 "Service Unavailable" '{"error":"provider client admission state could not be updated"}'
+    }
+    write_client_rate "$client_rate_next" || {
+        release_client_rate_lock
+        respond 503 "Service Unavailable" '{"error":"provider client admission state could not be persisted"}'
+    }
+    release_client_rate_lock
+}
+
+case "$MAX_TOKENS:$MAX_INPUT_TOKENS:$MAX_INPUT_CHARS:$MAX_REQUESTS_PER_HOUR:$CLIENT_REQUESTS_PER_HOUR:$DAILY_TOKEN_BUDGET:$RESERVATION_TTL:$TOTAL_TIMEOUT" in
     *[!0-9:]*|:*|*::*|*:::*)
         respond 503 "Service Unavailable" '{"error":"provider broker limits are invalid"}'
         ;;
 esac
+printf '%s' "$PROFILE_QUARANTINE_SECONDS" | grep -Eq '^[0-9]+$' ||
+    respond 503 "Service Unavailable" '{"error":"provider profile quarantine duration is invalid"}'
+[ "$PROFILE_QUARANTINE_SECONDS" -ge 300 ] && [ "$PROFILE_QUARANTINE_SECONDS" -le 604800 ] ||
+    respond 503 "Service Unavailable" '{"error":"provider profile quarantine duration is outside the safe range"}'
 if [ -n "$DAILY_COST_LIMIT_MICROS" ] || [ -n "$MONTHLY_COST_LIMIT_MICROS" ]; then
     [ -n "$DAILY_COST_LIMIT_MICROS" ] && [ -n "$MONTHLY_COST_LIMIT_MICROS" ] || \
         respond 503 "Service Unavailable" '{"error":"provider cost budgets are incomplete"}'
@@ -85,10 +230,12 @@ COST_BUDGET_ENABLED=0
     respond 503 "Service Unavailable" '{"error":"provider token limits are invalid"}'
 [ "$MAX_INPUT_TOKENS" -ge 1024 ] && [ "$MAX_INPUT_TOKENS" -le 128000 ] || \
     respond 503 "Service Unavailable" '{"error":"provider input token limits are invalid"}'
-[ "$MAX_INPUT_CHARS" -ge 4096 ] && [ "$MAX_INPUT_CHARS" -le 524288 ] || \
+[ "$MAX_INPUT_CHARS" -ge 1 ] && [ "$MAX_INPUT_CHARS" -le 524288 ] || \
     respond 503 "Service Unavailable" '{"error":"provider input size limits are invalid"}'
 [ "$MAX_REQUESTS_PER_HOUR" -ge 1 ] && [ "$MAX_REQUESTS_PER_HOUR" -le 1000 ] || \
     respond 503 "Service Unavailable" '{"error":"provider request limits are invalid"}'
+[ "$CLIENT_REQUESTS_PER_HOUR" -ge 1 ] && [ "$CLIENT_REQUESTS_PER_HOUR" -le 1000 ] || \
+    respond 503 "Service Unavailable" '{"error":"provider client request limits are invalid"}'
 [ "$RESERVATION_TTL" -ge 30 ] && [ "$RESERVATION_TTL" -le 900 ] || \
     respond 503 "Service Unavailable" '{"error":"provider reservation TTL is invalid"}'
 [ "$TOTAL_TIMEOUT" -ge 20 ] && [ "$TOTAL_TIMEOUT" -le 120 ] || \
@@ -105,6 +252,15 @@ case "$AUTO_COST_TIER" in
     low|medium|high|xhigh|max) ;;
     *) respond 503 "Service Unavailable" '{"error":"provider Auto cost tier is invalid"}' ;;
 esac
+
+# The broker does not share a tokenizer with every upstream provider. Use a
+# byte-for-token upper bound instead of an optimistic average, and reserve a
+# fixed envelope allowance as well. Clamp the independently configurable byte
+# ceiling to the resulting safe token ceiling before reading the request.
+[ "$MAX_INPUT_TOKENS" -gt 256 ] || \
+    respond 503 "Service Unavailable" '{"error":"provider input token limit is too small"}'
+SAFE_INPUT_CHARS=$((MAX_INPUT_TOKENS - 256))
+[ "$MAX_INPUT_CHARS" -le "$SAFE_INPUT_CHARS" ] || MAX_INPUT_CHARS="$SAFE_INPUT_CHARS"
 
 # Compatibility path for the previous single-OpenRouter broker.
 if [ -z "$PROFILE_SPEC" ]; then
@@ -145,8 +301,6 @@ read_http_line() {
 READ_DEADLINE=$((SECONDS + 5))
 read_http_line 4096 "request line"
 request_line=$(printf '%s' "$HTTP_LINE" | tr -d '\r')
-[ "$request_line" = "POST /v1/chat/completions HTTP/1.1" ] || \
-    respond 404 "Not Found" '{"error":"route is not available"}'
 
 content_length=""
 client_auth_header=""
@@ -184,9 +338,41 @@ done
 
 [ -n "$CLIENT_AUTH_TOKEN" ] || \
     respond 503 "Service Unavailable" '{"error":"provider broker client authentication is unavailable"}'
-[ "$client_auth_header_count" -eq 1 ] &&
-    [ "$client_auth_header" = "Bearer ${CLIENT_AUTH_TOKEN}" ] || \
+[ "$client_auth_header_count" -eq 1 ] || \
     respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
+auth_class=client
+if [ -n "$HEALTH_CLIENT_AUTH_TOKEN" ] &&
+    [ "$client_auth_header" = "Bearer ${HEALTH_CLIENT_AUTH_TOKEN}" ]; then
+    auth_class=health
+elif [ "$client_auth_header" != "Bearer ${CLIENT_AUTH_TOKEN}" ]; then
+    respond 401 "Unauthorized" '{"error":"provider broker client authentication failed"}'
+fi
+
+# Health probes must prove that this handler reached its authenticated request
+# path without consuming a provider request slot, contacting an upstream, or
+# mutating the durable usage ledger.  Keep the endpoint on the same protected
+# loopback listener as chat completions.
+case "$request_line" in
+    "GET /health HTTP/1.0"|"GET /health HTTP/1.1")
+        [ "$auth_class" = health ] || \
+            respond 401 "Unauthorized" '{"error":"provider health credential is required"}'
+        [ -z "$content_length" ] || [ "$content_length" = 0 ] || \
+            respond 400 "Bad Request" '{"error":"health requests must not contain a body"}'
+        respond 200 "OK" '{"status":"ok"}'
+        ;;
+esac
+
+[ "$auth_class" = client ] || \
+    respond 401 "Unauthorized" '{"error":"provider client credential is required"}'
+
+# The client admission counter is deliberately after authentication but before
+# route, envelope, body, or model validation. A caller that knows the loopback
+# port and client credential must not be able to churn rejected requests
+# without consuming the same bounded request budget as accepted requests.
+admit_client_request
+
+[ "$request_line" = "POST /v1/chat/completions HTTP/1.1" ] || \
+    respond 404 "Not Found" '{"error":"route is not available"}'
 
 printf '%s' "$content_length" | grep -Eq '^[0-9]+$' || \
     respond 411 "Length Required" '{"error":"content length is required"}'
@@ -195,9 +381,10 @@ printf '%s' "$content_length" | grep -Eq '^[0-9]+$' || \
 
 body_file=$(mktemp)
 response_file=$(mktemp)
+response_projected_file=$(mktemp)
 attempt_body=$(mktemp)
 quota_lock_held=0
-trap 'rm -f "$body_file" "$response_file" "$attempt_body" "$response_file.attempt"; [ "$quota_lock_held" -eq 1 ] && rmdir "$LEDGER_LOCK" 2>/dev/null || true' EXIT
+trap 'rm -f "$body_file" "$response_file" "$response_projected_file" "$attempt_body" "$response_file.attempt"; [ "$quota_lock_held" -eq 1 ] && rmdir "$LEDGER_LOCK" 2>/dev/null || true' EXIT
 
 body_timeout=$((READ_DEADLINE - SECONDS))
 [ "$body_timeout" -gt 0 ] || \
@@ -217,6 +404,8 @@ jq -e '
     type == "object" and
     (.model | type == "string") and
     (.messages | type == "array") and
+    (.max_tokens == null or
+      (.max_tokens | type == "number" and floor == . and . >= 0 and . <= 10000000)) and
     ((.stream // false) == false) and
     (.max_completion_tokens == null) and
     (.n == null or (.n | type == "number" and floor == . and . == 1)) and
@@ -255,11 +444,11 @@ case "$input_chars" in
 esac
 [ "$input_chars" -le "$MAX_INPUT_CHARS" ] || \
     respond 413 "Payload Too Large" '{"error":"provider input is too large"}'
-# Provider usage can include tokenizer overhead and can diverge materially
-# from a four-bytes-per-token estimate for Unicode, code, and structured tool
-# payloads. Reserve a conservative half-byte estimate plus a fixed envelope
-# allowance so a valid response is not misclassified as a budget overrun.
-requested_input_tokens=$(( (input_chars + 1) / 2 + 256 ))
+# Provider usage can diverge materially from a bytes-per-token average for
+# Unicode, code, and structured payloads. The safe byte ceiling above and a
+# one-token-per-byte reservation avoid under-reserving any enabled provider's
+# input budget; the fixed allowance covers the broker envelope.
+requested_input_tokens=$((input_chars + 256))
 [ "$requested_input_tokens" -le "$MAX_INPUT_TOKENS" ] || \
     respond 400 "Bad Request" '{"error":"provider input token estimate exceeds the broker limit"}'
 
@@ -326,7 +515,83 @@ load_profile() {
     return 0
 }
 
+leak_variant_matches() {
+    leak_variant="$1"
+    [ -n "$leak_variant" ] || return 1
+    grep -F -- "$leak_variant" "$leak_decoded_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_variant" "$leak_compact_file" >/dev/null 2>&1
+}
+
+credential_encoded_leak() {
+    leak_credential="$1"
+    [ -n "$leak_credential" ] || return 1
+    if grep -F -- "$leak_credential" "$response_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_credential" "$leak_decoded_file" >/dev/null 2>&1 ||
+        grep -F -- "$leak_credential" "$leak_compact_file" >/dev/null 2>&1; then
+        return 0
+    fi
+    # A provider response must not be able to reflect the active credential in
+    # a common transport encoding.  Scan padded and unpadded standard/url-safe
+    # base64 plus hexadecimal and URL-percent encodings.  The compact stream
+    # also catches an encoding fragmented across several JSON strings.
+    leak_base64=$(printf '%s' "$leak_credential" | base64 | tr -d '\r\n') || return 1
+    leak_base64_unpadded=$(printf '%s' "$leak_base64" | tr -d '=')
+    leak_base64_urlsafe=$(printf '%s' "$leak_base64" | tr '+/' '-_')
+    leak_base64_urlsafe_unpadded=$(printf '%s' "$leak_base64_urlsafe" | tr -d '=')
+    leak_hex=$(printf '%s' "$leak_credential" | od -An -tx1 -v | tr -d ' \r\n') || return 1
+    leak_hex_upper=$(printf '%s' "$leak_hex" | tr 'a-f' 'A-F')
+    leak_percent=$(printf '%s' "$leak_credential" | od -An -tx1 -v |
+        awk '{for (i=1; i<=NF; i++) printf "%%%s", toupper($i)}') || return 1
+    leak_percent_lower=$(printf '%s' "$leak_percent" | tr 'A-F' 'a-f')
+    leak_percent_mixed=$(printf '%s' "$leak_credential" | od -An -tx1 -v |
+        awk 'function hex_value(h, p) {
+                 p = index("0123456789ABCDEF", toupper(h))
+                 return p - 1
+             }
+             {
+                 for (i=1; i<=NF; i++) {
+                     h=toupper($i)
+                     value=hex_value(substr(h,1,1))*16 + hex_value(substr(h,2,1))
+                     if ((value >= 48 && value <= 57) ||
+                         (value >= 65 && value <= 90) ||
+                         (value >= 97 && value <= 122) ||
+                         value == 45 || value == 46 || value == 95 || value == 126) {
+                         printf "%c", value
+                     } else {
+                         printf "%%%s", h
+                     }
+                 }
+             }') || return 1
+    leak_percent_mixed_lower=$(printf '%s' "$leak_percent_mixed" | tr 'A-F' 'a-f')
+    leak_variant_matches "$leak_base64" || leak_variant_matches "$leak_base64_unpadded" ||
+        leak_variant_matches "$leak_base64_urlsafe" || leak_variant_matches "$leak_base64_urlsafe_unpadded" ||
+        leak_variant_matches "$leak_hex" || leak_variant_matches "$leak_hex_upper" ||
+        leak_variant_matches "$leak_percent" || leak_variant_matches "$leak_percent_lower" ||
+        leak_variant_matches "$leak_percent_mixed" || leak_variant_matches "$leak_percent_mixed_lower"
+}
+
 all_credentials_leak() {
+    leak_decoded_file=$(mktemp)
+    leak_compact_file=$(mktemp)
+    leak_cleanup() {
+        rm -f "$leak_decoded_file" "$leak_compact_file"
+    }
+    if ! jq -r '.. | strings' "$response_file" > "$leak_decoded_file" 2>/dev/null; then
+        leak_cleanup
+        return 1
+    fi
+    # jq decodes JSON escapes, while the compact stream catches a credential
+    # split across several JSON strings or separated only by whitespace.
+    tr -d '[:space:]' < "$leak_decoded_file" > "$leak_compact_file" || {
+        leak_cleanup
+        return 1
+    }
+    # Scan the exact key used for this attempt first.  Provider key rotation
+    # must not create a gap between load_profile and the response check.
+    if credential_encoded_leak "${PROFILE_KEY:-}"; then
+        leak_cleanup
+        return 0
+    fi
     credential=""
     while IFS='|' read -r leak_profile_id leak_profile_url leak_key_file leak_requests leak_budget; do
         [ -n "$leak_profile_id" ] || continue
@@ -338,12 +603,17 @@ all_credentials_leak() {
             credential=""
         fi
         [ -n "$credential" ] || continue
-        if grep -F -- "$credential" "$response_file" >/dev/null 2>&1; then
+        if [ "$credential" = "${PROFILE_KEY:-}" ]; then
+            continue
+        fi
+        if credential_encoded_leak "$credential"; then
+            leak_cleanup
             return 0
         fi
     done <<EOF
 $PROFILE_SPEC
 EOF
+    leak_cleanup
     return 1
 }
 
@@ -387,18 +657,53 @@ write_ledger() {
 }
 
 acquire_ledger_lock() {
+    ledger_lock_is_stale() {
+        # A lock left by a killed broker must not permanently disable all
+        # provider traffic, but an active or malformed lock must fail closed.
+        [ -d "$LEDGER_LOCK" ] && [ ! -L "$LEDGER_LOCK" ] || return 1
+        ledger_owner_file="$LEDGER_LOCK/owner"
+        if [ -e "$ledger_owner_file" ]; then
+            [ -f "$ledger_owner_file" ] && [ ! -L "$ledger_owner_file" ] || return 1
+            ledger_owner_pid=$(cat "$ledger_owner_file" 2>/dev/null || true)
+            case "$ledger_owner_pid" in
+                ''|*[!0-9]*) return 1 ;;
+            esac
+            kill -0 "$ledger_owner_pid" 2>/dev/null && return 1
+        fi
+        ledger_lock_mtime=$(stat -c '%Y' "$LEDGER_LOCK" 2>/dev/null || true)
+        ledger_lock_now=$(date -u +%s)
+        case "$ledger_lock_mtime:$ledger_lock_now" in
+            ''|*[!0-9:]*|*:*:*) return 1 ;;
+        esac
+        [ "$ledger_lock_now" -ge "$ledger_lock_mtime" ] || return 1
+        [ $((ledger_lock_now - ledger_lock_mtime)) -ge "$LEDGER_LOCK_STALE_SECONDS" ]
+    }
+
     attempts=0
     while ! mkdir "$LEDGER_LOCK" 2>/dev/null; do
+        if ledger_lock_is_stale; then
+            # Only remove the known owner marker and then the empty lock
+            # directory. Never recursively delete a planner-controlled path.
+            rm -f -- "$LEDGER_LOCK/owner" 2>/dev/null || true
+            rmdir "$LEDGER_LOCK" 2>/dev/null || true
+            continue
+        fi
         attempts=$((attempts + 1))
         [ "$attempts" -le 10 ] || return 1
         sleep 1
     done
+    printf '%s\n' "$$" > "$LEDGER_LOCK/owner" || {
+        rmdir "$LEDGER_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "$LEDGER_LOCK/owner"
     quota_lock_held=1
     return 0
 }
 
 release_ledger_lock() {
     if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$LEDGER_LOCK/owner" 2>/dev/null || true
         rmdir "$LEDGER_LOCK" 2>/dev/null || true
         quota_lock_held=0
     fi
@@ -420,25 +725,28 @@ migrate_legacy_ledger() {
     legacy_day=$(printf '%s' "$legacy" | jq -r '.day_window')
     legacy_requests=$(printf '%s' "$legacy" | jq -r '.requests_hour')
     legacy_tokens=$(printf '%s' "$legacy" | jq -r '.tokens_day')
+    legacy_month=$(date -u -d "@$((legacy_day * 86400))" +%Y-%m 2>/dev/null) || return 1
+    printf '%s' "$legacy_month" | grep -Eq '^[0-9]{4}-[0-9]{2}$' || return 1
     [ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ] || return 1
     [ "$legacy_tokens" -le "$DAILY_TOKEN_BUDGET" ] || return 1
     migrated=$(jq -nc \
         --arg profile "$legacy_profile" \
         --argjson hour "$legacy_hour" \
         --argjson day "$legacy_day" \
+        --arg month "$legacy_month" \
         --argjson requests "$legacy_requests" \
         --argjson tokens "$legacy_tokens" \
         '{schema:1,records:(
             [range(0;$requests) as $i |
                 {id:("legacy-hour-" + ($i|tostring)),created_at:0,expires_at:0,
-                 hour_window:$hour,day_window:$day,route_id:"legacy",profile_id:$profile,
+                 hour_window:$hour,day_window:$day,month_window:$month,route_id:"legacy",profile_id:$profile,
                  upstream_model:"legacy",reserved_tokens:0,reserved_input_tokens:0,
                  settled_tokens:0,settled_input_tokens:0,
                  reserved_cost_micros:0,settled_cost_micros:0,
                  state:"settled",settlement:"migrated_request_count",updated_at:0}] +
             (if $tokens > 0 then
                 [{id:"legacy-tokens",created_at:0,expires_at:0,hour_window:$hour,
-                  day_window:$day,route_id:"legacy",profile_id:$profile,
+                  day_window:$day,month_window:$month,route_id:"legacy",profile_id:$profile,
                   upstream_model:"legacy",reserved_tokens:$tokens,reserved_input_tokens:0,
                   settled_tokens:$tokens,settled_input_tokens:0,
                   reserved_cost_micros:0,settled_cost_micros:0,
@@ -460,6 +768,12 @@ load_and_reconcile_ledger() {
     fi
     printf '%s' "$ledger" | jq -e '
         type == "object" and .schema == 1 and (.records | type == "array") and
+        ((.profile_quarantine // []) | type == "array") and
+        all((.profile_quarantine // [])[];
+            (.profile_id | type == "string" and length >= 1 and length <= 128) and
+            (.until | type == "number" and floor == . and . >= 0) and
+            (.reason | type == "string" and length >= 1 and length <= 128)
+        ) and
         all(.records[];
             (.id | type == "string") and
             (.profile_id | type == "string") and
@@ -474,7 +788,9 @@ load_and_reconcile_ledger() {
     ' >/dev/null 2>&1 || return 1
     now=$(date -u +%s)
     day_window=$((now / 86400))
-    reconciled=$(printf '%s' "$ledger" | jq --argjson now "$now" --argjson keep_day "$((day_window - 7))" '
+    month_window=$(date -u +%Y-%m)
+    reconciled=$(printf '%s' "$ledger" | jq --argjson now "$now" --argjson keep_day "$((day_window - 7))" --arg month "$month_window" '
+        .profile_quarantine = ((.profile_quarantine // []) | map(select(.until > $now))) |
         .records |= map(
             if .state == "reserved" and (.expires_at | tonumber) <= $now then
                 .state = "expired" |
@@ -485,7 +801,11 @@ load_and_reconcile_ledger() {
                 .updated_at = $now
             else . end
         ) |
-        .records |= map(select(.state == "reserved" or (.day_window | tonumber) >= $keep_day))
+        .records |= map(select(
+            .state == "reserved" or
+            (.month_window // "") == $month or
+            (.day_window | tonumber) >= $keep_day
+        ))
     ') || return 1
     ledger="$reconciled"
     write_ledger "$ledger" || return 1
@@ -511,13 +831,41 @@ reserve_attempt() {
         release_ledger_lock
         return 1
     fi
+    profile_quarantined=$(printf '%s' "$ledger" | jq -r --arg profile "$reserve_profile" --argjson now "$reserve_now" \
+        'any((.profile_quarantine // [])[]; .profile_id == $profile and .until > $now)') || {
+        release_ledger_lock
+        return 1
+    }
+    case "$profile_quarantined" in
+        true)
+            release_ledger_lock
+            log_event "provider profile=${reserve_profile} admission quarantined"
+            return 2
+            ;;
+        false) ;;
+        *)
+            release_ledger_lock
+            return 1
+            ;;
+    esac
     hour_count=$(printf '%s' "$ledger" | jq -r --arg profile "$reserve_profile" --argjson hour "$reserve_hour" \
         '[.records[] | select(.profile_id == $profile and .hour_window == $hour)] | length') || {
         release_ledger_lock
         return 1
     }
+    global_hour_count=$(printf '%s' "$ledger" | jq -r --argjson hour "$reserve_hour" \
+        '[.records[] | select(.hour_window == $hour)] | length') || {
+        release_ledger_lock
+        return 1
+    }
     day_tokens=$(printf '%s' "$ledger" | jq -r --arg profile "$reserve_profile" --argjson day "$reserve_day" \
         '[.records[] | select(.profile_id == $profile and .day_window == $day) |
+          ((.settled_tokens // .reserved_tokens) + (.settled_input_tokens // .reserved_input_tokens // 0))] | add // 0') || {
+        release_ledger_lock
+        return 1
+    }
+    global_day_tokens=$(printf '%s' "$ledger" | jq -r --argjson day "$reserve_day" \
+        '[.records[] | select(.day_window == $day) |
           ((.settled_tokens // .reserved_tokens) + (.settled_input_tokens // .reserved_input_tokens // 0))] | add // 0') || {
         release_ledger_lock
         return 1
@@ -535,7 +883,7 @@ reserve_attempt() {
         release_ledger_lock
         return 1
     }
-    case "$hour_count:$day_tokens:$reserve_total_tokens:$day_cost:$month_cost:$reserve_cost_micros" in
+    case "$hour_count:$global_hour_count:$day_tokens:$global_day_tokens:$reserve_total_tokens:$day_cost:$month_cost:$reserve_cost_micros" in
         *[!0-9:]*|:*|*::*)
             release_ledger_lock
             return 1
@@ -545,7 +893,15 @@ reserve_attempt() {
         release_ledger_lock
         return 2
     }
+    [ "$global_hour_count" -lt "$MAX_REQUESTS_PER_HOUR" ] || {
+        release_ledger_lock
+        return 2
+    }
     [ "$day_tokens" -le $((PROFILE_DAILY_BUDGET - reserve_total_tokens)) ] || {
+        release_ledger_lock
+        return 2
+    }
+    [ "$global_day_tokens" -le $((DAILY_TOKEN_BUDGET - reserve_total_tokens)) ] || {
         release_ledger_lock
         return 2
     }
@@ -596,6 +952,7 @@ settle_attempt() {
     settle_prompt_value=""
     settle_reason="$settle_failure"
     settle_hard_failure=0
+    settle_usage_floor=0
     case "$settle_status" in
         200)
         case "$settle_actual" in
@@ -640,6 +997,15 @@ settle_attempt() {
             return 1
             ;;
     esac
+    settle_profile=$(printf '%s' "$ledger" | jq -r --arg id "$settle_id" \
+        '[.records[] | select(.id == $id and .state == "reserved") | .profile_id] | .[0] // empty') || {
+        release_ledger_lock
+        return 1
+    }
+    [ -n "$settle_profile" ] || {
+        release_ledger_lock
+        return 1
+    }
     reserve_cost_value=$(printf '%s' "$ledger" | jq -r --arg id "$settle_id" \
         '[.records[] | select(.id == $id and .state == "reserved") | (.reserved_cost_micros // 0)] | .[0] // 0') || {
         release_ledger_lock
@@ -668,6 +1034,16 @@ settle_attempt() {
                 settle_reason="usage_overrun"
                 settle_hard_failure=1
             fi
+            if [ "$settle_value" -lt "$reserve_value" ]; then
+                settle_value="$reserve_value"
+                settle_usage_floor=1
+                [ "$settle_hard_failure" -eq 1 ] || settle_reason="reserved_max_usage_floor"
+            fi
+            if [ "$settle_prompt_value" -lt "$reserve_input_value" ]; then
+                settle_prompt_value="$reserve_input_value"
+                settle_usage_floor=1
+                [ "$settle_hard_failure" -eq 1 ] || settle_reason="reserved_max_usage_floor"
+            fi
             ;;
         *)
             settle_value="$reserve_value"
@@ -682,8 +1058,16 @@ settle_attempt() {
                 [ "$settle_reason" = "actual_usage" ] && settle_reason="reserved_max_missing_cost"
                 ;;
             *)
-                settle_cost_value="$settle_actual_cost"
-                if [ "$settle_cost_value" -gt "$reserve_cost_value" ]; then
+                # Provider-reported cost is untrusted telemetry. It may
+                # increase the reservation only as an anomaly, but it may not
+                # lower the conservative amount admitted before the request.
+                if [ "$settle_actual_cost" -lt "$reserve_cost_value" ]; then
+                    settle_cost_value="$reserve_cost_value"
+                    [ "$settle_reason" = "actual_usage" ] && settle_reason="reserved_cost_floor"
+                else
+                    settle_cost_value="$settle_actual_cost"
+                fi
+                if [ "$settle_actual_cost" -gt "$reserve_cost_value" ]; then
                     settle_reported_cost="$settle_cost_value"
                     settle_cost_value="$reserve_cost_value"
                     settle_reason="cost_overrun"
@@ -700,15 +1084,24 @@ settle_attempt() {
         --argjson reported_tokens "$settle_reported_tokens" \
         --argjson reported_input "$settle_reported_input" \
         --argjson reported_cost "$settle_reported_cost" \
+        --argjson usage_floor "$settle_usage_floor" \
+        --arg profile "$settle_profile" \
+        --argjson quarantine_until "$((settle_now + PROFILE_QUARANTINE_SECONDS))" \
+        --argjson quarantine_anomaly "$settle_hard_failure" \
         '.records |= map(if .id == $id and .state == "reserved" then
             .state = "settled" | .settled_tokens = $actual | .settled_input_tokens = $actual_prompt |
             .settled_cost_micros = $actual_cost | .settlement = $reason |
+            .usage_floor = ($usage_floor == 1) |
             .settlement_anomaly = (if ($reported_tokens > 0 or $reported_input > 0 or $reported_cost > 0)
               then {reported_tokens:$reported_tokens,reported_input_tokens:$reported_input,
                     reported_cost_micros:$reported_cost}
               else null end) |
             .http_status = ($status | tonumber? // null) | .updated_at = $now
-         else . end)') || {
+         else . end) |
+         .profile_quarantine = if $quarantine_anomaly == 1 then
+             ((.profile_quarantine // []) | map(select(.profile_id != $profile)) +
+              [{profile_id:$profile,until:$quarantine_until,reason:$reason}])
+           else (.profile_quarantine // []) end') || {
         release_ledger_lock
         return 1
     }
@@ -746,12 +1139,39 @@ validate_response_contract() {
     [ "$response_status" = "200" ] || return 1
     jq -e '
         type == "object" and
-        (.choices | type == "array" and length > 0) and
-        all(.choices[];
-            (.message | type == "object") and
-            ((.message.content // null) == null or (.message.content | type == "string")) and
-            ((.finish_reason // null) == null or (.finish_reason | type == "string"))
-        )
+        (.choices | type == "array" and length == 1) and
+        (.choices[0] | type == "object") and
+        (.choices[0].message | type == "object") and
+        ((.choices[0].index == null) or
+            (.choices[0].index | type == "number" and floor == . and . >= 0 and . <= 32)) and
+        ((.choices[0].finish_reason == null) or
+            (.choices[0].finish_reason | type == "string" and length <= 64)) and
+        ((.choices[0].message.role == null) or
+            (.choices[0].message.role | type == "string" and length >= 1 and length <= 64)) and
+        ((.choices[0].message.content == null) or
+            (.choices[0].message.content | type == "string" and (tojson | length <= 131072))) and
+        ((.choices[0].message.tool_calls == null) or
+            (.choices[0].message.tool_calls | type == "array" and length <= 32 and
+             all(.[];
+                 type == "object" and
+                 (.id | type == "string" and length >= 1 and length <= 256) and
+                 (.type == "function") and
+                 (.function | type == "object") and
+                 (.function.name | type == "string" and length >= 1 and length <= 256) and
+                 (.function.arguments | type == "string" and (tojson | length <= 131072))
+             ))) and
+        ((.choices[0].message.function_call == null) or
+            (.choices[0].message.function_call | type == "object" and
+             (.name | type == "string" and length >= 1 and length <= 256) and
+             (.arguments | type == "string" and (tojson | length <= 131072)))) and
+        ((.usage == null) or
+            (.usage | type == "object" and
+             (.prompt_tokens == null or
+                 (.prompt_tokens | type == "number" and floor == . and . >= 0 and . <= 1000000000)) and
+             (.completion_tokens == null or
+                 (.completion_tokens | type == "number" and floor == . and . >= 0 and . <= 1000000000)) and
+             (.total_tokens == null or
+                 (.total_tokens | type == "number" and floor == . and . >= 0 and . <= 1000000000))))
     ' "$response_file" >/dev/null 2>&1 || return 1
     if [ "$response_tier" = "free" ]; then
         jq -e '
@@ -764,10 +1184,50 @@ validate_response_contract() {
     return 0
 }
 
+project_response() {
+    jq -c '
+        {
+          id: (if (.id | type) == "string" and (.id | length) <= 512 then .id else null end),
+          object: (if (.object | type) == "string" and (.object | length) <= 64 then .object else null end),
+          created: (if (.created | type) == "number" and (.created | floor) == .created and .created >= 0 and .created <= 1000000000000 then .created else null end),
+          model: (if (.model | type) == "string" and (.model | length) <= 512 then .model else null end),
+          choices: [
+            .choices[0] as $choice |
+            {
+              index: (if ($choice.index | type) == "number" then $choice.index else 0 end),
+              message: (
+                {
+                  role: (if ($choice.message.role | type) == "string" then $choice.message.role else "assistant" end),
+                  content: (if ($choice.message.content | type) == "string" then $choice.message.content else null end),
+                  tool_calls: (if ($choice.message.tool_calls | type) == "array" then
+                    [$choice.message.tool_calls[] |
+                      {id:.id,type:.type,function:{name:.function.name,arguments:.function.arguments}}]
+                  else null end),
+                  function_call: (if ($choice.message.function_call | type) == "object" then
+                    {name:$choice.message.function_call.name,arguments:$choice.message.function_call.arguments}
+                  else null end)
+                } | with_entries(select(.value != null))
+              ),
+              finish_reason: (if ($choice.finish_reason | type) == "string" then $choice.finish_reason else null end)
+            } | with_entries(select(.value != null))
+          ],
+          usage: (if (.usage | type) == "object" then
+            {
+              prompt_tokens: (if (.usage.prompt_tokens | type) == "number" then .usage.prompt_tokens else null end),
+              completion_tokens: (if (.usage.completion_tokens | type) == "number" then .usage.completion_tokens else null end),
+              total_tokens: (if (.usage.total_tokens | type) == "number" then .usage.total_tokens else null end)
+            } | with_entries(select(.value != null))
+          else null end)
+        } | with_entries(select(.value != null and (.value != {})))
+    ' "$response_file"
+}
+
 shape_request() {
     shape_model="$1"
     shape_kind="$2"
+    shape_max_tokens="$3"
     jq -c --arg model "$shape_model" --arg kind "$shape_kind" \
+        --argjson max_tokens "$shape_max_tokens" \
         --arg preset "$FUSION_PRESET" --arg cost_tier "$AUTO_COST_TIER" '
         with_entries(select(.key as $key |
             ["model","messages","max_tokens","stream","temperature","top_p","n",
@@ -776,6 +1236,10 @@ shape_request() {
             | index($key))) |
         .stream = false |
         .model = $model |
+        # Always send the broker normalized completion ceiling upstream. A
+        # planner may omit max_tokens, but the provider must never get to pick
+        # a larger default than the amount reserved in the ledger.
+        .max_tokens = $max_tokens |
         if $kind == "free" then
             del(.tools,.tool_choice,.parallel_tool_calls,.functions,.function_call)
         elif $kind == "fusion" then
@@ -891,6 +1355,15 @@ mark_credit_exhausted() {
 while IFS='|' read -r route_id profile_id upstream_model tier; do
     [ -n "$route_id" ] || continue
     [ "$route_id" = "$requested_model" ] || continue
+    if [ "$tier" = "paid" ] && { [ -e "$COST_DEGRADED_FILE" ] || [ -L "$COST_DEGRADED_FILE" ]; }; then
+        # The root watchdog publishes this marker only after reconciling the
+        # root-owned provider ledger.  During degradation, paid routes are not
+        # eligible; an explicitly configured free route may still serve a
+        # read-only request, otherwise the broker returns a budget response.
+        budget_denied_seen=1
+        last_failure="cost watchdog requires a free fallback"
+        continue
+    fi
     case "$tier" in
         paid) ;;
         free)
@@ -937,7 +1410,7 @@ ${candidate_key}"
     else
         shape_kind=standard
     fi
-    if ! shape_request "$upstream_model" "$shape_kind"; then
+    if ! shape_request "$upstream_model" "$shape_kind" "$requested_tokens"; then
         non_budget_failure=1
         last_failure="provider route request shaping failed"
         break
@@ -955,7 +1428,6 @@ ${candidate_key}"
         fi
         respond 503 "Service Unavailable" '{"error":"provider accounting is unavailable"}'
     fi
-    non_budget_failure=1
     request_auth_file=$(mktemp)
     chmod 0600 "$request_auth_file"
     printf 'Authorization: Bearer %s\n' "$PROFILE_KEY" > "$request_auth_file"
@@ -968,6 +1440,7 @@ ${candidate_key}"
     if [ "$remaining_timeout" -le 5 ]; then
         settle_attempt "$RESERVATION_ID" "0" "reserved_max_broker_deadline" "" || \
             respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
+        non_budget_failure=1
         last_failure="provider broker deadline exceeded"
         break
     fi
@@ -992,6 +1465,7 @@ ${candidate_key}"
         settle_attempt "$RESERVATION_ID" "0" "reserved_max_network_failure" "" || \
             respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
         block_profile "$profile_id"
+        non_budget_failure=1
         last_failure="provider network or timeout failure"
         log_event "provider route=${requested_model} profile=${profile_id} class=network"
         continue
@@ -1019,6 +1493,7 @@ ${candidate_key}"
                 settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_invalid_response_contract" "" || \
                     respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
                 block_profile "$profile_id"
+                non_budget_failure=1
                 last_failure="provider response contract invalid"
                 log_event "provider route=${requested_model} profile=${profile_id} class=invalid_response_contract"
                 continue
@@ -1034,6 +1509,7 @@ ${candidate_key}"
                         respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
                     if [ "${SETTLE_ANOMALY:-0}" -eq 1 ]; then
                         block_profile "$profile_id"
+                        non_budget_failure=1
                         last_failure="provider usage exceeded local reservation"
                         log_event "provider route=${requested_model} profile=${profile_id} class=usage_overrun"
                         continue
@@ -1048,7 +1524,24 @@ ${candidate_key}"
                         respond 502 "Bad Gateway" '{"error":"provider usage accounting is invalid"}'
                     ;;
             esac
-            response_body=$(cat "$response_file")
+            if ! project_response > "$response_projected_file"; then
+                settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_response_projection_failed" "" || \
+                    respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
+                block_profile "$profile_id"
+                non_budget_failure=1
+                last_failure="provider response projection failed"
+                log_event "provider route=${requested_model} profile=${profile_id} class=response_projection"
+                continue
+            fi
+            response_body=$(cat "$response_projected_file") || {
+                settle_attempt "$RESERVATION_ID" "$http_code" "reserved_max_response_projection_read_failed" "" || \
+                    respond 502 "Bad Gateway" '{"error":"provider accounting settlement failed"}'
+                block_profile "$profile_id"
+                non_budget_failure=1
+                last_failure="provider response projection read failed"
+                log_event "provider route=${requested_model} profile=${profile_id} class=response_projection_read"
+                continue
+            }
             status_reason "$http_code"
             respond "$http_code" "$STATUS_REASON" "$response_body"
             ;;
@@ -1062,9 +1555,8 @@ ${candidate_key}"
                 respond 503 "Service Unavailable" '{"error":"provider accounting settlement failed"}'
             case "$FAILURE_CLASS" in
                 request_rejected)
-                    response_body=$(cat "$response_file")
                     status_reason "$http_code"
-                    respond "$http_code" "$STATUS_REASON" "$response_body"
+                    respond "$http_code" "$STATUS_REASON" '{"error":"provider rejected the request"}'
                     ;;
                 model_unavailable)
                     # A 404 is model-specific rather than a provider-wide
@@ -1073,12 +1565,14 @@ ${candidate_key}"
                     # so an explicitly configured free route may still use
                     # that profile; 401/429/5xx and network failures block the
                     # profile for every route.
+                    non_budget_failure=1
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"
                     continue
                     ;;
                 *)
                     [ "$FAILURE_CLASS" = "credit_exhausted" ] && mark_credit_exhausted "$profile_id"
+                    [ "$FAILURE_CLASS" = "credit_exhausted" ] || non_budget_failure=1
                     block_profile "$profile_id"
                     last_failure="$FAILURE_CLASS"
                     log_event "provider route=${requested_model} profile=${profile_id} class=${FAILURE_CLASS} status=${http_code}"

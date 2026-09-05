@@ -132,8 +132,9 @@ Create the temporary alias with `.github/workflows/publish-canary-alias.yml`,
 providing the candidate digest, candidate tag, candidate commit, and the
 matching `<version>-canary.<candidate-run-id>` tag. The alias workflow verifies
 that the candidate is the successful `workflow_dispatch` run on `master` using
-the `zeroclaw-release-linux-x64` trusted builder, then verifies the candidate
-signature and provenance/SBOM attestations before writing the alias. It uploads
+the selected supported builder mode (`cross` or `trusted-aa`), then verifies
+the candidate signature and provenance/SBOM attestations before writing the alias.
+It uploads
 the mandatory side-load descriptor artifact. Copy its
 `config.yaml` into a local app directory such as
 `/addons/local/zeroclaw_canary/` before installing the canary; use a separate

@@ -112,7 +112,7 @@ jobs:
     name: Build and smoke-test arm64 image
     # The acceptance lane runs several sequential arm64/QEMU containers,
     # including the real daemon/provider round-trip and backup contract.
-    timeout-minutes: 30
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
@@ -144,6 +144,7 @@ jobs:
             --build-arg ZEROCLAW_LLVM_RNG_SEED="$(yq -r '.llvm_rng_seed' zeroclaw/binary-manifest.json)" \
             --build-arg REQUIRE_VERIFIED_ARTIFACT="${{ inputs.require_verified_artifact == true && 'true' || 'false' }}" \
             --build-arg ZEROCLAW_STATE_SCHEMA="$(tr -d '\r\n' < zeroclaw/state-schema)" \
+            --build-arg ALLOW_TEST_PROVIDER_OVERRIDE=true \
             zeroclaw
 
       - name: Smoke-test image contents and entrypoint syntax
@@ -221,6 +222,13 @@ jobs:
           -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+
+      - name: Smoke-test root-only health broker lane
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/health_lane_smoke.sh'
 
       - name: Prove Supervisor floor fails closed before planner startup
         run: >-

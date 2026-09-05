@@ -16,6 +16,17 @@ TOKEN_FILE="${TELEGRAM_TOKEN_FILE:-/run/zeroclaw/telegram-token}"
 APPROVAL_CHAT="${TELEGRAM_APPROVAL_CHAT:-}"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 CLIENT_AUTH_TOKEN="${TELEGRAM_CLIENT_AUTH_TOKEN:-}"
+SYSTEM_AUTH_TOKEN="${TELEGRAM_SYSTEM_AUTH_TOKEN:-}"
+APPROVAL_RATE_FILE="${TELEGRAM_APPROVAL_RATE_FILE:-/data/capability/telegram-approval-rate.json}"
+APPROVAL_RATE_LOCK="${TELEGRAM_APPROVAL_RATE_LOCK:-/data/capability/.telegram-approval-rate.lock}"
+APPROVAL_ADMISSION_LOCK="${TELEGRAM_APPROVAL_ADMISSION_LOCK:-/data/capability/.telegram-approval-admission.lock}"
+APPROVAL_ADMISSION_LOCK_HELD=0
+APPROVAL_RATE_LIMIT="${TELEGRAM_APPROVAL_RATE_LIMIT:-12}"
+APPROVAL_RATE_WINDOW_SECONDS="${TELEGRAM_APPROVAL_RATE_WINDOW_SECONDS:-60}"
+MAX_PENDING_TICKETS="${TELEGRAM_MAX_PENDING_TICKETS:-64}"
+MAX_PENDING_TICKET_BYTES="${TELEGRAM_MAX_PENDING_TICKET_BYTES:-2097152}"
+TICKET_NONCE_DIR="${ZEROCLAW_APPROVAL_TICKET_NONCE_DIR:-/data/approval-receipts/ticket-nonces}"
+RESTORE_EPOCH_FILE="${ZEROCLAW_RESTORE_EPOCH_FILE:-/data/.approval-restore-epoch}"
 
 json_error() {
     jq -nc --arg error "$1" '{ok:false,error:$error}'
@@ -29,6 +40,18 @@ json_value() {
 json_text() {
     jq -nc --arg result "$1" '{ok:true,result:$result}'
 }
+
+case "$APPROVAL_RATE_LIMIT:$APPROVAL_RATE_WINDOW_SECONDS:$MAX_PENDING_TICKETS:$MAX_PENDING_TICKET_BYTES" in
+    *[!0-9:]*|:*|*::*|*:::*) json_error "Telegram approval admission limits are invalid" ;;
+esac
+[ "$APPROVAL_RATE_LIMIT" -ge 1 ] && [ "$APPROVAL_RATE_LIMIT" -le 120 ] ||
+    json_error "Telegram approval rate limit is outside the safe range"
+[ "$APPROVAL_RATE_WINDOW_SECONDS" -ge 10 ] && [ "$APPROVAL_RATE_WINDOW_SECONDS" -le 3600 ] ||
+    json_error "Telegram approval rate window is outside the safe range"
+[ "$MAX_PENDING_TICKETS" -ge 1 ] && [ "$MAX_PENDING_TICKETS" -le 1024 ] ||
+    json_error "Telegram pending-ticket limit is outside the safe range"
+[ "$MAX_PENDING_TICKET_BYTES" -ge 4096 ] && [ "$MAX_PENDING_TICKET_BYTES" -le 16777216 ] ||
+    json_error "Telegram pending-ticket byte limit is outside the safe range"
 
 request=""
 read_deadline=$((SECONDS + 5))
@@ -45,16 +68,77 @@ case "$read_status" in
 esac
 [ -n "$request" ] || json_error "empty Telegram request"
 [ "${#request}" -le 131072 ] || json_error "Telegram request too large"
-[ -n "$CLIENT_AUTH_TOKEN" ] || json_error "Telegram broker client authentication is unavailable"
+[ -n "$CLIENT_AUTH_TOKEN" ] || [ -n "$SYSTEM_AUTH_TOKEN" ] || \
+    json_error "Telegram broker authentication is unavailable"
 provided_auth=$(printf '%s' "$request" | jq -er '.auth | select(type == "string")' 2>/dev/null) || \
     json_error "Telegram broker client authentication failed"
-[ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ] || \
+AUTH_KIND=""
+if [ -n "$CLIENT_AUTH_TOKEN" ] && [ "$provided_auth" = "$CLIENT_AUTH_TOKEN" ]; then
+    AUTH_KIND=client
+elif [ -n "$SYSTEM_AUTH_TOKEN" ] && [ "$provided_auth" = "$SYSTEM_AUTH_TOKEN" ]; then
+    AUTH_KIND=system
+else
     json_error "Telegram broker client authentication failed"
+fi
 request=$(printf '%s' "$request" | jq -c 'del(.auth)' 2>/dev/null) || \
     json_error "Telegram request is not valid JSON"
 [ -r "$TOKEN_FILE" ] || json_error "Telegram broker credential is unavailable"
 TOKEN=$(cat "$TOKEN_FILE")
 [ -n "$TOKEN" ] || json_error "Telegram broker credential is empty"
+[ "${#TOKEN}" -le 256 ] || json_error "Telegram broker credential is too long"
+case "$TOKEN" in
+    *[!A-Za-z0-9_.:-]*) json_error "Telegram broker credential has an invalid format" ;;
+esac
+
+# Telegram responses must never relay the bot credential, including common
+# transport encodings that a compromised upstream or proxy could reflect.
+TOKEN_BASE64=$(printf '%s' "$TOKEN" | base64 | tr -d '\r\n') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_BASE64_UNPADDED=$(printf '%s' "$TOKEN_BASE64" | tr -d '=')
+TOKEN_BASE64_URLSAFE=$(printf '%s' "$TOKEN_BASE64" | tr '+/' '-_')
+TOKEN_BASE64_URLSAFE_UNPADDED=$(printf '%s' "$TOKEN_BASE64_URLSAFE" | tr -d '=')
+TOKEN_HEX=$(printf '%s' "$TOKEN" | od -An -tx1 -v | tr -d ' \r\n') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_HEX_UPPER=$(printf '%s' "$TOKEN_HEX" | tr 'a-f' 'A-F')
+TOKEN_PERCENT=$(printf '%s' "$TOKEN" | od -An -tx1 -v |
+    awk '{for (i=1; i<=NF; i++) printf "%%%s", toupper($i)}') ||
+    json_error "Telegram credential encoding is unavailable"
+TOKEN_PERCENT_LOWER=$(printf '%s' "$TOKEN_PERCENT" | tr 'A-F' 'a-f')
+TOKEN_PERCENT_MIXED=$(printf '%s' "$TOKEN" | od -An -tx1 -v |
+    awk 'function hex_value(h, p) {
+             p = index("0123456789ABCDEF", toupper(h))
+             return p - 1
+         }
+         {
+             for (i=1; i<=NF; i++) {
+                 h=toupper($i)
+                 value=hex_value(substr(h,1,1))*16 + hex_value(substr(h,2,1))
+                 if ((value >= 48 && value <= 57) ||
+                     (value >= 65 && value <= 90) ||
+                     (value >= 97 && value <= 122) ||
+                     value == 45 || value == 46 || value == 95 || value == 126) {
+                     printf "%c", value
+                 } else {
+                     printf "%%%s", h
+                 }
+             }
+         }') || json_error "Telegram credential encoding is unavailable"
+TOKEN_PERCENT_MIXED_LOWER=$(printf '%s' "$TOKEN_PERCENT_MIXED" | tr 'A-F' 'a-f')
+
+telegram_credential_in_response() {
+    response_text="$1"
+    for credential_variant in \
+        "$TOKEN" "$TOKEN_BASE64" "$TOKEN_BASE64_UNPADDED" \
+        "$TOKEN_BASE64_URLSAFE" "$TOKEN_BASE64_URLSAFE_UNPADDED" \
+        "$TOKEN_HEX" "$TOKEN_HEX_UPPER" "$TOKEN_PERCENT" \
+        "$TOKEN_PERCENT_LOWER" "$TOKEN_PERCENT_MIXED" "$TOKEN_PERCENT_MIXED_LOWER"; do
+        [ -n "$credential_variant" ] || continue
+        if printf '%s' "$response_text" | grep -F -- "$credential_variant" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
 staged_ticket=""
 
 # Telegram puts the bot token in the endpoint path. Build that URL in a
@@ -79,6 +163,44 @@ valid_chat_id() {
 
 valid_ticket() {
     printf '%s' "$1" | grep -Eq '^[a-f0-9]{8}$'
+}
+
+current_restore_epoch() {
+    [ -f "$RESTORE_EPOCH_FILE" ] && [ ! -L "$RESTORE_EPOCH_FILE" ] || return 1
+    restore_epoch=$(tr -d '\r\n' < "$RESTORE_EPOCH_FILE")
+    printf '%s' "$restore_epoch" | grep -Eq '^[0-9]+$' || return 1
+    printf '%s' "$restore_epoch"
+}
+
+valid_approval_generation() {
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
+}
+
+generate_approval_generation() {
+    approval_generation=$(head -c 16 /dev/urandom | sha256sum | cut -c1-32) || return 1
+    valid_approval_generation "$approval_generation" || return 1
+    printf '%s' "$approval_generation"
+}
+
+ensure_ticket_nonce() {
+    nonce_ticket="$1"
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || return 1
+    nonce_path="${TICKET_NONCE_DIR}/${nonce_ticket}"
+    if [ -e "$nonce_path" ] || [ -L "$nonce_path" ]; then
+        [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || return 1
+        return 0
+    fi
+    mkdir "$nonce_path" 2>/dev/null || return 1
+    chmod 0700 "$nonce_path"
+}
+
+reserve_ticket_nonce() {
+    nonce_ticket="$1"
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || return 1
+    nonce_path="${TICKET_NONCE_DIR}/${nonce_ticket}"
+    [ ! -e "$nonce_path" ] && [ ! -L "$nonce_path" ] || return 1
+    mkdir "$nonce_path" 2>/dev/null || return 1
+    chmod 0700 "$nonce_path"
 }
 
 valid_entity_value() {
@@ -175,13 +297,224 @@ mark_delivery_state() {
 
 telegram_result() {
     result="$1"
-    if printf '%s' "$result" | grep -F -- "$TOKEN" >/dev/null 2>&1; then
+    if telegram_credential_in_response "$result"; then
         json_error "Telegram response contained broker credential"
     fi
     if ! printf '%s' "$result" | jq -e '.ok == true' >/dev/null 2>&1; then
         json_error "Telegram API request failed"
     fi
     printf '%s' "$result" | jq -c '.result // {}'
+}
+
+approval_rate_lock_is_stale() {
+    [ -d "$APPROVAL_RATE_LOCK" ] && [ ! -L "$APPROVAL_RATE_LOCK" ] || return 1
+    approval_rate_owner_file="${APPROVAL_RATE_LOCK}/owner"
+    if [ -e "$approval_rate_owner_file" ]; then
+        [ -f "$approval_rate_owner_file" ] && [ ! -L "$approval_rate_owner_file" ] || return 1
+        approval_rate_owner_pid=$(cat "$approval_rate_owner_file" 2>/dev/null || true)
+        case "$approval_rate_owner_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "$approval_rate_owner_pid" 2>/dev/null && return 1
+    fi
+    approval_rate_lock_mtime=$(stat -c '%Y' "$APPROVAL_RATE_LOCK" 2>/dev/null || true)
+    approval_rate_lock_now=$(date -u +%s)
+    case "$approval_rate_lock_mtime:$approval_rate_lock_now" in
+        ''|*[!0-9:]*|*:*:*) return 1 ;;
+    esac
+    [ "$approval_rate_lock_now" -ge "$approval_rate_lock_mtime" ] || return 1
+    [ $((approval_rate_lock_now - approval_rate_lock_mtime)) -ge 120 ]
+}
+
+acquire_approval_rate_lock() {
+    approval_rate_attempts=0
+    while ! mkdir "$APPROVAL_RATE_LOCK" 2>/dev/null; do
+        if approval_rate_lock_is_stale; then
+            rm -f -- "${APPROVAL_RATE_LOCK}/owner" 2>/dev/null || true
+            rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+            continue
+        fi
+        approval_rate_attempts=$((approval_rate_attempts + 1))
+        [ "$approval_rate_attempts" -le 10 ] || return 1
+        sleep 1
+    done
+    printf '%s\n' "$$" > "${APPROVAL_RATE_LOCK}/owner" || {
+        rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "${APPROVAL_RATE_LOCK}/owner"
+}
+
+release_approval_rate_lock() {
+    rm -f -- "${APPROVAL_RATE_LOCK}/owner" 2>/dev/null || true
+    rmdir "$APPROVAL_RATE_LOCK" 2>/dev/null || true
+}
+
+approval_admission_lock_is_stale() {
+    [ -d "$APPROVAL_ADMISSION_LOCK" ] && [ ! -L "$APPROVAL_ADMISSION_LOCK" ] || return 1
+    approval_admission_owner_file="${APPROVAL_ADMISSION_LOCK}/owner"
+    if [ -e "$approval_admission_owner_file" ]; then
+        [ -f "$approval_admission_owner_file" ] && [ ! -L "$approval_admission_owner_file" ] || return 1
+        approval_admission_owner_pid=$(cat "$approval_admission_owner_file" 2>/dev/null || true)
+        case "$approval_admission_owner_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "$approval_admission_owner_pid" 2>/dev/null && return 1
+    fi
+    approval_admission_lock_mtime=$(stat -c '%Y' "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true)
+    approval_admission_lock_now=$(date -u +%s)
+    case "$approval_admission_lock_mtime:$approval_admission_lock_now" in
+        ''|*[!0-9:]*|*:*:*) return 1 ;;
+    esac
+    [ "$approval_admission_lock_now" -ge "$approval_admission_lock_mtime" ] || return 1
+    [ $((approval_admission_lock_now - approval_admission_lock_mtime)) -ge 120 ]
+}
+
+acquire_approval_admission_lock() {
+    [ -d "$(dirname -- "$APPROVAL_ADMISSION_LOCK")" ] &&
+        [ ! -L "$(dirname -- "$APPROVAL_ADMISSION_LOCK")" ] || return 1
+    approval_admission_attempts=0
+    while ! mkdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null; do
+        if approval_admission_lock_is_stale; then
+            rm -f -- "${APPROVAL_ADMISSION_LOCK}/owner" 2>/dev/null || true
+            rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+            continue
+        fi
+        approval_admission_attempts=$((approval_admission_attempts + 1))
+        [ "$approval_admission_attempts" -le 10 ] || return 1
+        sleep 1
+    done
+    printf '%s\n' "$$" > "${APPROVAL_ADMISSION_LOCK}/owner" || {
+        rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "${APPROVAL_ADMISSION_LOCK}/owner"
+    APPROVAL_ADMISSION_LOCK_HELD=1
+}
+
+release_approval_admission_lock() {
+    if [ "$APPROVAL_ADMISSION_LOCK_HELD" -eq 1 ]; then
+        rm -f -- "${APPROVAL_ADMISSION_LOCK}/owner" 2>/dev/null || true
+        rmdir "$APPROVAL_ADMISSION_LOCK" 2>/dev/null || true
+        APPROVAL_ADMISSION_LOCK_HELD=0
+    fi
+}
+
+write_approval_rate() {
+    [ ! -L "$APPROVAL_RATE_FILE" ] || return 1
+    if [ -e "$APPROVAL_RATE_FILE" ] && [ ! -f "$APPROVAL_RATE_FILE" ]; then
+        return 1
+    fi
+    approval_rate_tmp="${APPROVAL_RATE_FILE}.tmp.$$"
+    printf '%s\n' "$1" > "$approval_rate_tmp" || return 1
+    chown root:root "$approval_rate_tmp" 2>/dev/null || true
+    chmod 0600 "$approval_rate_tmp" || {
+        rm -f "$approval_rate_tmp"
+        return 1
+    }
+    sync -f "$approval_rate_tmp" || {
+        rm -f "$approval_rate_tmp"
+        return 1
+    }
+    mv -f "$approval_rate_tmp" "$APPROVAL_RATE_FILE" || return 1
+    sync -f "$(dirname -- "$APPROVAL_RATE_FILE")" || return 1
+}
+
+admit_approval_send() {
+    admission_chat="$1"
+    [ -d "$(dirname -- "$APPROVAL_RATE_FILE")" ] &&
+        [ ! -L "$(dirname -- "$APPROVAL_RATE_FILE")" ] || return 1
+    acquire_approval_rate_lock || return 1
+    if [ -e "$APPROVAL_RATE_FILE" ]; then
+        [ -f "$APPROVAL_RATE_FILE" ] && [ ! -L "$APPROVAL_RATE_FILE" ] || {
+            release_approval_rate_lock
+            return 1
+        }
+        admission_state=$(cat "$APPROVAL_RATE_FILE" 2>/dev/null || true)
+        printf '%s' "$admission_state" | jq -e '
+            type == "object" and .schema == 1 and
+            (.window_start | type == "number" and floor == . and . >= 0) and
+            (.clients | type == "object") and
+            all(.clients[]; type == "number" and floor == . and . >= 0)
+        ' >/dev/null 2>&1 || {
+            release_approval_rate_lock
+            return 1
+        }
+    else
+        admission_state='{"schema":1,"window_start":0,"clients":{}}'
+    fi
+    admission_now=$(date -u +%s)
+    admission_start=$(printf '%s' "$admission_state" | jq -r '.window_start')
+    case "$admission_now:$admission_start" in
+        ''|*[!0-9:]*|*:*:*) release_approval_rate_lock; return 1 ;;
+    esac
+    [ "$admission_start" -le "$admission_now" ] || {
+        release_approval_rate_lock
+        return 1
+    }
+    admission_window_expired=0
+    if [ $((admission_now - admission_start)) -ge "$APPROVAL_RATE_WINDOW_SECONDS" ]; then
+        admission_start="$admission_now"
+        admission_count=0
+        admission_window_expired=1
+    else
+        admission_count=$(printf '%s' "$admission_state" | jq -r --arg chat "$admission_chat" '.clients[$chat] // 0') || {
+            release_approval_rate_lock
+            return 1
+        }
+    fi
+    case "$admission_count" in
+        ''|*[!0-9]*) release_approval_rate_lock; return 1 ;;
+    esac
+    [ "$admission_count" -lt "$APPROVAL_RATE_LIMIT" ] || {
+        release_approval_rate_lock
+        json_error "Telegram approval send rate is temporarily exhausted"
+    }
+    if [ "$admission_window_expired" -eq 1 ]; then
+        admission_next=$(jq -nc --argjson start "$admission_start" --arg chat "$admission_chat" \
+            --argjson count 1 \
+            '{schema:1,window_start:$start,clients:{($chat):$count}}') || {
+            release_approval_rate_lock
+            return 1
+        }
+    else
+        admission_next=$(printf '%s' "$admission_state" | jq --arg chat "$admission_chat" \
+            --argjson count "$((admission_count + 1))" \
+            --argjson start "$admission_start" \
+            '.window_start=$start | .clients[$chat]=$count') || {
+            release_approval_rate_lock
+            return 1
+        }
+    fi
+    write_approval_rate "$admission_next" || {
+        release_approval_rate_lock
+        return 1
+    }
+    release_approval_rate_lock
+}
+
+admit_pending_ticket_capacity() {
+    incoming_bytes="$1"
+    case "$incoming_bytes" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -d "$TICKET_DIR" ] && [ ! -L "$TICKET_DIR" ] || return 1
+    pending_count=0
+    pending_bytes=0
+    for pending_ticket in "$TICKET_DIR"/*.json; do
+        [ -f "$pending_ticket" ] && [ ! -L "$pending_ticket" ] || continue
+        pending_count=$((pending_count + 1))
+        [ "$pending_count" -lt "$MAX_PENDING_TICKETS" ] || return 2
+        pending_size=$(stat -c '%s' "$pending_ticket" 2>/dev/null || true)
+        case "$pending_size" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        pending_bytes=$((pending_bytes + pending_size))
+        [ "$pending_bytes" -le "$MAX_PENDING_TICKET_BYTES" ] || return 2
+    done
+    [ "$pending_count" -lt "$MAX_PENDING_TICKETS" ] || return 2
+    [ $((pending_bytes + incoming_bytes)) -le "$MAX_PENDING_TICKET_BYTES" ] || return 2
+    return 0
 }
 
 send_approval() {
@@ -196,13 +529,20 @@ send_approval() {
     ticket_file="${TICKET_DIR}/${ticket}.json"
     lock="${ZEROCLAW_APPROVAL_LOCK_DIR:-/data/approval-receipts/.locks}/approval-${ticket}.lock"
     mkdir "$lock" 2>/dev/null || json_error "approval ticket is already being processed"
-    trap 'rm -f "${staged_ticket:-}"; rmdir "$lock" 2>/dev/null || true' EXIT
+    trap 'rm -f "${staged_ticket:-}"; release_approval_admission_lock; rmdir "$lock" 2>/dev/null || true' EXIT
+    acquire_approval_admission_lock || json_error "Telegram approval admission state is unavailable"
+    current_restore_epoch_value=$(current_restore_epoch) ||
+        json_error "approval restore epoch is unavailable"
     mkdir -p "$TICKET_DIR"
     if [ -e "$ticket_file" ] || [ -L "$ticket_file" ]; then
         [ -f "$ticket_file" ] && [ ! -L "$ticket_file" ] || json_error "approval ticket state is not a regular file"
+        ensure_ticket_nonce "$ticket" || json_error "approval ticket nonce state is unavailable"
         delivery_state=$(jq -r '.delivery_state // empty' "$ticket_file" 2>/dev/null || true)
         case "$delivery_state" in
             delivered)
+                approval_generation=$(jq -r '.approval_generation // empty' "$ticket_file" 2>/dev/null || true)
+                valid_approval_generation "$approval_generation" || \
+                    json_error "delivered Telegram ticket has no valid approval generation"
                 message_id=$(jq -r '.tg_message_id // empty' "$ticket_file" 2>/dev/null || true)
                 printf '%s' "$message_id" | grep -Eq '^[0-9]+$' || \
                     json_error "delivered Telegram ticket has no valid message id"
@@ -223,6 +563,18 @@ send_approval() {
         esac
     fi
     [ "${#ticket_json}" -le 65536 ] || json_error "approval ticket is too large"
+    ticket_bytes=${#ticket_json}
+    if admit_pending_ticket_capacity "$ticket_bytes"; then
+        :
+    else
+        capacity_status=$?
+        case "$capacity_status" in
+            2) json_error "Telegram approval backlog is full" ;;
+            *) json_error "Telegram approval admission state is unavailable" ;;
+        esac
+    fi
+    admit_approval_send "$chat_id" ||
+        json_error "Telegram approval admission state is unavailable"
     staged_ticket=$(mktemp "${TICKET_DIR}/.${ticket}.XXXXXX")
     # The planner sends the bounded ticket as typed request data. Never open a
     # planner-controlled pathname from this root-owned broker: pathname swaps,
@@ -258,8 +610,30 @@ send_approval() {
         staged_ticket=""
         json_error "approval payload is too large to render exactly"
     }
+    reserve_ticket_nonce "$ticket" || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket id has already been used or nonce state is unavailable"
+    }
+    approval_generation=$(generate_approval_generation) || {
+        rm -f "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket generation could not be created"
+    }
+    epoch_tmp=$(mktemp "${TICKET_DIR}/.${ticket}.epoch.XXXXXX")
+    if ! jq --argjson restore_epoch "$current_restore_epoch_value" \
+        --arg generation "$approval_generation" \
+        '. + {restore_epoch:$restore_epoch,approval_generation:$generation}' "$staged_ticket" > "$epoch_tmp"; then
+        rm -f "$epoch_tmp" "$staged_ticket"
+        staged_ticket=""
+        json_error "approval ticket restore epoch could not be sealed"
+    fi
+    chown root:root "$epoch_tmp"
+    chmod 0600 "$epoch_tmp"
+    mv "$epoch_tmp" "$staged_ticket"
     mv "$staged_ticket" "$ticket_file"
     staged_ticket=""
+    release_approval_admission_lock
     expires_at=$(jq -r '.expires_at' "$ticket_file")
     now=$(date -u +%s)
     [ "$now" -le "$expires_at" ] || {
@@ -286,8 +660,8 @@ send_approval() {
     # renders the exact canonical payload and uses a
     # fixed safety statement, so an operator cannot approve hidden parameters
     # or planner-controlled policy prose.
-    text=$(printf 'Approval needed (%s)\nAction: %s\nParameters: %s\nSafety gate: approval is required for this exact action.\nReply YES %s or NO %s. Expires in 30 min.' \
-        "$ticket" "$service" "$payload" "$ticket" "$ticket")
+    text=$(printf 'Approval needed (%s)\nAction: %s\nParameters: %s\nSafety gate: approval is required for this exact action.\nReply YES %s %s or NO %s %s. Expires in 30 min.' \
+        "$ticket" "$service" "$payload" "$ticket" "$approval_generation" "$ticket" "$approval_generation")
     keyboard=$(jq -nc --arg id "$ticket" '{inline_keyboard:[[{text:"✅ Approve",callback_data:("zcv1:approve:" + $id)},{text:"❌ Reject",callback_data:("zcv1:reject:" + $id)}],[{text:"💬 Discuss",callback_data:("zcv1:discuss:" + $id)}]]}')
     body=$(jq -nc --arg cid "$chat_id" --arg text "$text" --argjson keyboard "$keyboard" \
         '{chat_id:$cid,text:$text,reply_markup:$keyboard}')
@@ -296,7 +670,7 @@ send_approval() {
         mark_delivery_state delivery_unknown || true
         json_error "Telegram sendMessage outcome is unknown; ticket retained for recovery"
     fi
-    if printf '%s' "$response" | grep -F -- "$TOKEN" >/dev/null 2>&1; then
+    if telegram_credential_in_response "$response"; then
         rm -f "$ticket_file"
         json_error "Telegram response contained broker credential"
     fi
@@ -324,12 +698,12 @@ send_approval() {
     json_value "$result"
 }
 
-send_text() {
-    chat_id="$1"
-    text="$2"
-    valid_chat_id "$chat_id" || json_error "invalid chat id"
-    [ -n "$APPROVAL_CHAT" ] && [ "$chat_id" = "$APPROVAL_CHAT" ] || json_error "chat is not the configured approval owner"
-    body=$(jq -nc --arg cid "$chat_id" --arg text "$text" '{chat_id:$cid,text:$text}')
+send_system_notice() {
+    text="$1"
+    [ "$AUTH_KIND" = system ] || json_error "system Telegram notice is not available to the planner"
+    [ -n "$APPROVAL_CHAT" ] || json_error "Telegram approval owner is not configured"
+    [ "${#text}" -ge 1 ] && [ "${#text}" -le 512 ] || json_error "system notice is too long"
+    body=$(jq -nc --arg cid "$APPROVAL_CHAT" --arg text "System notice: $text" '{chat_id:$cid,text:$text}')
     if ! response=$(telegram_curl sendMessage -fsS --fail-with-body --connect-timeout 5 --max-time 15 -X POST \
         -H 'Content-Type: application/json' -d "$body"); then
         json_error "Telegram sendMessage failed"
@@ -339,16 +713,16 @@ send_text() {
 
 case "$operation" in
     send_approval)
+        [ "$AUTH_KIND" = client ] || json_error "approval delivery is not available to the system notifier"
         ticket=$(printf '%s' "$request" | jq -er '.ticket | select(type == "string")' 2>/dev/null) || json_error "ticket must be a string"
         text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || json_error "text must be a string"
         ticket_json=$(printf '%s' "$request" | jq -er '.ticket_json | select(type == "string")' 2>/dev/null) || json_error "ticket_json must be a string"
         chat_id=$(printf '%s' "$request" | jq -er '.chat_id | tostring' 2>/dev/null) || json_error "chat_id is required"
         send_approval "$ticket" "$text" "$chat_id" "$ticket_json"
         ;;
-    send_text)
-        chat_id=$(printf '%s' "$request" | jq -er '.chat_id | tostring' 2>/dev/null) || json_error "chat_id is required"
+    send_system_notice)
         text=$(printf '%s' "$request" | jq -er '.text | select(type == "string")' 2>/dev/null) || json_error "text must be a string"
-        send_text "$chat_id" "$text"
+        send_system_notice "$text"
         ;;
     *)
         json_error "operation is not available to the planner"

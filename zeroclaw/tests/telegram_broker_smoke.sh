@@ -39,7 +39,12 @@ printf '%s\n' '{"ok":true,"result":{"message_id":123}}'
 FAKE_CURL
 chmod +x /tmp/fake-curl/curl
 
-mkdir -p /data/pending /data/approval-receipts /data/approval-receipts/.locks
+mkdir -p /data/capability /data/pending /data/approval-receipts \
+    /data/approval-receipts/.locks /data/approval-receipts/ticket-nonces
+printf '%s\n' 0 > /data/.approval-restore-epoch
+chown root:root /data/.approval-restore-epoch
+chmod 0600 /data/.approval-restore-epoch
+rm -f /data/capability/telegram-approval-rate.json /data/capability/.telegram-approval-rate.lock
 jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
     '{uuid:"abcdef12",service:"light/turn_on",payload:{entity_id:"light.kitchen"},expires_at:$exp,approval:{actor_user_id:"42",chat_id:"42",channel:"telegram"}}' \
     > /data/pending/abcdef12.json
@@ -48,6 +53,7 @@ jq -nc --argjson exp "$(( $(date -u +%s) + 7200 ))" \
     export PATH="/tmp/fake-curl:$PATH"
     export TELEGRAM_TOKEN_FILE="/run/zeroclaw/telegram-token"
     export TELEGRAM_CLIENT_AUTH_TOKEN=telegram-client-secret
+    export TELEGRAM_SYSTEM_AUTH_TOKEN=telegram-system-secret
     export TELEGRAM_APPROVAL_CHAT=42
     export ZEROCLAW_TELEGRAM_PORT=42629
     while true; do
@@ -61,21 +67,29 @@ RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh
 printf '%s' "$RESPONSE" | jq -e '.message_id == 123' >/dev/null
 [ -f /data/approval-receipts/abcdef12.sha256 ]
 [ -f /data/approval-receipts/tickets/abcdef12.json ]
+[ -d /data/approval-receipts/ticket-nonces/abcdef12 ]
 test "$(stat -c '%u:%a' /data/approval-receipts/tickets/abcdef12.json)" = "0:600"
+printf '%s' "$(jq -r '.restore_epoch' /data/approval-receipts/tickets/abcdef12.json)" | grep -Eq '^0$'
+APPROVAL_GENERATION=$(jq -r '.approval_generation // empty' /data/approval-receipts/tickets/abcdef12.json)
+printf '%s' "$APPROVAL_GENERATION" | grep -Eq '^[a-f0-9]{32}$'
 SEALED_NOW=$(date -u +%s)
 SEALED_EXP=$(jq -r '.expires_at' /data/approval-receipts/tickets/abcdef12.json)
 [ "$SEALED_EXP" -le "$((SEALED_NOW + 1800))" ]
 
 if RESPONSE=$(ZEROCLAW_TELEGRAM_PORT=42629 /opt/zeroclaw/lib/telegram-capability.sh send_text 43 'unexpected recipient' 2>/dev/null); then
-    echo "Telegram broker accepted a non-owner chat" >&2
+    echo "Telegram planner capability exposed arbitrary send_text" >&2
     exit 1
 fi
 
-if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 >/dev/null 2>&1; then
+SYSTEM_REQUEST=$(jq -nc '{operation:"send_system_notice",auth:"telegram-system-secret",text:"cost watchdog"}')
+SYSTEM_RESPONSE=$(printf '%s\n' "$SYSTEM_REQUEST" | /bin/busybox nc -w 10 127.0.0.1 42629)
+printf '%s' "$SYSTEM_RESPONSE" | jq -e '.message_id == 123' >/dev/null
+
+if ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 99 42 "$APPROVAL_GENERATION" >/dev/null 2>&1; then
     echo "Telegram broker smoke accepted the wrong actor" >&2
     exit 1
 fi
-ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 42 42 >/dev/null
+ZEROCLAW_APPROVAL_INTERNAL=1 /opt/zeroclaw/lib/approval-transition.sh approve abcdef12 42 42 "$APPROVAL_GENERATION" >/dev/null
 
 # Telegram can return HTTP 200 with {"ok":false}; that must not seal a
 # canonical ticket as delivered.  A response containing the bot credential

@@ -7,6 +7,8 @@ ACTION="${1:-}"
 SHORT="${2:-}"
 ACTOR="${3:-}"
 CHAT="${4:-}"
+GENERATION="${5:-}"
+MESSAGE_ID="${6:-}"
 MARKER="/data/approved/${SHORT}.marker"
 LOCK="${ZEROCLAW_APPROVAL_LOCK_DIR:-/data/approval-receipts/.locks}/approval-${SHORT}.lock"
 RECEIPT="/data/approval-receipts/${SHORT}.sha256"
@@ -14,6 +16,8 @@ CLAIMS_DIR="${ZEROCLAW_APPROVAL_CLAIM_DIR:-/data/approval-receipts/.claims}"
 CLAIM="${CLAIMS_DIR}/${SHORT}.claim"
 TICKET_DIR="${ZEROCLAW_APPROVAL_TICKET_DIR:-/data/approval-receipts/tickets}"
 TICKET="${TICKET_DIR}/${SHORT}.json"
+TICKET_NONCE_DIR="${ZEROCLAW_APPROVAL_TICKET_NONCE_DIR:-/data/approval-receipts/ticket-nonces}"
+RESTORE_EPOCH_FILE="${ZEROCLAW_RESTORE_EPOCH_FILE:-/data/.approval-restore-epoch}"
 AUDIT_DIR="${ZEROCLAW_AUDIT_DIR:-/data/audit}"
 ACTION_ADMISSION_DIR="${ZEROCLAW_ACTION_ADMISSION_DIR:-/data/capability/action-admissions}"
 ACTION_QUOTA_LOCK="${ZEROCLAW_ACTION_QUOTA_LOCK:-/data/capability/.quota.lock}"
@@ -26,9 +30,11 @@ admission_tmp=""
 cleanup() {
     rm -f "$admission_tmp"
     if [ "$quota_lock_held" -eq 1 ]; then
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
         rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
     fi
     if [ "$approval_lock_held" -eq 1 ]; then
+        rm -f -- "$LOCK/owner" 2>/dev/null || true
         rmdir "$LOCK" 2>/dev/null || true
     fi
 }
@@ -47,18 +53,92 @@ case "$ACTION" in
         [ "${ZEROCLAW_APPROVAL_INTERNAL:-}" = "1" ] || fail "approval verification is internal-only"
         ;;
     *)
-        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat]"
+        fail "usage: approve|reject|verify|verify_claim <ticket> [actor] [chat] [generation] [message_id]"
         ;;
 esac
 
 printf '%s' "$SHORT" | grep -Eq '^[a-f0-9]{8}$' || fail "invalid ticket id"
 
+ensure_ticket_nonce() {
+    [ -d "$TICKET_NONCE_DIR" ] && [ ! -L "$TICKET_NONCE_DIR" ] || fail "ticket nonce history is unavailable"
+    nonce_path="${TICKET_NONCE_DIR}/${SHORT}"
+    if [ -e "$nonce_path" ] || [ -L "$nonce_path" ]; then
+        [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || fail "ticket nonce record is unsafe"
+        chmod 0700 "$nonce_path" || fail "ticket nonce record is unsafe"
+        return 0
+    fi
+    if mkdir "$nonce_path" 2>/dev/null; then
+        chmod 0700 "$nonce_path" || fail "ticket nonce could not be secured"
+        return 0
+    fi
+    # Another concurrent transition may have created the directory after the
+    # existence check. Treat that valid, non-symlink directory as the same
+    # reservation; any other mkdir failure remains fail-closed.
+    [ -d "$nonce_path" ] && [ ! -L "$nonce_path" ] || fail "ticket nonce could not be reserved"
+    chmod 0700 "$nonce_path" || fail "ticket nonce could not be secured"
+}
+
+current_restore_epoch() {
+    [ -f "$RESTORE_EPOCH_FILE" ] && [ ! -L "$RESTORE_EPOCH_FILE" ] || fail "approval restore epoch is unavailable"
+    restore_epoch=$(tr -d '\r\n' < "$RESTORE_EPOCH_FILE")
+    printf '%s' "$restore_epoch" | grep -Eq '^[0-9]+$' || fail "approval restore epoch is malformed"
+    printf '%s' "$restore_epoch"
+}
+
+valid_approval_generation() {
+    [ "$#" -eq 1 ] || return 1
+    printf '%s' "$1" | grep -Eq '^[a-f0-9]{32}$'
+}
+
+valid_positive_id() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+verify_supplied_generation() {
+    [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
+    valid_approval_generation "$GENERATION" || fail "approval generation is invalid"
+    ticket_generation=$(jq -er '.approval_generation | select(type == "string")' "$TICKET" 2>/dev/null) || \
+        fail "ticket ${SHORT} approval generation is invalid"
+    valid_approval_generation "$ticket_generation" || fail "ticket ${SHORT} approval generation is invalid"
+    [ "$ticket_generation" = "$GENERATION" ] || \
+        fail "approval generation does not match ticket ${SHORT}"
+}
+
+verify_supplied_message_id() {
+    # A callback carries the Telegram message id as well as the approval
+    # generation. When supplied, bind both values to the ticket while the
+    # transition lock is held; this closes the window where cleanup can replace
+    # a ticket between the watcher's two reads.
+    [ -n "$MESSAGE_ID" ] || return 0
+    valid_positive_id "$MESSAGE_ID" || fail "approval message id is invalid"
+    ticket_message_id=$(jq -er '.tg_message_id | select(type == "number" and floor == .) | tostring' \
+        "$TICKET" 2>/dev/null) || fail "ticket ${SHORT} Telegram message id is invalid"
+    valid_positive_id "$ticket_message_id" || fail "ticket ${SHORT} Telegram message id is invalid"
+    [ "$ticket_message_id" = "$MESSAGE_ID" ] || \
+        fail "approval message id does not match ticket ${SHORT}"
+}
+
+ensure_ticket_nonce
+
 verify_marker() {
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "ticket ${SHORT} is not approved"
     [ -f "$TICKET" ] && [ ! -L "$TICKET" ] || fail "ticket ${SHORT} is missing"
+    marker_epoch=$(current_restore_epoch)
+    ticket_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
+        fail "ticket ${SHORT} restore epoch is invalid"
+    [ "$ticket_epoch" = "$marker_epoch" ] || fail "ticket ${SHORT} belongs to a prior restore epoch"
+    ticket_generation=$(jq -er '.approval_generation | select(type == "string")' "$TICKET" 2>/dev/null) || \
+        fail "ticket ${SHORT} approval generation is invalid"
+    valid_approval_generation "$ticket_generation" || fail "ticket ${SHORT} approval generation is invalid"
     jq -e --arg id "$SHORT" --arg actor "$(jq -r '.approval.actor_user_id // empty' "$TICKET")" \
         --arg chat "$(jq -r '.approval.chat_id // empty' "$TICKET")" \
-        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and (.approved_at | type == "number")' \
+        --arg generation "$ticket_generation" \
+        --argjson epoch "$marker_epoch" \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
         "$MARKER" >/dev/null 2>&1 || fail "ticket ${SHORT} approval marker is invalid"
     verify_receipt
     approval_audit_found=1
@@ -102,11 +182,25 @@ fi
 
 acquire_lock() {
     LOCK_ATTEMPTS=0
+    APPROVAL_LOCK_MAX_ATTEMPTS=600
     while ! mkdir "$LOCK" 2>/dev/null; do
         LOCK_ATTEMPTS=$((LOCK_ATTEMPTS + 1))
-        [ "$LOCK_ATTEMPTS" -lt 100 ] || fail "ticket ${SHORT} is already being transitioned"
+        # QEMU-backed acceptance and a cold HA start can make the durable
+        # approval transaction exceed the old ten-second ceiling. Keep the
+        # wait bounded, but allow valid concurrent callbacks to observe the
+        # committed idempotent result instead of being rejected mid-flight.
+        [ "$LOCK_ATTEMPTS" -lt "$APPROVAL_LOCK_MAX_ATTEMPTS" ] || fail "ticket ${SHORT} is already being transitioned"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$LOCK/owner" || {
+        rmdir "$LOCK" 2>/dev/null || true
+        fail "ticket ${SHORT} transition lock is unavailable"
+    }
+    chmod 0600 "$LOCK/owner" || {
+        rm -f -- "$LOCK/owner" 2>/dev/null || true
+        rmdir "$LOCK" 2>/dev/null || true
+        fail "ticket ${SHORT} transition lock is unavailable"
+    }
     approval_lock_held=1
 }
 
@@ -117,6 +211,15 @@ acquire_quota_lock() {
         [ "$quota_attempts" -le 100 ] || fail "capability action quota is busy"
         sleep 0.1
     done
+    printf '%s\n' "$$" > "$ACTION_QUOTA_LOCK/owner" || {
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        fail "capability action quota lock is unavailable"
+    }
+    chmod 0600 "$ACTION_QUOTA_LOCK/owner" || {
+        rm -f -- "$ACTION_QUOTA_LOCK/owner" 2>/dev/null || true
+        rmdir "$ACTION_QUOTA_LOCK" 2>/dev/null || true
+        fail "capability action quota lock is unavailable"
+    }
     quota_lock_held=1
 }
 
@@ -211,6 +314,7 @@ fi
 
 if [ "$ACTION" = "complete" ]; then
     acquire_lock
+    verify_marker
     [ -d "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is not claimed"
     claim_quota="$CLAIM/quota.json"
     if [ -f "$claim_quota" ] && [ ! -L "$claim_quota" ]; then
@@ -248,7 +352,14 @@ fi
 
 [ -f "$TICKET" ] || fail "ticket ${SHORT} is missing or expired"
 acquire_lock
+verify_supplied_generation
+verify_supplied_message_id
 verify_receipt
+current_restore_epoch_value=$(current_restore_epoch)
+ticket_restore_epoch=$(jq -er '.restore_epoch | select(type == "number" and floor == .)' "$TICKET" 2>/dev/null) ||
+    fail "ticket ${SHORT} restore epoch is invalid"
+[ "$ticket_restore_epoch" = "$current_restore_epoch_value" ] ||
+    fail "ticket ${SHORT} belongs to a prior restore epoch"
 
 EXP=$(jq -r '.expires_at // 0' "$TICKET")
 NOW=$(date -u +%s)
@@ -259,8 +370,24 @@ EXPECTED_CHAT=$(jq -r '.approval.chat_id // empty' "$TICKET")
 [ -n "$EXPECTED_CHAT" ] && [ "$CHAT" = "$EXPECTED_CHAT" ] || fail "chat is not authorized for ticket ${SHORT}"
 [ ! -e "$CLAIM" ] && [ ! -L "$CLAIM" ] || fail "ticket ${SHORT} is being applied"
 if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
-    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && jq -e '.state == "approval_pending"' "$MARKER" >/dev/null 2>&1; then
+    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && jq -e --arg id "$SHORT" \
+        --arg actor "$ACTOR" --arg chat "$CHAT" --arg generation "$ticket_generation" \
+        --argjson epoch "$current_restore_epoch_value" \
+        '.ticket == $id and .state == "approval_pending" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
+        "$MARKER" >/dev/null 2>&1; then
         rm -f "$MARKER"
+    elif [ "$ACTION" = "approve" ] && [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && \
+        jq -e --arg id "$SHORT" --arg actor "$ACTOR" --arg chat "$CHAT" \
+        --arg generation "$ticket_generation" --argjson epoch "$current_restore_epoch_value" \
+        '.ticket == $id and .state == "approved_audited" and .actor_user_id == $actor and .chat_id == $chat and .approval_generation == $generation and (.approved_at | type == "number") and .restore_epoch == $epoch and (.restore_epoch | type == "number" and floor == .)' \
+        "$MARKER" >/dev/null 2>&1; then
+        # A watcher can restart after the audited approval marker is durable but
+        # before the capability broker claims it. Revalidate the marker, ticket,
+        # receipt, audit, epoch, and expiry under this same transition lock, then
+        # let the caller resume the one-shot apply path.
+        verify_marker
+        echo "ALREADY_APPROVED ${SHORT}"
+        exit 0
     else
         fail "ticket ${SHORT} was already approved"
     fi
@@ -275,8 +402,9 @@ case "$ACTION" in
         mkdir -p /data/approved
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
-            --argjson approved_at "$NOW" \
-            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+            --arg generation "$ticket_generation" \
+            --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
+            '{ticket:$ticket,state:"approval_pending",actor_user_id:$actor_user_id,chat_id:$chat_id,approval_generation:$generation,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"
@@ -287,8 +415,9 @@ case "$ACTION" in
         fi
         TMP=$(mktemp "/data/approved/.${SHORT}.XXXXXX")
         jq -nc --arg ticket "$SHORT" --arg actor_user_id "$ACTOR" --arg chat_id "$CHAT" \
-            --argjson approved_at "$NOW" \
-            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approved_at:$approved_at}' > "$TMP"
+            --arg generation "$ticket_generation" \
+            --argjson approved_at "$NOW" --argjson restore_epoch "$current_restore_epoch_value" \
+            '{ticket:$ticket,state:"approved_audited",actor_user_id:$actor_user_id,chat_id:$chat_id,approval_generation:$generation,approved_at:$approved_at,restore_epoch:$restore_epoch}' > "$TMP"
         chmod 0640 "$TMP"
         sync
         mv "$TMP" "$MARKER"

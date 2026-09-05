@@ -54,7 +54,10 @@ root `zeroclaw` crate. A matching non-authoritative SHA, a mismatch between A an
 B, or a missing diagnostic is a failed qualification; do not regenerate the
 manifest.
 
-Only after two clean qualifications should the exact signed candidate be used for
-the authenticated Home Assistant canary. Promotion remains a separate protected
-dispatch and must supply the candidate digest plus durable backup, rollback, and
-canary evidence.
+Only after two clean qualifications should the exact signed candidate be used
+for production promotion. A temporary authenticated canary may use the hosted
+Cross candidate when the `release-builder` environment approval is granted and
+the alias workflow verifies the exact candidate run, digest, signature,
+attestations, and descriptor. Promotion remains a separate protected dispatch
+and must supply the trusted-aa candidate digest plus durable backup, rollback,
+and canary evidence.

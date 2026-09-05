@@ -62,26 +62,33 @@ options:
   log_level: info
 
   # --- Cost / safety budgets ---
-  daily_cost_limit_usd: 5.0
-  monthly_cost_limit_usd: 20.0
+  # The broker reserves a worst-case 65536-input/2048-output request at its
+  # conservative $0.10/1K-token ceiling before contacting an upstream. Keep
+  # the default above that one-request reservation so the documented full
+  # context path and its free fallback are actually usable.
+  daily_cost_limit_usd: 10.0
+  monthly_cost_limit_usd: 40.0
   max_actions_per_hour: 200
   # Root provider broker admission limits; these are independent of planner
   # settings and remain enforced when a client calls the local gateway.
   provider_max_requests_per_hour: 120
-  provider_daily_token_budget: 100000
+  # A full 65536-input/2048-output reservation is 67584 tokens. Keep enough
+  # room for a failed primary reservation plus one same-profile free fallback;
+  # the separate dollar caps remain the spend control.
+  provider_daily_token_budget: 200000
   provider_openrouter_max_requests_per_hour: 120
-  provider_openrouter_daily_token_budget: 100000
+  provider_openrouter_daily_token_budget: 200000
   provider_nvidia_max_requests_per_hour: 60
-  provider_nvidia_daily_token_budget: 50000
+  provider_nvidia_daily_token_budget: 200000
   provider_ark_max_requests_per_hour: 60
-  provider_ark_daily_token_budget: 50000
+  provider_ark_daily_token_budget: 200000
 
   # --- Agent runtime budgets ---
   max_tool_iterations: 8
   max_history_messages: 30
   max_context_tokens: 16000
   provider_max_tokens: 2048
-  provider_max_input_tokens: 32768
+  provider_max_input_tokens: 65536
   response_cache_ttl_minutes: 2
   conversation_retention_days: 30
 
@@ -100,7 +107,6 @@ options:
 
   # --- Phase switches ---
   # Reserved: the broker-only release does not map the host HA /config tree.
-  enable_creation_skill: false
   enable_learning_loops: false
   # Enabling writes never bypasses approval: every write still requires a
   # root-sealed, actor-bound Telegram ticket in the production runtime.
@@ -180,7 +186,6 @@ schema:
   observer_enabled: bool
   observer_interval_minutes: int(5,120)
 
-  enable_creation_skill: bool
   enable_learning_loops: bool
   enable_write_actions: bool
 
