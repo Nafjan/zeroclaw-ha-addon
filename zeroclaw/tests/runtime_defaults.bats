@@ -614,6 +614,23 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "persisted provider envelope defaults are explicit without changing saved budgets" {
+    run grep -F 'RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS=65536' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'effective broker envelope ceiling is' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Existing Supervisor value is retained' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'daily_cost_limit_usd: 10.0' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'monthly_cost_limit_usd: 40.0' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_daily_token_budget: 200000' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+}
+
 @test "provider ledger flushes reservations before upstream contact" {
     run grep -F 'sync -f "$ledger_tmp"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
@@ -790,6 +807,27 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'provider_key_mode=direct_temporary is retired; forcing the root-owned broker mode.' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'provider_key_mode: list(direct_temporary|broker)' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+}
+
+@test "planner-owned routines are bounded and stop after a failed step" {
+    run grep -F 'ROUTINE_MAX_STEPS=32' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ROUTINE_MAX_BYTES=131072' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'SAFE=$(printf '\''%s'\'' "$NAME" | tr -c '\''A-Za-z0-9_'\'' '\''_'\'')' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine steps must be 1..32 typed service/payload objects' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine definition is invalid or exceeds the step limit' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine stopped: step failed or is pending approval' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'done < "$STEPS_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'cat "$F" > "$ROUTINE_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -c '\''.steps[]'\'' "$ROUTINE_FILE" > "$STEPS_FILE"' "$run_file"
     [ "$status" -eq 0 ]
 }
 

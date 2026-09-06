@@ -158,7 +158,8 @@ POLICY_REQUIRE_APPROVAL=true
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-200000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
-PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-65536}"
+RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS=65536
+PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}}"
 # The broker reserves a worst-case 65536-input/2048-output request at its
 # conservative $0.10/1K-token ceiling before contacting an upstream. Keep the
 # runtime default above that one-request reservation so the documented full
@@ -240,6 +241,13 @@ esac
     bashio::log.fatal "provider_max_input_tokens is outside the safe range; refusing to start"
     exit 1
 }
+# Supervisor retains an existing options object across add-on upgrades. Keep a
+# deliberately lower operator value, but make the resulting envelope ceiling
+# visible so a stale prior default cannot look like a provider outage.
+if [ "${PROVIDER_MAX_INPUT_TOKENS}" -lt "${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}" ]; then
+    EFFECTIVE_PROVIDER_INPUT_CHARS=$((PROVIDER_MAX_INPUT_TOKENS - 256))
+    bashio::log.warning "provider_max_input_tokens=${PROVIDER_MAX_INPUT_TOKENS} is below the release default ${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}; effective broker envelope ceiling is ${EFFECTIVE_PROVIDER_INPUT_CHARS} bytes. Existing Supervisor value is retained; increase the option if full-context requests are required."
+fi
 # The broker reserves the configured input ceiling plus the configured output
 # ceiling before contacting any provider. A profile budget that covers only
 # output tokens is an accepted-but-unusable configuration, so reject it at the
@@ -2842,9 +2850,20 @@ cat > /usr/local/bin/ha-create-routine << 'SCRIPT'
 set -e
 NAME="$1"; STEPS="$2"
 [ -z "$NAME" ] || [ -z "$STEPS" ] && { echo "Usage: ha-create-routine <name> <json_steps>"; exit 1; }
-echo "$STEPS" | jq -e 'type=="array"' >/dev/null 2>&1 || { echo "ERROR: steps must be a JSON array"; exit 1; }
+ROUTINE_MAX_STEPS=32
+ROUTINE_MAX_BYTES=131072
+[ "${#STEPS}" -le "$ROUTINE_MAX_BYTES" ] || { echo "ERROR: routine definition is too large"; exit 1; }
+echo "$STEPS" | jq -e --argjson max "$ROUTINE_MAX_STEPS" '
+  type == "array" and length >= 1 and length <= $max and
+  all(.[]; type == "object" and
+      (.service | type == "string" and test("^[a-z0-9_]+/[a-z0-9_]+$")) and
+      (.payload | type == "object"))
+' >/dev/null 2>&1 || {
+    echo "ERROR: routine steps must be 1..32 typed service/payload objects"
+    exit 1
+}
 mkdir -p /data/routines
-SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+SAFE=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
 jq -n --arg n "$NAME" --argjson s "$STEPS" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{name:$n,steps:$s,created_at:$ts}' > "$F"
@@ -2854,18 +2873,41 @@ SCRIPT
 cat > /usr/local/bin/ha-run-routine << 'SCRIPT'
 #!/bin/sh
 # Usage: ha-run-routine '<name>'   — runs each step through ha-action-guarded.
-NAME="$1"
+set -e
+NAME="${1:-}"
 [ -z "$NAME" ] && { echo "Usage: ha-run-routine <name>"; exit 1; }
-SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+SAFE=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
-[ ! -f "$F" ] && { echo "ERROR: routine '$NAME' not found"; exit 1; }
+[ -f "$F" ] && [ ! -L "$F" ] || { echo "ERROR: routine '$NAME' not found or is not a regular file"; exit 1; }
+ROUTINE_MAX_STEPS=32
+ROUTINE_MAX_BYTES=131072
+ROUTINE_FILE=$(mktemp)
+STEPS_FILE=$(mktemp)
+trap 'rm -f "$ROUTINE_FILE" "$STEPS_FILE"' EXIT
+if ! cat "$F" > "$ROUTINE_FILE"; then
+    echo "ERROR: routine could not be read" >&2
+    exit 1
+fi
+routine_bytes=$(wc -c < "$ROUTINE_FILE" | tr -d ' ')
+case "$routine_bytes" in ''|*[!0-9]*) echo "ERROR: routine size is invalid"; exit 1 ;; esac
+[ "$routine_bytes" -le "$ROUTINE_MAX_BYTES" ] || { echo "ERROR: routine file is too large"; exit 1; }
+jq -e --argjson max "$ROUTINE_MAX_STEPS" '
+  type == "object" and (.steps | type == "array" and length >= 1 and length <= $max) and
+  all(.steps[]; type == "object" and
+      (.service | type == "string" and test("^[a-z0-9_]+/[a-z0-9_]+$")) and
+       (.payload | type == "object"))
+ ' "$ROUTINE_FILE" >/dev/null 2>&1 || { echo "ERROR: routine definition is invalid or exceeds the step limit"; exit 1; }
 echo "Running routine: $NAME"
-jq -c '.steps[]' "$F" | while read -r step; do
+jq -c '.steps[]' "$ROUTINE_FILE" > "$STEPS_FILE"
+while IFS= read -r step; do
     SVC=$(echo "$step" | jq -r .service)
     BODY=$(echo "$step" | jq -c .payload)
     echo "  → $SVC"
-    /usr/local/bin/ha-action-guarded "$SVC" "$BODY" || echo "  (step failed or pending approval)"
-done
+    if ! /usr/local/bin/ha-action-guarded "$SVC" "$BODY"; then
+        echo "  (routine stopped: step failed or is pending approval)" >&2
+        exit 1
+    fi
+done < "$STEPS_FILE"
 SCRIPT
 
 cat > /usr/local/bin/ha-apply-creation << SCRIPT
