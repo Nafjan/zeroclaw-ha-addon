@@ -614,6 +614,23 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "persisted provider envelope defaults are explicit without changing saved budgets" {
+    run grep -F 'RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS=65536' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'effective broker envelope ceiling is' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'Existing Supervisor value is retained' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'daily_cost_limit_usd: 10.0' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'monthly_cost_limit_usd: 40.0' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+    run grep -F 'provider_daily_token_budget: 200000' "$BATS_TEST_DIRNAME/../config.yaml"
+    [ "$status" -eq 0 ]
+}
+
 @test "provider ledger flushes reservations before upstream contact" {
     run grep -F 'sync -f "$ledger_tmp"' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
