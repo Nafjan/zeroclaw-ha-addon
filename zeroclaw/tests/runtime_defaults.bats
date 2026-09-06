@@ -804,6 +804,12 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'routine stopped: step failed or is pending approval' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'done < "$STEPS_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'cat "$F" > "$ROUTINE_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'jq -c '\''.steps[]'\'' "$ROUTINE_FILE" > "$STEPS_FILE"' "$run_file"
+    [ "$status" -eq 0 ]
 }
 
 @test "legacy HA token cannot become the broker credential" {
