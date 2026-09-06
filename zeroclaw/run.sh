@@ -2873,19 +2873,24 @@ F="/data/routines/${SAFE}.json"
 [ -f "$F" ] && [ ! -L "$F" ] || { echo "ERROR: routine '$NAME' not found or is not a regular file"; exit 1; }
 ROUTINE_MAX_STEPS=32
 ROUTINE_MAX_BYTES=131072
-routine_bytes=$(wc -c < "$F" | tr -d ' ')
+ROUTINE_FILE=$(mktemp)
+STEPS_FILE=$(mktemp)
+trap 'rm -f "$ROUTINE_FILE" "$STEPS_FILE"' EXIT
+if ! cat "$F" > "$ROUTINE_FILE"; then
+    echo "ERROR: routine could not be read" >&2
+    exit 1
+fi
+routine_bytes=$(wc -c < "$ROUTINE_FILE" | tr -d ' ')
 case "$routine_bytes" in ''|*[!0-9]*) echo "ERROR: routine size is invalid"; exit 1 ;; esac
 [ "$routine_bytes" -le "$ROUTINE_MAX_BYTES" ] || { echo "ERROR: routine file is too large"; exit 1; }
 jq -e --argjson max "$ROUTINE_MAX_STEPS" '
   type == "object" and (.steps | type == "array" and length >= 1 and length <= $max) and
   all(.steps[]; type == "object" and
       (.service | type == "string" and test("^[a-z0-9_]+/[a-z0-9_]+$")) and
-      (.payload | type == "object"))
-' "$F" >/dev/null 2>&1 || { echo "ERROR: routine definition is invalid or exceeds the step limit"; exit 1; }
+       (.payload | type == "object"))
+ ' "$ROUTINE_FILE" >/dev/null 2>&1 || { echo "ERROR: routine definition is invalid or exceeds the step limit"; exit 1; }
 echo "Running routine: $NAME"
-STEPS_FILE=$(mktemp)
-trap 'rm -f "$STEPS_FILE"' EXIT
-jq -c '.steps[]' "$F" > "$STEPS_FILE"
+jq -c '.steps[]' "$ROUTINE_FILE" > "$STEPS_FILE"
 while IFS= read -r step; do
     SVC=$(echo "$step" | jq -r .service)
     BODY=$(echo "$step" | jq -c .payload)
@@ -2894,7 +2899,7 @@ while IFS= read -r step; do
         echo "  (routine stopped: step failed or is pending approval)" >&2
         exit 1
     fi
-done
+done < "$STEPS_FILE"
 SCRIPT
 
 cat > /usr/local/bin/ha-apply-creation << SCRIPT
