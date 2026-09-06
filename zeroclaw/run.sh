@@ -2855,7 +2855,7 @@ echo "$STEPS" | jq -e --argjson max "$ROUTINE_MAX_STEPS" '
     exit 1
 }
 mkdir -p /data/routines
-SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+SAFE=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
 jq -n --arg n "$NAME" --argjson s "$STEPS" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{name:$n,steps:$s,created_at:$ts}' > "$F"
@@ -2868,7 +2868,7 @@ cat > /usr/local/bin/ha-run-routine << 'SCRIPT'
 set -e
 NAME="${1:-}"
 [ -z "$NAME" ] && { echo "Usage: ha-run-routine <name>"; exit 1; }
-SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
+SAFE=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
 [ -f "$F" ] && [ ! -L "$F" ] || { echo "ERROR: routine '$NAME' not found or is not a regular file"; exit 1; }
 ROUTINE_MAX_STEPS=32

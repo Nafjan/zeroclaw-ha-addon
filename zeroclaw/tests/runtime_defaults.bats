@@ -798,6 +798,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'ROUTINE_MAX_BYTES=131072' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'SAFE=$(printf '\''%s'\'' "$NAME" | tr -c '\''A-Za-z0-9_'\'' '\''_'\'')' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'routine steps must be 1..32 typed service/payload objects' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'routine definition is invalid or exceeds the step limit' "$run_file"
