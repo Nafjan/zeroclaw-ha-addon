@@ -2842,7 +2842,18 @@ cat > /usr/local/bin/ha-create-routine << 'SCRIPT'
 set -e
 NAME="$1"; STEPS="$2"
 [ -z "$NAME" ] || [ -z "$STEPS" ] && { echo "Usage: ha-create-routine <name> <json_steps>"; exit 1; }
-echo "$STEPS" | jq -e 'type=="array"' >/dev/null 2>&1 || { echo "ERROR: steps must be a JSON array"; exit 1; }
+ROUTINE_MAX_STEPS=32
+ROUTINE_MAX_BYTES=131072
+[ "${#STEPS}" -le "$ROUTINE_MAX_BYTES" ] || { echo "ERROR: routine definition is too large"; exit 1; }
+echo "$STEPS" | jq -e --argjson max "$ROUTINE_MAX_STEPS" '
+  type == "array" and length >= 1 and length <= $max and
+  all(.[]; type == "object" and
+      (.service | type == "string" and test("^[a-z0-9_]+/[a-z0-9_]+$")) and
+      (.payload | type == "object"))
+' >/dev/null 2>&1 || {
+    echo "ERROR: routine steps must be 1..32 typed service/payload objects"
+    exit 1
+}
 mkdir -p /data/routines
 SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
@@ -2854,17 +2865,35 @@ SCRIPT
 cat > /usr/local/bin/ha-run-routine << 'SCRIPT'
 #!/bin/sh
 # Usage: ha-run-routine '<name>'   — runs each step through ha-action-guarded.
-NAME="$1"
+set -e
+NAME="${1:-}"
 [ -z "$NAME" ] && { echo "Usage: ha-run-routine <name>"; exit 1; }
 SAFE=$(echo "$NAME" | tr -c 'A-Za-z0-9_' '_')
 F="/data/routines/${SAFE}.json"
-[ ! -f "$F" ] && { echo "ERROR: routine '$NAME' not found"; exit 1; }
+[ -f "$F" ] && [ ! -L "$F" ] || { echo "ERROR: routine '$NAME' not found or is not a regular file"; exit 1; }
+ROUTINE_MAX_STEPS=32
+ROUTINE_MAX_BYTES=131072
+routine_bytes=$(wc -c < "$F" | tr -d ' ')
+case "$routine_bytes" in ''|*[!0-9]*) echo "ERROR: routine size is invalid"; exit 1 ;; esac
+[ "$routine_bytes" -le "$ROUTINE_MAX_BYTES" ] || { echo "ERROR: routine file is too large"; exit 1; }
+jq -e --argjson max "$ROUTINE_MAX_STEPS" '
+  type == "object" and (.steps | type == "array" and length >= 1 and length <= $max) and
+  all(.steps[]; type == "object" and
+      (.service | type == "string" and test("^[a-z0-9_]+/[a-z0-9_]+$")) and
+      (.payload | type == "object"))
+' "$F" >/dev/null 2>&1 || { echo "ERROR: routine definition is invalid or exceeds the step limit"; exit 1; }
 echo "Running routine: $NAME"
-jq -c '.steps[]' "$F" | while read -r step; do
+STEPS_FILE=$(mktemp)
+trap 'rm -f "$STEPS_FILE"' EXIT
+jq -c '.steps[]' "$F" > "$STEPS_FILE"
+while IFS= read -r step; do
     SVC=$(echo "$step" | jq -r .service)
     BODY=$(echo "$step" | jq -c .payload)
     echo "  → $SVC"
-    /usr/local/bin/ha-action-guarded "$SVC" "$BODY" || echo "  (step failed or pending approval)"
+    if ! /usr/local/bin/ha-action-guarded "$SVC" "$BODY"; then
+        echo "  (routine stopped: step failed or is pending approval)" >&2
+        exit 1
+    fi
 done
 SCRIPT
 

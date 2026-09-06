@@ -793,6 +793,19 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
+@test "planner-owned routines are bounded and stop after a failed step" {
+    run grep -F 'ROUTINE_MAX_STEPS=32' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'ROUTINE_MAX_BYTES=131072' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine steps must be 1..32 typed service/payload objects' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine definition is invalid or exceeds the step limit' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'routine stopped: step failed or is pending approval' "$run_file"
+    [ "$status" -eq 0 ]
+}
+
 @test "legacy HA token cannot become the broker credential" {
     run grep -F 'HA_TOKEN="${SUPERVISOR_TOKEN:-}"' "$run_file"
     [ "$status" -eq 0 ]
