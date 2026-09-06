@@ -158,7 +158,8 @@ POLICY_REQUIRE_APPROVAL=true
 PROVIDER_MAX_REQUESTS_HOUR="${PROVIDER_MAX_REQUESTS_HOUR:-120}"
 PROVIDER_DAILY_TOKEN_BUDGET="${PROVIDER_DAILY_TOKEN_BUDGET:-200000}"
 PROVIDER_MAX_TOKENS="${PROVIDER_MAX_TOKENS:-2048}"
-PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-65536}"
+RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS=65536
+PROVIDER_MAX_INPUT_TOKENS="${PROVIDER_MAX_INPUT_TOKENS:-${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}}"
 # The broker reserves a worst-case 65536-input/2048-output request at its
 # conservative $0.10/1K-token ceiling before contacting an upstream. Keep the
 # runtime default above that one-request reservation so the documented full
@@ -240,6 +241,13 @@ esac
     bashio::log.fatal "provider_max_input_tokens is outside the safe range; refusing to start"
     exit 1
 }
+# Supervisor retains an existing options object across add-on upgrades. Keep a
+# deliberately lower operator value, but make the resulting envelope ceiling
+# visible so a stale prior default cannot look like a provider outage.
+if [ "${PROVIDER_MAX_INPUT_TOKENS}" -lt "${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}" ]; then
+    EFFECTIVE_PROVIDER_INPUT_CHARS=$((PROVIDER_MAX_INPUT_TOKENS - 256))
+    bashio::log.warning "provider_max_input_tokens=${PROVIDER_MAX_INPUT_TOKENS} is below the release default ${RELEASE_DEFAULT_PROVIDER_MAX_INPUT_TOKENS}; effective broker envelope ceiling is ${EFFECTIVE_PROVIDER_INPUT_CHARS} bytes. Existing Supervisor value is retained; increase the option if full-context requests are required."
+fi
 # The broker reserves the configured input ceiling plus the configured output
 # ceiling before contacting any provider. A profile budget that covers only
 # output tokens is an accepted-but-unusable configuration, so reject it at the

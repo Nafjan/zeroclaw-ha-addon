@@ -279,6 +279,13 @@ jobs:
           --entrypoint /bin/sh zeroclaw-ci
           -c 'mkdir -p /data /config && /bin/sh /src/tests/broker_framing_smoke.sh'
 
+      - name: Reproduce persisted-options envelope mismatch offline
+        run: >-
+          docker run --rm --network none --platform linux/arm64
+          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
+          --entrypoint /bin/sh zeroclaw-ci
+          -c 'mkdir -p /data /config && /bin/sh /src/tests/provider_envelope_upgrade_smoke.sh'
+
       - name: Smoke-test generated config with the real ZeroClaw daemon
         run: >-
           docker run --rm --network none --platform linux/arm64
