@@ -600,6 +600,8 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'must use an explicit :free model slug' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'default_model and complex_model must be distinct route IDs' "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F '[ "$legacy_requests" -le "$MAX_REQUESTS_PER_HOUR" ]' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"
     [ "$status" -eq 0 ]
     run grep -F '((.tools // []) | length) == 0' "$BATS_TEST_DIRNAME/../lib/provider-broker-handler.sh"

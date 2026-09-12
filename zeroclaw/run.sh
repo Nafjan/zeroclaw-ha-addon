@@ -296,6 +296,10 @@ case "${DEFAULT_MODEL}:${COMPLEX_MODEL}" in
         exit 1
         ;;
 esac
+[ "${DEFAULT_MODEL}" != "${COMPLEX_MODEL}" ] || {
+    bashio::log.fatal "default_model and complex_model must be distinct route IDs; refusing to start"
+    exit 1
+}
 validate_free_model_id() {
     free_model_label="$1"
     free_model_value="$2"
