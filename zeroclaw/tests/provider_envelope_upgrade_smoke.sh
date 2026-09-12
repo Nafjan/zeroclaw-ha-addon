@@ -21,7 +21,7 @@ fixture_json() {
 base_length=$(fixture_json '' | wc -c | tr -d ' ')
 filler_length=$((53174 - base_length))
 [ "$filler_length" -gt 0 ]
-filler=$(awk -v count="$filler_length" 'BEGIN { printf "%*s", count, "" }' | tr ' ' x)
+filler=$(awk -v count="$filler_length" 'BEGIN { for (i = 0; i < count; i++) printf "x" }')
 fixture_json "$filler" > "$FIXTURE"
 fixture_length=$(wc -c < "$FIXTURE" | tr -d ' ')
 [ "$fixture_length" = 53174 ] || {
