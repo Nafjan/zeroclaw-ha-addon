@@ -604,6 +604,10 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'root_provider_cost_micros()' "$run_file"
     [ "$status" -eq 0 ]
+    run grep -F 'if [ ! -e /data/provider/quota.json ]; then' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F "printf '%s\\n' 0" "$run_file"
+    [ "$status" -eq 0 ]
     run grep -F 'root-owned provider ledger' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'must use an explicit :free model slug' "$run_file"
