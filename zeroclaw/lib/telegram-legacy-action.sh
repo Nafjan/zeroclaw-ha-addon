@@ -21,15 +21,16 @@ fi
 REPLY="$1"
 [ "${#REPLY}" -le 8192 ] || exit 2
 
-NON_EMPTY_LINES=$(printf '%s\n' "$REPLY" | awk 'NF { count++ } END { print count + 0 }')
+COMPACT_REPLY=$(printf '%s\n' "$REPLY" | awk 'NF { sub(/\r$/, ""); print }')
+NON_EMPTY_LINES=$(printf '%s\n' "$COMPACT_REPLY" | awk 'NF { count++ } END { print count + 0 }')
 case "$NON_EMPTY_LINES" in
     1)
-        LINE=$(printf '%s\n' "$REPLY" | awk 'NF { sub(/\r$/, ""); print; exit }')
+        LINE="$COMPACT_REPLY"
         ;;
     3)
-        FENCE_START=$(printf '%s\n' "$REPLY" | sed -n '1p' | sed 's/\r$//')
-        FENCE_LINE=$(printf '%s\n' "$REPLY" | sed -n '2p' | sed 's/\r$//')
-        FENCE_END=$(printf '%s\n' "$REPLY" | sed -n '3p' | sed 's/\r$//')
+        FENCE_START=$(printf '%s\n' "$COMPACT_REPLY" | sed -n '1p')
+        FENCE_LINE=$(printf '%s\n' "$COMPACT_REPLY" | sed -n '2p')
+        FENCE_END=$(printf '%s\n' "$COMPACT_REPLY" | sed -n '3p')
         printf '%s\n' "$FENCE_START" | grep -Eq '^[[:space:]]*```[[:space:]]*tool_call[[:space:]]*$' || exit 2
         printf '%s\n' "$FENCE_END" | grep -Eq '^[[:space:]]*```[[:space:]]*$' || exit 2
         [ -n "$FENCE_LINE" ] || exit 2
