@@ -97,12 +97,22 @@ upgrade; review the saved cost limits when upgrading a canary or an older
 installation.
 
 The supplied free-tier routes (`nvidia/nemotron-3.5-lightning:free` followed by
-`openrouter/free`) are enabled by default. The broker permits them only for a
-request with no tools, no required tool choice, and no prior tool-call
-continuation; tool-capable turns fail closed instead of silently downgrading.
-Set `provider_free_fallback_enabled: false` to disable them. This broker
-release is buffered and non-streaming: `stream=true` is rejected until a
-separately qualified streaming/cancellation design lands.
+`openrouter/free`) are configured but disabled by default. Set
+`provider_free_fallback_enabled: true` only after reviewing the exact model IDs
+and accepting the no-tools-only containment. The broker permits these routes
+only for a request with no tools, no required tool choice, and no prior
+tool-call continuation; tool-capable turns fail closed instead of silently
+downgrading. An empty or missing `openrouter_free_model` intentionally disables
+that named route rather than selecting an implicit model. This broker release
+is buffered and non-streaming: `stream=true` is rejected until a separately
+qualified streaming/cancellation design lands.
+
+The `default_model` and `complex_model` route IDs must be different. Existing
+installations that saved the same value for both will refuse startup after the
+upgrade, before the planner or brokers start. Set distinct route IDs (for
+example, the supplied DeepSeek Flash default and Fusion complex route) and
+restart; do not bypass the check by reusing a free model for a tool-capable
+turn.
 
 Verify the following from the add-on log and Home Assistant UI:
 
@@ -134,8 +144,8 @@ Do not enable NVIDIA or Ark fallback in the same canary as writes. First run
 the provider profile contract smoke with the exact configured model IDs and
 observe one forced OpenRouter 402/timeout path, then enable the relevant
   profile switch and repeat the canary. The shipped free-tier routes are
-  intentionally enabled by default; keep their explicit model slugs current
-  and accept that they are limited to no-tools-only turns.
+  intentionally disabled by default; enable the explicit opt-in only after
+  reviewing their model slugs and accepting the no-tools-only limitation.
 
 Do not enable creation, scheduling, observer reports, or broad HTTP access in
 the same change. Creation is explicitly blocked in this release because the
