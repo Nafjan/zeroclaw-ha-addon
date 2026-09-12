@@ -170,6 +170,9 @@ if [ "${SMOKE_NO_TELEGRAM:-false}" = "true" ]; then
     sed -i 's/"telegram_bot_token": "telegram-secret"/"telegram_bot_token": ""/' /data/options.json
     sed -i 's/"telegram_allowed_users": "1"/"telegram_allowed_users": ""/' /data/options.json
 fi
+if [ "${SMOKE_EQUAL_MODEL_ROUTES:-false}" = "true" ]; then
+    sed -i 's/"complex_model": "openrouter\/fusion"/"complex_model": "~deepseek\/deepseek-v4-flash-latest"/' /data/options.json
+fi
 
 mkdir -p /tmp/zeroclaw-test-bin /config
 mkdir -p /data/workspace

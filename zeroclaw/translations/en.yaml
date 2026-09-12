@@ -95,6 +95,8 @@ configuration:
       Specific OpenRouter free model used as the first free last resort.
       Default: nvidia/nemotron-3.5-lightning:free. NVIDIA's catalog prefix
       here still means the request is sent through the root OpenRouter profile.
+      An empty or missing value disables this named route; it is never
+      invented at runtime.
   openrouter_free_router_model:
     name: "OpenRouter free router"
     description: >-
@@ -119,10 +121,11 @@ configuration:
   provider_free_fallback_enabled:
     name: "Enable contained free fallback"
     description: >-
-      Allow configured free-tier routes as a final fallback. On by default for
-      the supplied routes; set false to disable them. The broker rejects free
-      routes for any request that contains tools or tool calls, so free
-      inference cannot perform or approve HA writes.
+      Allow configured free-tier routes as a final fallback. Off by default;
+      enable it only after reviewing the configured model IDs. An empty or
+      missing free model disables that route. The broker rejects free routes
+      for any request that contains tools or tool calls, so free inference
+      cannot perform or approve HA writes.
   provider_nvidia_fallback_enabled:
     name: "Enable NVIDIA fallback profile"
     description: >-
