@@ -42,6 +42,8 @@ NVIDIA_MODEL="$(bashio::config 'nvidia_model')"
 ARK_FAST_MODEL="$(bashio::config 'ark_fast_model')"
 ARK_REASONING_MODEL="$(bashio::config 'ark_reasoning_model')"
 ARK_PRO_MODEL="$(bashio::config 'ark_pro_model')"
+# An omitted/empty named free model deliberately disables that route. Do not
+# invent a free model for an older Supervisor options object.
 OPENROUTER_FREE_MODEL="$(bashio::config 'openrouter_free_model')"
 OPENROUTER_FREE_ROUTER_MODEL="$(bashio::config 'openrouter_free_router_model')"
 NVIDIA_FREE_MODEL="$(bashio::config 'nvidia_free_model')"
@@ -53,6 +55,9 @@ ARK_FREE_MODEL="$(bashio::config 'ark_free_model')"
 OPENROUTER_AUTO_MODEL="${OPENROUTER_AUTO_MODEL:-openrouter/auto}"
 OPENROUTER_FUSION_PRESET="${OPENROUTER_FUSION_PRESET:-general-budget}"
 OPENROUTER_AUTO_COST_TIER="${OPENROUTER_AUTO_COST_TIER:-medium}"
+# Keep the empty value explicit: the configured free route is opt-in and a
+# missing saved option must not silently select another model.
+OPENROUTER_FREE_MODEL="${OPENROUTER_FREE_MODEL:-}"
 OPENROUTER_FREE_ROUTER_MODEL="${OPENROUTER_FREE_ROUTER_MODEL:-openrouter/free}"
 PROVIDER_FALLBACK_ENABLED="$(bashio::config 'provider_fallback_enabled')"
 PROVIDER_FREE_FALLBACK_ENABLED="$(bashio::config 'provider_free_fallback_enabled')"

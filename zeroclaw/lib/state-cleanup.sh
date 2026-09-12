@@ -24,6 +24,8 @@ CLAIM_GRACE_SECONDS=3600
 LOCK_GRACE_SECONDS=300
 REPLY_CACHE_GRACE_SECONDS=604800
 PENDING_APPROVAL_GRACE_SECONDS=300
+LOG_MAX_BYTES=5242880
+LOG_KEEP_BYTES=4194304
 
 [ "$(id -u)" -eq 0 ] || {
     echo "state cleanup must run as root" >&2
@@ -74,6 +76,35 @@ remove_stale_runtime_lock() {
     rm -f -- "${runtime_lock}/owner" 2>/dev/null || true
     rmdir "$runtime_lock" 2>/dev/null || true
 }
+
+rotate_broker_log() {
+    log_file="$1"
+    [ -f "$log_file" ] || [ -L "$log_file" ] || return 0
+    # Never read through or replace a symlink supplied by an untrusted path.
+    [ -L "$log_file" ] && return 0
+    log_size=$(stat -c %s "$log_file" 2>/dev/null) || return 0
+    case "$log_size" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$log_size" -gt "$LOG_MAX_BYTES" ] || return 0
+
+    log_tmp="${log_file}.trim.$$"
+    umask 077
+    tail -c "$LOG_KEEP_BYTES" "$log_file" > "$log_tmp" 2>/dev/null || {
+        rm -f -- "$log_tmp"
+        return 0
+    }
+    chmod --reference="$log_file" "$log_tmp" 2>/dev/null || true
+    chown --reference="$log_file" "$log_tmp" 2>/dev/null || true
+    mv -f -- "$log_tmp" "$log_file" 2>/dev/null || rm -f -- "$log_tmp"
+}
+
+for broker_log in \
+    "${DATA_DIR}/logs/provider-broker.log" \
+    "${DATA_DIR}/logs/capability-broker.log" \
+    "${DATA_DIR}/logs/telegram-broker.log"; do
+    rotate_broker_log "$broker_log"
+done
 
 # Capability and audit quota locks are transient coordination state, not
 # durable evidence. A crash can strand them after EXIT cleanup is skipped;

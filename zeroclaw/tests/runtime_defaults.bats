@@ -541,7 +541,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "provider fallback is root-owned, profile-bound, and safely enabled by default" {
+@test "provider fallback is root-owned, profile-bound, and free fallback is opt-in" {
     run grep -F 'default_model: "~deepseek/deepseek-v4-flash-latest"' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'complex_model: openrouter/fusion' "$BATS_TEST_DIRNAME/../config.yaml"
@@ -556,7 +556,7 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     [ "$status" -eq 0 ]
     run grep -F 'openrouter_free_router_model: openrouter/free' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
-    run grep -F 'provider_free_fallback_enabled: true' "$BATS_TEST_DIRNAME/../config.yaml"
+    run grep -F 'provider_free_fallback_enabled: false' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
     run grep -F 'provider_max_input_tokens: 65536' "$BATS_TEST_DIRNAME/../config.yaml"
     [ "$status" -eq 0 ]
@@ -575,6 +575,14 @@ agent_turn_file="$BATS_TEST_DIRNAME/../lib/telegram-agent-turn.sh"
     run grep -F 'export PROVIDER_FUSION_PRESET=' "$run_file"
     [ "$status" -eq 0 ]
     run grep -F 'openrouter/auto' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'OPENROUTER_FREE_MODEL="${OPENROUTER_FREE_MODEL:-}"' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'missing saved option must not silently select another model' "$run_file"
+    [ "$status" -eq 0 ]
+    run grep -F 'SMOKE_EQUAL_MODEL_ROUTES' "$BATS_TEST_DIRNAME/startup_smoke.sh"
+    [ "$status" -eq 0 ]
+    run grep -F 'The `default_model` and `complex_model` route IDs must be different.' "$BATS_TEST_DIRNAME/../UPGRADE.md"
     [ "$status" -eq 0 ]
     run grep -F '[ "${SMOKE_PROVIDER_BROKER:-false}" = "true" ]' "$run_file"
     [ "$status" -eq 0 ]

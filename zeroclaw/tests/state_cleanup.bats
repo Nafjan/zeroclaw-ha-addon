@@ -13,7 +13,7 @@ setup() {
         "$DATA_DIR/approval-receipts/.locks" \
         "$DATA_DIR/approval-receipts/ticket-nonces" \
         "$DATA_DIR/approved" "$DATA_DIR/pending" "$DATA_DIR/capability" \
-        "$DATA_DIR/provider" "$DATA_DIR/audit/planner"
+        "$DATA_DIR/provider" "$DATA_DIR/audit/planner" "$DATA_DIR/logs"
     NOW="$(date -u +%s)"
 }
 
@@ -127,4 +127,16 @@ teardown() {
     [ ! -e "$DATA_DIR/audit/.lock" ]
     [ ! -e "$DATA_DIR/audit/planner/.quota.lock" ]
     [ -e "$DATA_DIR/capability/.quota-live.lock" ]
+}
+
+@test "broker logs are bounded without following symlinks" {
+    head -c 5242881 /dev/zero > "$DATA_DIR/logs/provider-broker.log"
+    printf 'sentinel\n' > "$DATA_DIR/logs/telegram-target.log"
+    ln -s telegram-target.log "$DATA_DIR/logs/telegram-broker.log"
+
+    run_cleanup
+    [ "$status" -eq 0 ]
+    [ "$(wc -c < "$DATA_DIR/logs/provider-broker.log")" -le 4194304 ]
+    [ -L "$DATA_DIR/logs/telegram-broker.log" ]
+    [ "$(cat "$DATA_DIR/logs/telegram-target.log")" = sentinel ]
 }

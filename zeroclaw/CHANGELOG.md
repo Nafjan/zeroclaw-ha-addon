@@ -14,7 +14,7 @@
 - Add durable per-profile reservation/settlement ledgers with migration from
   the previous quota counters, crash/expiry settlement at the reserved
   maximum, and conservative invalid-usage handling.
-- Enable the configured free-tier routes by default only for simple,
+- Offer the configured free-tier routes as an explicit opt-in only for simple,
   no-tools turns, enforce that containment in the root broker, and reject
   streaming until a separately qualified streaming/cancellation design is
   implemented.
