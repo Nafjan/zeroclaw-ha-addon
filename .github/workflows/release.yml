@@ -994,6 +994,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download acceptance provider contract report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zeroclaw-provider-contract-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/zeroclaw-provider-contract-acceptance
+
+      - name: Verify acceptance provider contract report binding
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ needs.candidate_build.outputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/zeroclaw-provider-contract-acceptance/provider-contract-report.json"
+          test -s "$report"
+          report_sha256="$(sha256sum "$report" | awk '{print $1}')"
+          bash .github/scripts/verify-provider-contract-report.sh \
+            "$report" "$report_sha256" "$CANDIDATE_COMMIT"
+
       - name: Bind and verify the unprivileged build result
         id: metadata
         shell: bash

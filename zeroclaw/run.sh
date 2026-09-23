@@ -3610,7 +3610,18 @@ fi
 # under its own lock, so a planner cannot suppress or inflate the degradation
 # decision through the loopback API.
 root_provider_cost_micros() {
-    [ -f /data/provider/quota.json ] && [ ! -L /data/provider/quota.json ] || return 1
+    # A fresh broker has no reservations yet, so the ledger is legitimately
+    # absent until the first admission. Treat that state as zero spend. A
+    # symlink, non-regular file, or malformed ledger still fails closed below;
+    # the broker itself persists each reservation before contacting upstream.
+    if [ -L /data/provider/quota.json ]; then
+        return 1
+    fi
+    if [ ! -e /data/provider/quota.json ]; then
+        printf '%s\n' 0
+        return 0
+    fi
+    [ -f /data/provider/quota.json ] || return 1
     root_cost_now=$(date -u +%s)
     root_cost_day=$((root_cost_now / 86400))
     jq -er --argjson day "$root_cost_day" '

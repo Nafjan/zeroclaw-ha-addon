@@ -16,6 +16,10 @@ chmod 0700 "$SMOKE_ROOT/locks"
 . /opt/zeroclaw/lib/telegram-message-guard.sh
 umask 077
 
+# Keep test traffic synthetic; never put an operator's real Telegram ID in the
+# repository or in CI logs.
+TEST_TELEGRAM_USER_ID=1000000001
+
 cat > /tmp/telegram-agent-turn <<'EOF'
 #!/bin/sh
 set -eu
@@ -48,33 +52,33 @@ AGENT_WORKSPACE="$SMOKE_ROOT"
 AGENT_SESSION_LOCK_DIR="$SMOKE_ROOT/locks"
 export AGENT_BIN AGENT_CONFIG_DIR AGENT_WORKSPACE AGENT_SESSION_LOCK_DIR
 
-telegram_message_destination_allowed private 1000000001 1000000001
-if telegram_message_destination_allowed group -1001234567890 1000000001; then
+telegram_message_destination_allowed private "$TEST_TELEGRAM_USER_ID" "$TEST_TELEGRAM_USER_ID"
+if telegram_message_destination_allowed group -1001234567890 "$TEST_TELEGRAM_USER_ID"; then
     echo 'group Telegram message was accepted' >&2
     exit 1
 fi
-if telegram_message_destination_allowed private 1000000001 45711626; then
+if telegram_message_destination_allowed private "$TEST_TELEGRAM_USER_ID" 45711626; then
     echo 'Telegram chat/actor mismatch was accepted' >&2
     exit 1
 fi
 
-session_file="$SMOKE_ROOT/sessions/telegram_1000000001.json"
-reply=$(run_telegram_agent_turn 1000000001 'hello')
+session_file="$SMOKE_ROOT/sessions/telegram_${TEST_TELEGRAM_USER_ID}.json"
+reply=$(run_telegram_agent_turn "$TEST_TELEGRAM_USER_ID" 'hello')
 test "$reply" = agent-turn-ok
-test "$session_file" = "$SMOKE_ROOT/sessions/telegram_1000000001.json"
+test "$session_file" = "$SMOKE_ROOT/sessions/telegram_${TEST_TELEGRAM_USER_ID}.json"
 test "$(stat -c '%U:%a' "$SMOKE_ROOT/sessions")" = "zeroclaw:700"
 test "$(cat "$session_file")" = session-write-ok
 test "$(stat -c '%U:%a' "$session_file")" = "zeroclaw:600"
 
-session_file=$(prepare_telegram_session "$SMOKE_ROOT" 1000000001)
-reply=$(run_telegram_agent_turn 1000000001 'hello again')
+session_file=$(prepare_telegram_session "$SMOKE_ROOT" "$TEST_TELEGRAM_USER_ID")
+reply=$(run_telegram_agent_turn "$TEST_TELEGRAM_USER_ID" 'hello again')
 test "$reply" = agent-turn-ok
 test "$(cat "$session_file")" = session-write-ok
 
 rm -f /tmp/telegram-session-smoke-active /tmp/telegram-session-smoke-overlap
-(run_telegram_agent_turn 1000000001 'concurrent one' > /tmp/telegram-session-smoke-one) &
+(run_telegram_agent_turn "$TEST_TELEGRAM_USER_ID" 'concurrent one' > /tmp/telegram-session-smoke-one) &
 first_pid=$!
-(run_telegram_agent_turn 1000000001 'concurrent two' > /tmp/telegram-session-smoke-two) &
+(run_telegram_agent_turn "$TEST_TELEGRAM_USER_ID" 'concurrent two' > /tmp/telegram-session-smoke-two) &
 second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
@@ -86,11 +90,11 @@ test "$(cat /tmp/telegram-session-smoke-two)" = agent-turn-ok
 negative_session=$(prepare_telegram_session "$SMOKE_ROOT" -1001234567890)
 test "$negative_session" = "$SMOKE_ROOT/sessions/telegram_-1001234567890.json"
 
-if prepare_telegram_session "$SMOKE_ROOT" '1000000001/escape' >/dev/null 2>&1; then
+if prepare_telegram_session "$SMOKE_ROOT" "${TEST_TELEGRAM_USER_ID}/escape" >/dev/null 2>&1; then
     echo 'invalid Telegram chat id was accepted' >&2
     exit 1
 fi
-if prepare_telegram_session "$SMOKE_ROOT" '1000000001-escape' >/dev/null 2>&1; then
+if prepare_telegram_session "$SMOKE_ROOT" "${TEST_TELEGRAM_USER_ID}-escape" >/dev/null 2>&1; then
     echo 'malformed Telegram chat id was accepted' >&2
     exit 1
 fi

@@ -41,6 +41,20 @@ SCRIPT
     [ "$(sed -n '2p' "$invocation")" = "{}" ]
 }
 
+@test "recovers a fenced action surrounded by transport whitespace" {
+    fenced=$'\n  ```tool_call  \r\n\n'
+    action="ha.action_guarded 'scene/reload' '{}'"
+    fenced+="$action"$'\r\n\n'
+    fenced+='  ```  '
+    fenced+=$'\n\n'
+    run env ZEROCLAW_LEGACY_ACTION_GATE="$gate" INVOCATION_FILE="$invocation" \
+        "$legacy_file" "$fenced"
+    [ "$status" -eq 0 ]
+    [ "$output" = "Home Assistant scenes reloaded." ]
+    [ "$(sed -n '1p' "$invocation")" = "scene/reload" ]
+    [ "$(sed -n '2p' "$invocation")" = "{}" ]
+}
+
 @test "accepts only the canonical hyphenated guarded helper inside the fence" {
     fenced=$'```tool_call\n'
     action="ha-action-guarded 'scene/reload' '{}'"

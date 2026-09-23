@@ -274,13 +274,33 @@ jobs:
           -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
 
       - name: Smoke-test root-owned provider broker mode
-        run: >-
-          docker run --rm --network none --platform linux/arm64
-          -e CANARY_CANDIDATE_COMMIT="$GITHUB_SHA"
-          -e SMOKE_PROVIDER_BROKER=true
-          -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro"
-          --entrypoint /bin/sh zeroclaw-ci
-          -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh'
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_name="zeroclaw-provider-contract-${GITHUB_RUN_ID}"
+          docker rm -f "$container_name" >/dev/null 2>&1 || true
+          cleanup() {
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --name "$container_name" --network none --platform linux/arm64 \
+            -e CANARY_CANDIDATE_COMMIT="$GITHUB_SHA" \
+            -e SMOKE_PROVIDER_BROKER=true \
+            -v "$GITHUB_WORKSPACE/zeroclaw/tests:/src/tests:ro" \
+            --entrypoint /bin/sh zeroclaw-ci \
+            -c 'mkdir -p /data /config && /bin/sh /src/tests/startup_smoke.sh && chmod 0644 /data/provider/provider-contract-report.json'
+          docker cp "$container_name:/data/provider/provider-contract-report.json" \
+            "$RUNNER_TEMP/provider-contract-report.json"
+          test -s "$RUNNER_TEMP/provider-contract-report.json"
+
+      - name: Upload provider contract report
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeroclaw-provider-contract-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/provider-contract-report.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Smoke-test bounded broker framing
         run: >-
