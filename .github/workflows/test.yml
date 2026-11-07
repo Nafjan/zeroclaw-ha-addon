@@ -23,9 +23,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bats
       - name: Test native configuration, MCP discovery and migration recovery
         run: bats --tap --print-output-on-failure zeroclaw/tests/native_*.bats
-      - name: Test isolated canary preparation and candidate verification
+      - name: Test canary tooling, fixture cleanup and candidate verification
         run: |
-          python3 -B -m unittest discover -s zeroclaw/tests -p 'test_canary.py' -v
+          python3 -B -m unittest discover -s zeroclaw/tests -p 'test_*.py' -v
           python3 -B -m unittest discover -s .github/scripts/tests -p 'test_*.py' -v
 
   shellcheck:

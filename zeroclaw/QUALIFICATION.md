@@ -1,8 +1,8 @@
 # Native 4.0 local qualification
 
-Qualification date: 2026-11-07. Runtime: official ZeroClaw 0.8.7 at upstream
+Qualification dates: 2026-11-07–08. Runtime: official ZeroClaw 0.8.7 at upstream
 commit `99bd353c756f4e64f381cfe9c3002ebff32f3055`. Home Assistant: 2026.11.0.
-Both were checked against their latest stable release listings on this date.
+Both were checked against their latest stable release listings on 2026-11-08.
 
 ## Passing checks
 
@@ -19,7 +19,9 @@ Both were checked against their latest stable release listings on this date.
 The three Bats wrappers run the 44 Python unit tests above; they are not an
 additional 44 tests. Shell parsing, ShellCheck, Python syntax, workflow/descriptor
 YAML parsing and source whitespace checks also passed locally. Ten canary
-descriptor tests and eleven candidate-verifier tests also pass. The migration
+descriptor tests and eleven candidate-verifier tests also pass. Nine fixture-cleanup regressions
+cover uncertain resource creation, exact-name removal, preservation of the
+primary failure, and refusal to report success after failed cleanup. The migration
 repair was rechecked in a network-disabled Linux container with files copied
 into its temporary filesystem.
 
@@ -46,8 +48,10 @@ The release workflow prepares uniquely tagged signed candidates after protected
 review. It publishes no stable/version alias and performs no HA installation.
 See [the delivery contract](../RELEASE-BUILDER.md) and [UPGRADE.md](UPGRADE.md).
 
-The real old/new-runtime row above records the earlier completed qualification.
-After the final journal/restaging repairs, all 16 Linux migration regressions
-passed. A new old/new-runtime run stopped before migration when its scratch
-ARM64 Docker image build exceeded the fixture timeout; that retry is not
-reported as a new end-to-end pass.
+The final repaired migration passed the 16 Linux regressions and the real
+old/new functional fixture. On the local Windows/Docker host, stock fixture
+runners hit Docker CLI subprocess deadlines during build/inspection. Private
+qualification runners disabled only those CLI deadlines and added progress
+logging; runtime assertions, health/readiness deadlines, hashes and network
+isolation stayed unchanged. Both functional fixtures passed and removed their
+own resources. This is distinct from a stock-runner or remote CI pass.

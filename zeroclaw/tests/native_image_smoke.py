@@ -163,6 +163,59 @@ def docker_json(arguments: list[str], *, volume: str, name_prefix: str) -> Any:
         raise SmokeFailure(f"Docker returned invalid JSON for {arguments[0]}") from None
 
 
+def _docker_resource_missing(output: str, name: str) -> bool:
+    lowered = output.casefold()
+    return name.casefold() in lowered and any(
+        marker in lowered
+        for marker in ("no such object", "no such container", "no such volume")
+    )
+
+
+def _cleanup_native_resource(
+    remove_arguments: list[str],
+    inspect_arguments: list[str],
+    name: str,
+    volume: str,
+    name_prefix: str,
+) -> str | None:
+    try:
+        removed = docker(
+            remove_arguments, timeout=20, volume=volume, name_prefix=name_prefix,
+            allow_failure=True,
+        )
+    except Exception as exc:
+        removal_failure = (
+            f"cleanup command for {scrub(name, volume, name_prefix)} failed: "
+            f"{scrub(str(exc), volume, name_prefix)}"
+        )
+    else:
+        if removed.returncode == 0:
+            return None
+        detail = scrub((removed.stderr or removed.stdout)[-1000:], volume, name_prefix)
+        removal_failure = (
+            f"cleanup command for {scrub(name, volume, name_prefix)} returned "
+            f"exit {removed.returncode}: {detail}"
+        )
+
+    try:
+        inspected = docker(
+            inspect_arguments, timeout=20, volume=volume, name_prefix=name_prefix,
+            allow_failure=True,
+        )
+    except Exception as exc:
+        return (
+            f"{removal_failure}; could not verify fixture resource absence: "
+            f"{scrub(str(exc), volume, name_prefix)}"
+        )
+    if inspected.returncode != 0:
+        output = inspected.stderr or inspected.stdout
+        if _docker_resource_missing(output, name):
+            return None
+        detail = scrub(output[-1000:], volume, name_prefix)
+        return f"{removal_failure}; fixture resource absence was not confirmed: {detail}"
+    return f"{removal_failure}; fixture resource remains after cleanup"
+
+
 def wait_for_health(app: str, provider: str, volume: str, name_prefix: str) -> None:
     deadline = time.monotonic() + 75
     last_error = "not attempted"
@@ -480,9 +533,11 @@ def run_smoke(image: str, binary_sha256: str, app_source_revision: str,
     created_volume = False
     created_provider = False
     created_app = False
+    primary_error: BaseException | None = None
     try:
-        docker(["volume", "create", volume], timeout=20, volume=volume, name_prefix=name_prefix)
+        # Docker may create the volume even if its CLI client times out.
         created_volume = True
+        docker(["volume", "create", volume], timeout=20, volume=volume, name_prefix=name_prefix)
         seed_volume(image, volume, name_prefix)
         created_provider = True
         start_provider(image, provider, volume, name_prefix)
@@ -538,17 +593,39 @@ def run_smoke(image: str, binary_sha256: str, app_source_revision: str,
                                app_version)
         docker(["exec", app, "python3", "-c", marker_check], timeout=10,
               volume=volume, name_prefix=name_prefix)
-        print("PASS: ARM64 native image booted network-isolated, protected options and legacy state, routed authenticated primary/reasoning calls through the supported compatible-provider family to synthetic loopback, and recovered after graceful and SIGKILL restarts.")
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
+        cleanup_failures = []
         if created_app:
-            docker(["rm", "--force", app], timeout=20, volume=volume,
-                  name_prefix=name_prefix, allow_failure=True)
+            failure = _cleanup_native_resource(
+                ["rm", "--force", app], ["inspect", app], app, volume, name_prefix,
+            )
+            if failure:
+                cleanup_failures.append(failure)
         if created_provider:
-            docker(["rm", "--force", provider], timeout=20, volume=volume,
-                  name_prefix=name_prefix, allow_failure=True)
+            failure = _cleanup_native_resource(
+                ["rm", "--force", provider], ["inspect", provider], provider, volume, name_prefix,
+            )
+            if failure:
+                cleanup_failures.append(failure)
         if created_volume:
-            docker(["volume", "rm", volume], timeout=20, volume=volume,
-                  name_prefix=name_prefix, allow_failure=True)
+            failure = _cleanup_native_resource(
+                ["volume", "rm", volume], ["volume", "inspect", volume], volume,
+                volume, name_prefix,
+            )
+            if failure:
+                cleanup_failures.append(failure)
+        if cleanup_failures:
+            detail = "; ".join(cleanup_failures)
+            if primary_error is None:
+                raise SmokeFailure(f"native image fixture cleanup failed: {detail}") from None
+            print(
+                f"WARNING: native image fixture cleanup also failed after the primary failure: {detail}",
+                file=sys.stderr,
+            )
+    print("PASS: ARM64 native image booted network-isolated, protected options and legacy state, routed authenticated primary/reasoning calls through the supported compatible-provider family to synthetic loopback, and recovered after graceful and SIGKILL restarts.")
 
 
 def main() -> int:

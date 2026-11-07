@@ -464,6 +464,43 @@ def main() -> int:
         return 1
 
 
+def cleanup_host_resources(resources: list[tuple[str, str]], *, primary_failure: bool) -> None:
+    """Remove only this fixture's attempted resources without hiding its failure."""
+    failures = []
+    for kind, name in resources:
+        command = {
+            "container": ["docker", "rm", "-f", name],
+            "volume": ["docker", "volume", "rm", name],
+            "image": ["docker", "image", "rm", name],
+        }[kind]
+        try:
+            removed = run(command, timeout=15, expected={0, 1})
+            if removed.returncode == 0:
+                continue
+        except (SmokeFailure, subprocess.SubprocessError, OSError):
+            pass
+        # A timed-out CLI may already have completed its daemon request.
+        # Confirm absence by the exact name; connection errors are not absence.
+        try:
+            probe = run(["docker", kind, "inspect", name], timeout=15, expected={0, 1})
+            missing = (f"no such {kind}:", "no such object:")
+            output = probe.stdout.lower()
+            absent = name.lower() in output and any(m in output for m in missing)
+            if kind == "volume" and f"get {name.lower()}: no such volume" in output:
+                absent = True
+            if probe.returncode == 1 and absent:
+                continue
+        except (SmokeFailure, subprocess.SubprocessError, OSError):
+            pass
+        failures.append(f"{kind} {name}")
+    if failures:
+        message = "fixture cleanup could not confirm removal: " + ", ".join(failures)
+        if primary_failure:
+            print("WARNING: " + message, file=sys.stderr)
+        else:
+            raise SmokeFailure(message)
+
+
 def run_on_host(args: argparse.Namespace) -> int:
     if args.old_binary is None or args.new_archive is None:
         raise SmokeFailure("pass --old-binary and --new-archive")
@@ -479,9 +516,11 @@ def run_on_host(args: argparse.Namespace) -> int:
 
     volume = f"zc-state-v3-smoke-{secrets.token_hex(8)}"
     old_image = f"zc-state-v3-old-runtime:{secrets.token_hex(8)}"
-    run(["docker", "volume", "create", volume], timeout=15)
     gateway_name = f"{volume}-old-gateway"
+    attempted = [("volume", volume)]
     try:
+        run(["docker", "volume", "create", volume], timeout=15)
+        attempted.append(("image", old_image))
         build_old_runtime_image(old_binary, old_image)
         docker_volume_run(
             volume,
@@ -490,17 +529,17 @@ def run_on_host(args: argparse.Namespace) -> int:
         )
         old_stats = docker_old_binary(old_image, volume, "memory", "stats")
         print("0.7.5 initial memory stats:", old_stats.stdout.strip()[-500:])
+        attempted.append(("container", gateway_name))
         start_legacy_gateway(old_image, volume, gateway_name)
+        attempted.remove(("container", gateway_name))
 
         smoke = docker_python_smoke(volume, new_archive)
         print(smoke.stdout.strip())
         old_after = docker_old_binary(old_image, volume, "memory", "stats")
         print("0.7.5 rollback reopen:", old_after.stdout.strip()[-500:])
-        print("PASS: real old/new runtime migration, default-agent recall, session restart, and rollback.")
     finally:
-        run(["docker", "rm", "-f", gateway_name], timeout=15, expected={0, 1})
-        run(["docker", "volume", "rm", volume], timeout=15, expected={0, 1})
-        run(["docker", "image", "rm", old_image], timeout=15, expected={0, 1})
+        cleanup_host_resources(list(reversed(attempted)), primary_failure=sys.exc_info()[0] is not None)
+    print("PASS: real old/new runtime migration, default-agent recall, session restart, and rollback.")
     return 0
 
 
@@ -614,7 +653,7 @@ def start_legacy_gateway(image: str, volume: str, name: str) -> None:
         logs = run(["docker", "logs", name]).stdout
         raise SmokeFailure(f"0.7.5 gateway did not create sessions.db:\n{logs[-3000:]}")
     finally:
-        run(["docker", "rm", "-f", name], timeout=15, expected={0, 1})
+        cleanup_host_resources([("container", name)], primary_failure=sys.exc_info()[0] is not None)
 
 
 def docker_python_smoke(volume: str, archive: Path) -> subprocess.CompletedProcess[str]:
