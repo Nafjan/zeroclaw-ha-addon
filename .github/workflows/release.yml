@@ -16,7 +16,7 @@ jobs:
   candidate:
     name: Publish exact reviewed source as a signed candidate
     needs: acceptance
-    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/heads/') && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: release-builder
     concurrency:
@@ -98,10 +98,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/master"
+          [[ "$GITHUB_REF" == refs/heads/* ]]
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
           cosign sign --yes "$IMAGE@$DIGEST"
           cosign verify --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
             --certificate-identity="$identity" "$IMAGE@$DIGEST" >/dev/null
-          printf '### Signed native candidate\n\nImage tag: `%s:%s`\n\nImmutable digest: `%s@%s`\n\nHome Assistant app version: `%s`\n\nSource: `%s`\n\nRun: `%s` (attempt `%s`)\n\nNo stable alias was published.\n' \
+          printf '### Signed native candidate\n\nImage tag: `%s:%s`\n\nImmutable digest: `%s@%s`\n\nHome Assistant app version: `%s`\n\nSource: `%s`\n\nSource ref: `%s`\n\nRun: `%s` (attempt `%s`)\n\nNo stable alias was published.\n' \
             "$IMAGE" "$TAG" "$IMAGE" "$DIGEST" "$APP_VERSION" "$GITHUB_SHA" \
-            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
+            "$GITHUB_REF" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"

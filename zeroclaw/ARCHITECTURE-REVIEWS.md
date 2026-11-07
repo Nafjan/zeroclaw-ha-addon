@@ -94,3 +94,23 @@ reconstruction. Prepared migrations now rebuild only their exact private,
 unactivated stage from the verified archive. Symlinks and special files
 remain fail-closed; neither active native state nor source archives are
 deleted. Retry and unsafe-stage regressions pass in the Linux migration suite.
+
+## Production descriptor sequencing
+
+A later DeepSeek Flash delivery review agreed that merging the future stable
+descriptor before canary publication could advertise an unavailable update.
+The breaking-version declaration protects automatic crossing; it does not
+make a missing stable image installable manually. The delivery flow therefore
+uses an explicitly reviewed development-branch dispatch with unchanged
+acceptance and owner environment gates. The verifier binds both provenance
+and signature to the caller's expected branch and source commit. The source
+branch is never registered in HA; only the separate canary descriptor branch
+is used. Production metadata remains unchanged until canary acceptance and
+a signed stable image are ready. This review used supplied source and did not
+execute tests; the service reported the requested DeepSeek Flash model.
+
+Eleven verifier tests cover both the default master identity and explicit
+reviewed branch identities, and reject malformed/tag refs before registry or
+signature access. The release workflow retains all four acceptance jobs and
+the configured owner environment review. These are properties of the reviewed
+workflow, not a claim that arbitrary branch YAML is trusted.

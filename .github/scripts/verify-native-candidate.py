@@ -21,6 +21,8 @@ IMAGE = "ghcr.io/nafjan/zeroclaw-ha-addon"
 REPOSITORY = "Nafjan/zeroclaw-ha-addon"
 WORKFLOW = "Nafjan/zeroclaw-ha-addon/.github/workflows/release.yml"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+DEFAULT_SOURCE_REF = "refs/heads/master"
+_SAFE_BRANCH_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MEDIA_TYPES = ", ".join(
     (
         "application/vnd.oci.image.index.v1+json",
@@ -42,6 +44,27 @@ def candidate_identity(source_sha: str, run_id: str, attempt: str) -> tuple[str,
         raise VerificationError("run ID and attempt must be positive decimal integers")
     version = f"4.0.0-dev.g{source_sha[:12]}.{run_id}.{attempt}"
     return version, version
+
+
+def validate_source_ref(source_ref: str) -> str:
+    """Accept only a conservative Git branch ref for provenance verification."""
+    prefix = "refs/heads/"
+    if not source_ref.startswith(prefix):
+        raise VerificationError("source ref must use refs/heads/<branch>")
+    branch = source_ref[len(prefix) :]
+    components = branch.split("/")
+    if (
+        not branch
+        or any(
+            not _SAFE_BRANCH_COMPONENT.fullmatch(component)
+            or ".." in component
+            or component.endswith(".")
+            or component.lower().endswith(".lock")
+            for component in components
+        )
+    ):
+        raise VerificationError("source ref contains an invalid branch name")
+    return source_ref
 
 
 def digest_of(payload: bytes) -> str:
@@ -205,7 +228,10 @@ def _run_readonly(command: list[str], purpose: str) -> None:
         raise VerificationError(f"cryptographic verification failed: {purpose} (exit {result.returncode})")
 
 
-def verify_signatures(image_digest: str, source_sha: str) -> None:
+def verify_signatures(
+    image_digest: str, source_sha: str, source_ref: str = DEFAULT_SOURCE_REF
+) -> None:
+    source_ref = validate_source_ref(source_ref)
     if not shutil.which("gh"):
         raise VerificationError("GitHub CLI (`gh`) is required to verify the provenance attestation")
     if not shutil.which("cosign"):
@@ -225,12 +251,12 @@ def verify_signatures(image_digest: str, source_sha: str) -> None:
             "--source-digest",
             source_sha,
             "--source-ref",
-            "refs/heads/master",
+            source_ref,
             "--deny-self-hosted-runners",
         ],
         "GitHub Actions provenance and source identity",
     )
-    identity = f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@refs/heads/master"
+    identity = f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@{source_ref}"
     _run_readonly(
         [
             "cosign",
@@ -251,6 +277,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-sha", required=True, help="full 40-character source commit SHA")
     parser.add_argument("--run-id", required=True, help="GitHub Actions run ID")
     parser.add_argument("--attempt", required=True, help="GitHub Actions run attempt")
+    parser.add_argument(
+        "--source-ref",
+        default=DEFAULT_SOURCE_REF,
+        help="expected reviewed Git branch ref (default: refs/heads/master)",
+    )
     return parser.parse_args(argv)
 
 
@@ -259,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(argv)
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.digest):
             raise VerificationError("candidate digest must be sha256 followed by 64 lowercase hex characters")
+        source_ref = validate_source_ref(args.source_ref)
         tag, app_version = candidate_identity(args.source_sha, args.run_id, args.attempt)
         runtime_labels = _load_runtime_pins(
             Path(__file__).resolve().parents[2] / "zeroclaw" / "runtime-manifest.json"
@@ -271,13 +303,14 @@ def main(argv: list[str] | None = None) -> int:
             app_version=app_version,
             runtime_labels=runtime_labels,
         )
-        verify_signatures(image_digest, args.source_sha)
+        verify_signatures(image_digest, args.source_sha, source_ref)
     except VerificationError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
 
     print(f"PASS: {image_digest}")
     print(f"Source: {args.source_sha}")
+    print(f"Source ref: {source_ref}")
     print(f"Candidate tag: {tag}")
     print(f"Home Assistant version: {app_version}")
     print("Verified: public OCI config metadata, ARM64 runtime pins, GitHub provenance, and Cosign identity")

@@ -1,4 +1,6 @@
 import importlib.util
+import io
+from contextlib import redirect_stderr
 from unittest import mock
 import unittest
 from pathlib import Path
@@ -83,49 +85,74 @@ class SignatureVerificationTests(unittest.TestCase):
         self.image_digest = f"{verifier.IMAGE}@sha256:{'b' * 64}"
         self.source_sha = "a" * 40
 
-    @mock.patch.object(verifier, "_run_readonly")
-    @mock.patch.object(verifier.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
-    def test_uses_registry_bundle_and_exact_provenance_and_cosign_identities(
-        self, _which, run_readonly
-    ):
-        verifier.verify_signatures(self.image_digest, self.source_sha)
+    def _assert_exact_signature_commands(self, source_ref=None):
+        expected_source_ref = source_ref or verifier.DEFAULT_SOURCE_REF
+        with mock.patch.object(verifier, "_run_readonly") as run_readonly, mock.patch.object(
+            verifier.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"
+        ):
+            if source_ref is None:
+                verifier.verify_signatures(self.image_digest, self.source_sha)
+            else:
+                verifier.verify_signatures(self.image_digest, self.source_sha, source_ref)
 
-        self.assertEqual(run_readonly.call_count, 2)
-        gh_command, gh_purpose = run_readonly.call_args_list[0].args
-        self.assertEqual(gh_purpose, "GitHub Actions provenance and source identity")
-        self.assertEqual(
-            gh_command,
-            [
-                "gh",
-                "attestation",
-                "verify",
-                f"oci://{self.image_digest}",
-                "--repo",
-                verifier.REPOSITORY,
-                "--bundle-from-oci",
-                "--signer-workflow",
-                verifier.WORKFLOW,
-                "--source-digest",
-                self.source_sha,
-                "--source-ref",
-                "refs/heads/master",
-                "--deny-self-hosted-runners",
-            ],
-        )
+            self.assertEqual(run_readonly.call_count, 2)
+            gh_command, gh_purpose = run_readonly.call_args_list[0].args
+            self.assertEqual(gh_purpose, "GitHub Actions provenance and source identity")
+            self.assertEqual(
+                gh_command,
+                [
+                    "gh",
+                    "attestation",
+                    "verify",
+                    f"oci://{self.image_digest}",
+                    "--repo",
+                    verifier.REPOSITORY,
+                    "--bundle-from-oci",
+                    "--signer-workflow",
+                    verifier.WORKFLOW,
+                    "--source-digest",
+                    self.source_sha,
+                    "--source-ref",
+                    expected_source_ref,
+                    "--deny-self-hosted-runners",
+                ],
+            )
 
-        cosign_command, cosign_purpose = run_readonly.call_args_list[1].args
-        self.assertEqual(cosign_purpose, "keyless Cosign signature identity")
+            cosign_command, cosign_purpose = run_readonly.call_args_list[1].args
+            self.assertEqual(cosign_purpose, "keyless Cosign signature identity")
+            self.assertEqual(
+                cosign_command,
+                [
+                    "cosign",
+                    "verify",
+                    "--certificate-identity=https://github.com/"
+                    f"{verifier.REPOSITORY}/.github/workflows/release.yml@{expected_source_ref}",
+                    f"--certificate-oidc-issuer={verifier.OIDC_ISSUER}",
+                    self.image_digest,
+                ],
+            )
+
+    def test_defaults_to_master_identity(self):
+        self.assertEqual(verifier.DEFAULT_SOURCE_REF, "refs/heads/master")
         self.assertEqual(
-            cosign_command,
-            [
-                "cosign",
-                "verify",
-                "--certificate-identity=https://github.com/"
-                f"{verifier.REPOSITORY}/.github/workflows/release.yml@refs/heads/master",
-                f"--certificate-oidc-issuer={verifier.OIDC_ISSUER}",
-                self.image_digest,
-            ],
+            verifier.parse_args(
+                [
+                    "--digest",
+                    "sha256:" + "b" * 64,
+                    "--source-sha",
+                    self.source_sha,
+                    "--run-id",
+                    "123",
+                    "--attempt",
+                    "1",
+                ]
+            ).source_ref,
+            verifier.DEFAULT_SOURCE_REF,
         )
+        self._assert_exact_signature_commands()
+
+    def test_uses_explicit_reviewed_branch_for_provenance_and_cosign(self):
+        self._assert_exact_signature_commands("refs/heads/review/native-canary")
 
     @mock.patch.object(verifier, "_run_readonly")
     @mock.patch.object(verifier.shutil, "which")
@@ -152,6 +179,41 @@ class SignatureVerificationTests(unittest.TestCase):
                 with self.assertRaises(verifier.VerificationError):
                     verifier.verify_signatures(self.image_digest, self.source_sha)
                 self.assertEqual(run.call_count, expected_calls)
+
+    @mock.patch.object(verifier, "verify_signatures")
+    @mock.patch.object(verifier, "_verify_oci_metadata")
+    def test_invalid_source_refs_fail_before_registry_or_signature_access(
+        self, verify_metadata, verify_signatures
+    ):
+        invalid_refs = (
+            "refs/tags/v4.0.0.0",
+            "refs/heads/",
+            "refs/heads/../escape",
+            "refs/heads/review//candidate",
+            "refs/heads/hidden/.branch",
+            "refs/heads/review/candidate.lock",
+            "refs/heads/review/candidate?bad",
+        )
+        for source_ref in invalid_refs:
+            with self.subTest(source_ref=source_ref):
+                with redirect_stderr(io.StringIO()):
+                    result = verifier.main(
+                        [
+                            "--digest",
+                            "sha256:" + "b" * 64,
+                            "--source-sha",
+                            self.source_sha,
+                            "--run-id",
+                            "123",
+                            "--attempt",
+                            "1",
+                            "--source-ref",
+                            source_ref,
+                        ]
+                    )
+                self.assertEqual(result, 1)
+                verify_metadata.assert_not_called()
+                verify_signatures.assert_not_called()
 
 
 if __name__ == "__main__":

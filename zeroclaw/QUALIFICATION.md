@@ -19,7 +19,7 @@ Both were checked against their latest stable release listings on this date.
 The three Bats wrappers run the 44 Python unit tests above; they are not an
 additional 44 tests. Shell parsing, ShellCheck, Python syntax, workflow/descriptor
 YAML parsing and source whitespace checks also passed locally. Ten canary
-descriptor tests and nine candidate-verifier tests also pass. The migration
+descriptor tests and eleven candidate-verifier tests also pass. The migration
 repair was rechecked in a network-disabled Linux container with files copied
 into its temporary filesystem.
 

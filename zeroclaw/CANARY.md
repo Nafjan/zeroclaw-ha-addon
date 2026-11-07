@@ -22,10 +22,31 @@ do not identify the same build.
 
 ## 1. Prepare and verify the candidate
 
-1. Use a successful, protected candidate release built from the exact reviewed
-   source commit. Verify the release workflow's signature, provenance, SBOM,
-   source commit, and immutable image digest using its published verification
-   results. A candidate tag alone is not proof of the image contents.
+1. Publish the exact reviewed development branch through an explicit candidate
+   workflow dispatch and the required owner environment review. Keep the
+   production store branch and its descriptor unchanged during the canary;
+   do not merge the future stable descriptor merely to run the workflow, and
+   never add the source branch to the HA Store. GitHub runs a dispatch against
+   the [selected branch and commit](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+   The workflow keeps all four acceptance jobs and rejects tag dispatches.
+   Confirm the environment permits the selected source branch.
+
+   Verify the candidate's expected full source SHA and branch ref, immutable
+   image digest, provenance and signature. Supply the expected ref from the
+   review decision, not from image metadata:
+
+   ```text
+   python .github/scripts/verify-native-candidate.py \
+     --digest sha256:<64-lowercase-hex-characters> \
+     --source-sha <full-40-character-source-sha> \
+     --source-ref refs/heads/<reviewed-development-branch> \
+     --run-id <release-run-id> --attempt <release-run-attempt>
+   ```
+
+   Also retain the release SBOM. A candidate tag alone is not proof of its
+   contents. Keep the production descriptor at its existing stable version
+   until the native canary succeeds and a separately authorized signed stable
+   image exists. The current candidate workflow publishes no stable image.
 2. Confirm that the Supervisor version string and published image tag are the
    same value:
 
