@@ -1,63 +1,42 @@
-# Release builder qualification
+# Native app delivery
 
-The checked-in ZeroClaw artifact is authoritative only when the release workflow
-rebuilds it to the SHA in `zeroclaw/binary-manifest.json`. The previous checked-in
-`a3c5edcb3257ea48bce41629e3b52bcbf5fd59858bac3c7fbfbb0808e18b1341` artifact was
-not reproduced by any recorded release workflow. The pinned Cross route now
-produces byte-identical `1a3911d3cc776e3f0041b3c6a5b9eb1009d976aa556e73a7afd1c713e5d37c54`
-outputs across clean Cargo-job variants, and the trusted Docker Desktop A/A
-qualification produced the same SHA in both isolated builders. That re-qualified
-SHA is the current manifest artifact; do not substitute a different binary.
+The app consumes the official pinned ZeroClaw 0.8.7 ARM64 release archive. The
+Docker build verifies its download and executable hashes and includes the
+pinned upstream license files. This is not an independent reproduction of the
+upstream Rust build. The app image has its own source revision and provenance.
 
-## Trusted runner contract
+The native qualification script verifies upstream release/source metadata and
+runs the isolated ARM64 image fixture. The reusable Tests workflow also runs
+configuration, recovery, real HA MCP and old/new binary state checks. ARM64
+execution on a hosted x86 runner is emulated, not a hardware qualification.
 
-Register a protected Linux x64 self-hosted runner with the custom label
-`zeroclaw-release-linux-x64`. It must provide:
+Keep the existing protected-branch checks named `Bats unit tests`, `Shell
+parsing and ShellCheck`, and `Build and smoke-test arm64 image`. Also require
+`Native HA MCP and state compatibility` for the native release. Keep strict
+checks, required independent review, admin enforcement, linear history,
+conversation resolution and force-push/deletion protection. These settings
+are external repository controls; a passing local script does not configure
+or attest them. The operator preflight is
+`.github/scripts/verify-master-protection.sh OWNER/REPOSITORY master`.
 
-- Docker in Linux-container mode;
-- `bash`, `git`, `jq`, `sha256sum`, `stat`, `rustup`, `rustc`, and `cargo`;
-- the pinned Rust 1.89.0 toolchain and target installation path;
-- a reproducible host image or an ephemeral VM that can be recreated after a run;
-- no Home Assistant token, provider credential, or other production secret.
+`release.yml` only publishes uniquely named candidates from an explicit master
+branch dispatch. It first runs acceptance, then uses the `release-builder`
+environment with its configured required reviewer. That is the owner's release
+approval; the independent technical source review is recorded separately in
+`zeroclaw/ARCHITECTURE-REVIEWS.md`. A sole owner can retain the existing
+environment review policy without adding another GitHub account. The workflow
+requires a configured reviewer and fails if it cannot verify that rule; it
+never approves its own environment job.
+It publishes an app SBOM/build provenance, an artifact attestation and a Cosign
+signature, then verifies the signature against this repository/workflow identity.
 
-Restrict the runner group to this repository and to protected release work. Do
-not attach it to pull-request workflows or run arbitrary branches on it. Configure
-a `release-builder` environment with required reviewers before using the trusted
-mode. The workflow itself additionally requires `refs/heads/master` for that mode.
+No stable/version alias, Git tag, HA canary install or production change is
+performed by that candidate workflow. Production promotion requires a separate
+owner-authorized action identifying the exact source and immutable signed image,
+with a current Supervisor backup, rollback route and successful canary on the
+intended HA host. The old schema-2 promotion/alias automation has been retired;
+it must not be used to promote the native image with legacy evidence.
 
-Protect `master` with strict required checks named `Bats unit tests`, `Shell
-parsing and ShellCheck`, and `Build and smoke-test arm64 image`; also enable
-admin enforcement, linear history, and conversation resolution, and disable
-force-pushes and branch deletion. Before dispatching a promotion, run
-`.github/scripts/verify-master-protection.sh` with an authenticated GitHub CLI.
-The branch-protection setting is the external hard control; Actions'
-`GITHUB_TOKEN` does not have repository Administration permission and is not
-used to self-attest that setting.
-
-## Qualification gate
-
-After the runner is online, dispatch the exact release workflow twice, recreating
-or rebooting the runner between runs:
-
-```text
-gh workflow run release.yml --ref master \
-  -f release_tag=v3.1.4.0 \
-  -f promote=false \
-  -f builder_mode=trusted-aa
-```
-
-Every run must show both isolated builders producing
-`1a3911d3cc776e3f0041b3c6a5b9eb1009d976aa556e73a7afd1c713e5d37c54`. The
-uploaded diagnostics must also show identical full dependency manifests and the
-captured `rlib`/`rmeta` artifacts for `channels`, `gateway`, `runtime`, and the
-root `zeroclaw` crate. A matching non-authoritative SHA, a mismatch between A and
-B, or a missing diagnostic is a failed qualification; do not regenerate the
-manifest.
-
-Only after two clean qualifications should the exact signed candidate be used
-for production promotion. A temporary authenticated canary may use the hosted
-Cross candidate when the `release-builder` environment approval is granted and
-the alias workflow verifies the exact candidate run, digest, signature,
-attestations, and descriptor. Promotion remains a separate protected dispatch
-and must supply the trusted-aa candidate digest plus durable backup, rollback,
-and canary evidence.
+Local qualification does not prove CI ran, registry publication/signing succeeded,
+repository protection is configured, or the app works on native ARM hardware.
+Record those outcomes only when the corresponding actions actually complete.

@@ -7,4 +7,7 @@ Dockerfile text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
 
-zeroclaw-bin -text
+/zeroclaw/tests/fixtures/zeroclaw-0.7.5-aarch64 -text
+
+# Preserve the upstream NOTICE section divider verbatim.
+/zeroclaw/tests/fixtures/NOTICE conflict-marker-size=64

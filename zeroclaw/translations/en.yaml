@@ -1,328 +1,71 @@
 configuration:
-  # ─────── Credentials ───────
   openrouter_api_key:
-    name: "OpenRouter API key"
-    description: >-
-      Your OpenRouter key (https://openrouter.ai). The agent uses OpenRouter to
-      reach the DeepSeek V4 Flash default, the budget Fusion/Auto complex
-      routes, and the optional free fallback routes. Required.
-  nvidia_api_key:
-    name: "NVIDIA API key"
-    description: >-
-      Optional NVIDIA NIM OpenAI-compatible credential. When present, the
-      root broker may use it after a classified OpenRouter failure; it is
-      never exposed to ZeroClaw.
-  ark_api_key:
-    name: "BytePlus ModelArk API key"
-    description: >-
-      Optional BytePlus ModelArk credential. When present, the root broker may
-      use the pinned Ark model routes after a classified provider failure.
-  provider_key_mode:
-    name: "Provider credential mode"
-    description: >-
-      broker keeps the provider key in the root-owned local gateway and is the
-      required mode for write-enabled operation. direct_temporary is only a
-      controlled migration compatibility mode.
-  ha_token:
-    name: "Home Assistant long-lived token"
-    description: >-
-      Deprecated migration-only option. It cannot replace the Supervisor token;
-      leave it blank. The app refuses to start without the Supervisor-provided
-      credential.
+    name: OpenRouter API key
+    description: Required. Used directly by native ZeroClaw; stored in its private configuration.
   telegram_bot_token:
-    name: "Telegram bot token"
-    description: >-
-      Token from @BotFather. The agent uses this to receive commands and to
-      send approval tickets and reports. Optional; when set,
-      telegram_allowed_users must also be configured.
+    name: Telegram bot token
+    description: Optional. Use a private owner bot and disable group joining in BotFather.
+  telegram_owner_id:
+    name: Telegram owner ID
+    description: Your positive numeric Telegram user ID. Only this sender is authorized; usernames
+      and automatic enrollment are not supported.
   telegram_allowed_users:
-    name: "Telegram allowed user IDs"
-    description: >-
-      Comma-separated numeric Telegram user IDs that are allowed to message
-      the agent. Required only when telegram_bot_token is set. Anyone else is
-      silently ignored. Find your ID via @userinfobot.
-
-  # ─────── Models & logging ───────
+    name: Legacy Telegram IDs
+    description: Upgrade compatibility only. The first numeric ID is used until an explicit
+      owner ID is supplied; additional IDs are retired.
+  ha_mcp_enabled:
+    name: Connect Home Assistant
+    description: Enable after configuring Device control only and Read-only on the main Home
+      Assistant MCP endpoint.
+  ha_mcp_url:
+    name: Home Assistant MCP URL
+    description: The reachable main URL ending in /api/mcp. Use HTTPS across untrusted networks.
+      Individual API URLs are not supported.
+  ha_mcp_token:
+    name: Home Assistant MCP token
+    description: A new long-lived access token for a dedicated non-administrator Home Assistant
+      account permitted to use the main endpoint.
   default_model:
-    name: "Default model (cheap)"
-    description: >-
-      Used for trivia, lookups, and simple actions. Default:
-      ~deepseek/deepseek-v4-flash-latest. The leading '~' follows OpenRouter's
-      latest-family alias behavior. Pick any OpenRouter model slug.
+    name: Primary model
+    description: 'The native fast route. Default: DeepSeek V4 Flash through OpenRouter.'
   complex_model:
-    name: "Complex model (smart)"
-    description: >-
-      Used for creation drafts, daily reports, and reflection. Default:
-      openrouter/fusion. The root broker injects the configured Fusion preset.
-  openrouter_auto_model:
-    name: "OpenRouter Auto fallback model"
-    description: >-
-      Paid OpenRouter router used after Fusion fails on a complex turn. Default:
-      openrouter/auto.
+    name: Reasoning model
+    description: 'The native reasoning route, selected with /model reasoning. Default: OpenRouter
+      Fusion.'
   openrouter_fusion_preset:
-    name: "Fusion preset"
-    description: >-
-      Root-selected OpenRouter Fusion preset for complex work. general-budget
-      keeps the panel economical while retaining a stronger analyst.
-  openrouter_auto_cost_tier:
-    name: "Auto Router cost tier"
-    description: >-
-      Cost band sent to OpenRouter Auto when it is used as the complex fallback.
-      medium is the default; this is a preference, not a hard dollar ceiling.
-  nvidia_model:
-    name: "NVIDIA fallback model"
-    description: >-
-      NVIDIA model ID used by the root broker when the optional NVIDIA key is
-      configured. Default: meta/llama-3.3-70b-instruct.
-  ark_fast_model:
-    name: "Ark fast fallback model"
-    description: >-
-      BytePlus ModelArk model ID for fast/default fallback. Default:
-      deepseek-v4-flash-ga-260731.
-  ark_reasoning_model:
-    name: "Ark reasoning fallback model"
-    description: >-
-      BytePlus ModelArk model ID for complex fallback. Default:
-      glm-5-2-260617.
-  ark_pro_model:
-    name: "Ark pro fallback model"
-    description: >-
-      Additional BytePlus ModelArk model tried only when the route remains
-      eligible after a model-specific failure. Default: deepseek-v4-pro-ga-260813.
-  openrouter_free_model:
-    name: "OpenRouter free-tier model"
-    description: >-
-      Specific OpenRouter free model used as the first free last resort.
-      Default: nvidia/nemotron-3.5-lightning:free. NVIDIA's catalog prefix
-      here still means the request is sent through the root OpenRouter profile.
-      An empty or missing value disables this named route; it is never
-      invented at runtime.
-  openrouter_free_router_model:
-    name: "OpenRouter free router"
-    description: >-
-      OpenRouter's random free-model router used after the specific free model.
-      Default: openrouter/free. Both free routes require the explicit free
-      fallback gate and are rejected for tool-capable turns.
-  nvidia_free_model:
-    name: "NVIDIA free-tier model"
-    description: >-
-      Optional NVIDIA free/trial model ID. It is subject to the same explicit
-      no-tools containment as every free-tier route.
-  ark_free_model:
-    name: "Ark free-tier model"
-    description: >-
-      Optional BytePlus ModelArk free/trial model ID. Availability depends on
-      the account and endpoint; empty is safest.
-  provider_fallback_enabled:
-    name: "Enable provider fallback"
-    description: >-
-      Let the root broker move to another configured provider after timeout,
-      429, 5xx, authentication, credit, or model-availability failures.
-  provider_free_fallback_enabled:
-    name: "Enable contained free fallback"
-    description: >-
-      Allow configured free-tier routes as a final fallback. Off by default;
-      enable it only after reviewing the configured model IDs. An empty or
-      missing free model disables that route. The broker rejects free routes
-      for any request that contains tools or tool calls, so free inference
-      cannot perform or approve HA writes.
-  provider_nvidia_fallback_enabled:
-    name: "Enable NVIDIA fallback profile"
-    description: >-
-      Explicitly activate the NVIDIA route after its model/API contract has
-      been tested. A key alone does not activate this profile.
-  provider_ark_fallback_enabled:
-    name: "Enable BytePlus Ark fallback profile"
-    description: >-
-      Explicitly activate the BytePlus ModelArk route after its model/API
-      contract has been tested. A key alone does not activate this profile.
-  log_level:
-    name: "Log level"
-    description: >-
-      How chatty the add-on log is. 'info' is the right default; switch to
-      'debug' only when troubleshooting.
-
-  # ─────── Cost & safety budgets ───────
+    name: Fusion preset
+    description: The preset sent when the reasoning model is openrouter/fusion. General budget
+      is the default.
+  automatic_model_routing:
+    name: Automatic model selection
+    description: Optional native complexity heuristic. Long messages, code fences or reasoning
+      keywords can select the more expensive reasoning model. Off by default.
   daily_cost_limit_usd:
-    name: "Daily cost limit (USD)"
-    description: >-
-      When today's spend exceeds 80% of this value, the agent flips to
-      cheap-model-only mode and pings you once. A hard guardrail — the agent
-      will not silently burn through your wallet.
+    name: Daily estimated cost limit
+    description: Native block threshold in USD. Accounting uses conservative configured rates,
+      not actual provider prices or an independent reservation.
   monthly_cost_limit_usd:
-    name: "Monthly cost limit (USD)"
-    description: "Soft monthly cap reported alongside daily cost."
-  max_actions_per_hour:
-    name: "Max actions per hour"
-    description: >-
-      Rate-limit on guarded HA actions. Acts as a runaway-loop circuit breaker.
-  provider_max_requests_per_hour:
-    name: "Provider requests per hour"
-    description: >-
-      Root broker admission limit for model requests. This remains enforced
-      even if the planner asks for a higher rate.
-  provider_daily_token_budget:
-    name: "Provider daily token budget"
-    description: >-
-      Root broker reservation budget for input plus output tokens. Requests
-      without max_tokens reserve the configured provider maximum; the default
-      leaves room for a full-context primary reservation and one fallback.
-  provider_openrouter_max_requests_per_hour:
-    name: "OpenRouter requests per hour"
-    description: "Independent root admission limit for the OpenRouter profile."
-  provider_openrouter_daily_token_budget:
-    name: "OpenRouter daily token budget"
-    description: >-
-      Independent root input-plus-output reservation budget for OpenRouter;
-      the default permits a failed full-context primary and one free fallback.
-  provider_nvidia_max_requests_per_hour:
-    name: "NVIDIA requests per hour"
-    description: "Independent root admission limit for the NVIDIA profile."
-  provider_nvidia_daily_token_budget:
-    name: "NVIDIA daily token budget"
-    description: "Independent root input-plus-output reservation budget for the NVIDIA profile."
-  provider_ark_max_requests_per_hour:
-    name: "Ark requests per hour"
-    description: "Independent root admission limit for the BytePlus ModelArk profile."
-  provider_ark_daily_token_budget:
-    name: "Ark daily token budget"
-    description: "Independent root input-plus-output reservation budget for the BytePlus ModelArk profile."
-
-  # ─────── Agent runtime budgets ───────
-  max_tool_iterations:
-    name: "Max tool iterations per turn"
-    description: >-
-      How many tool calls the agent may chain in a single user message before
-      it must stop and reply. Lower = cheaper, higher = more capable.
-  max_history_messages:
-    name: "Max conversation history (messages)"
-    description: >-
-      How many recent messages are kept in the live context window. Older
-      messages remain in memory but aren't auto-injected.
-  max_context_tokens:
-    name: "Max context tokens"
-    description: "Hard cap on prompt size sent to the model."
+    name: Monthly estimated cost limit
+    description: Native block threshold in USD. Use the provider account limit when an independent
+      spending limit is needed.
   provider_max_tokens:
-    name: "Provider max output tokens"
-    description: >-
-      Cap on the model's response length. Tool-call-heavy turns need more —
-      2048 is a good default; raise if you see truncated tool calls.
-  provider_max_input_tokens:
-    name: "Provider max input tokens"
-    description: >-
-      Hard root-broker ceiling for the complete JSON request, including the
-      system prompt and tools. The broker reserves this budget conservatively
-      and rejects oversized requests before contacting any provider.
+    name: Maximum reply tokens
+    description: Maximum model output tokens per request.
+  max_tool_iterations:
+    name: Maximum tool iterations
+    description: Maximum native tool-loop iterations in a turn.
+  max_actions_per_hour:
+    name: Hourly action limit
+    description: Native ZeroClaw action-rate limit.
+  max_history_messages:
+    name: Conversation history
+    description: Maximum messages retained in the model context.
+  max_context_tokens:
+    name: Context token limit
+    description: Native context limit before compaction.
   response_cache_ttl_minutes:
-    name: "Response cache TTL (minutes)"
-    description: "Identical user messages within this window return the cached reply."
+    name: Response cache lifetime
+    description: Native cache lifetime in minutes. Zero expires cached responses immediately.
   conversation_retention_days:
-    name: "Conversation retention (days)"
-    description: "How long full conversation transcripts are kept on disk."
-
-  # ─────── Home context ───────
-  home_location:
-    name: "Home location"
-    description: >-
-      Optional free-form context supplied by the user. It is not embedded in
-      the image and is not used to authorize actions.
-  home_languages:
-    name: "Home languages"
-    description: >-
-      Comma-separated ISO codes (e.g. 'en,ar'). The agent will reply in
-      whichever language you write to it in.
-  quiet_hours:
-    name: "Quiet hours"
-    description: >-
-      'HH:MM-HH:MM' window where lights and climate actions need explicit
-      confirmation regardless of their normal verdict (set
-      'Quiet hours require confirm' below to enable).
-  confirmation_temp_delta_c:
-    name: "Climate confirm delta (°C)"
-    description: >-
-      Used by SOUL.md examples — climate changes larger than this are
-      flagged in the agent's prompt as 'big change, double-check first'.
-      The deterministic policy threshold is the separate field below.
-
-  # ─────── Reports & observer ───────
-  daily_report_time:
-    name: "Daily report time (UTC, HH:MM)"
-    description: >-
-      Retained for migration compatibility only. This release does not schedule
-      reports; create a Home Assistant automation with the desired time zone.
-  daily_report_enabled:
-    name: "Send daily report"
-    description: >-
-      Reserved and ignored in this supervised release. Create a Home Assistant
-      automation for a recurring report instead.
-  observer_enabled:
-    name: "Enable proactive observer"
-    description: >-
-      Reserved and ignored in this supervised release. Use a Home Assistant
-      automation if you want a periodic check.
-  observer_interval_minutes:
-    name: "Observer interval (minutes)"
-    description: "Migration-only; no ZeroClaw observer schedule is started."
-
-  # ─────── Phase switches ───────
-  enable_learning_loops:
-    name: "Enable learning loops (v3.2)"
-    description: >-
-      Nightly reflection, LESSONS.md distillation from corrections, and skill
-      acquisition. Off by default — coming in v3.2.
-
-  # ─────── Audit & undo ───────
-  enable_undo:
-    name: "Enable zc-undo"
-    description: >-
-      Allows the agent (and you, by saying 'undo that') to revert recent
-      actions inside a 1-hour window using the audit log.
-  audit_retention_days:
-    name: "Audit log retention (days)"
-    description: >-
-      Daily JSONL files older than this are pruned at startup.
-
-  # ─────── Policy engine ───────
-  policy_mode:
-    name: "Policy mode"
-    description: >-
-      strict = confirm everything · balanced = sensible defaults (recommended) ·
-      permissive = allow most · custom = ignore presets and use only the
-      explicit lists below. The legacy /config/zeroclaw_policy.yaml file is not
-      parsed by the canonical broker.
-  policy_quiet_hours_require_confirm:
-    name: "Require confirm during quiet hours"
-    description: >-
-      During 'Quiet hours', lights and climate actions need approval even if
-      they'd normally be auto-allowed.
-  policy_bulk_action_threshold:
-    name: "Bulk action threshold"
-    description: >-
-      An action that targets this many or more entities at once requires
-      approval. Stops 'turn off all lights' from happening accidentally.
-  policy_climate_delta_confirm_c:
-    name: "Climate delta needing confirm (°C)"
-    description: >-
-      Setpoint changes larger than this trigger an approval ticket. Default 3.
-  policy_extra_deny:
-    name: "Extra DENY entries"
-    description: >-
-      Patterns the agent must never act on — overrides everything else. Use
-      shell-style wildcards. Example: switch.water_heater, light.kids_*.
-  policy_extra_confirm:
-    name: "Extra CONFIRM entries"
-    description: "Patterns that always require approval, regardless of preset."
-  policy_extra_allow:
-    name: "Extra ALLOW entries"
-    description: >-
-      Patterns to auto-allow even if the preset would have asked. Use sparingly.
-  policy_trust_enabled:
-    name: "Trust promotion (reserved)"
-    description: >-
-      Reserved for a future broker-owned trust ledger. It is disabled in this
-      release; every write still requires a root-sealed Telegram approval.
-  policy_trust_promote_after:
-    name: "Reserved trust threshold"
-    description: "Compatibility setting; trust promotion is disabled in this release."
-
-network: {}
+    name: Conversation retention
+    description: Native conversation retention in days.

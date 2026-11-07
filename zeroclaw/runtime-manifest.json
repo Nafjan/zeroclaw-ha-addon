@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "runtime": "ZeroClaw",
+    "version": "0.8.7",
+    "release_tag": "v0.8.7",
+    "target": "aarch64-unknown-linux-musl",
+    "source_repository": "https://github.com/zeroclaw-labs/zeroclaw.git",
+    "source_commit": "99bd353c756f4e64f381cfe9c3002ebff32f3055",
+    "source_commit_verified_by": "https://api.github.com/repos/zeroclaw-labs/zeroclaw/git/ref/tags/v0.8.7",
+    "release_asset": "zeroclaw-aarch64-unknown-linux-musl.tar.gz",
+    "release_asset_url": "https://github.com/zeroclaw-labs/zeroclaw/releases/download/v0.8.7/zeroclaw-aarch64-unknown-linux-musl.tar.gz",
+    "release_asset_sha256": "eab013d82ed333689698a328b104ecaf5f5a76b046af30ab25482f0181518f3d",
+    "checksums_asset_sha256": "249f59e7d148aae956e9e969960075f9669abd5eea82031c1177a75e148b42e4",
+    "release_asset_sha256_source": "GitHub release API digest and SHA256SUMS asset, independently checked by the qualification script",
+    "runtime_binary_sha256": "f33279b7b42b54e56ea9dd1cc722e6d09e3c05533b6f70147d1f6d4dc204972f",
+    "runtime_license_sha256": {
+      "LICENSE-MIT": "69ad6d0b3c96424e823dd77c3625682fefbf7cc2871a624fa38f5d762c4bcc94",
+      "LICENSE-APACHE": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "NOTICE": "e4c0a853eb087c74679d9a1dd831101f19441ba05814cf37ccffedcb52ac368f"
+    }
+  },
+  "source_build_contract": {
+    "status": "not_reproduced",
+    "source_date_epoch": 1793111285,
+    "cargo_lock_sha256": "8ae532b6784fe55ff083aa002432d03c9f1d2953fa33ead432bee6339045d8fd",
+    "minimum_rust_version": "1.96.0",
+    "upstream_release_toolchain": "1.98.0",
+    "target": "aarch64-unknown-linux-musl",
+    "target_rustflags": "-C link-arg=-static -C link-arg=-Wl,-z,stack-size=8388608",
+    "upstream_release_builder": "cross via the official release workflow",
+    "cross_version": "0.2.5",
+    "cross_cli_sha256": "642375d1bcf3bd88272c32ba90e999f3d983050adf45e66bd2d3887e8e838bad",
+    "cargo_incremental": false,
+    "note": "Pinned v0.8.7 source requires Rust 1.96.0 and its official release workflow uses Rust 1.98.0 via Cross 0.2.5 with static musl flags. Local qualification consumed the official release binary and built the Home Assistant app image; it did not compile or independently reproduce the upstream Rust executable."
+  },
+  "native_image_qualification": {
+    "status": "passed",
+    "qualification_date": "2026-11-07",
+    "app_version": "4.0.0.0",
+    "app_source_repository": "https://github.com/Nafjan/zeroclaw-ha-addon",
+    "scope": "local ARM64 native app image qualification using the verified upstream runtime archive; not an independent reproduction of the upstream executable build",
+    "base_image": "docker.io/library/alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4",
+    "base_arm64_manifest_sha256": "1829893486be257df5049ab3b7fc95afbd0fc09d89803cbc580bda1ba5386b29",
+    "pinned_packages": {
+      "ca-certificates": "20261020-r0",
+      "python3": "3.14.10-r1",
+      "su-exec": "0.3-r0"
+    },
+    "container_user": "1000:1000",
+    "runtime_license_files": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE",
+      "NOTICE"
+    ],
+    "runtime_license_proof": "official raw files matched their Git blob IDs in the pinned upstream source commit tree",
+    "root_filesystem_read_only": true,
+    "network": "none; app shares only the private loopback namespace of a synthetic provider fixture",
+    "contract_test": "zeroclaw/tests/native_image_smoke.py",
+    "provider_route_probe": "transient native CLI probes while the daemon is gracefully stopped, preserving the upstream state-lock contract; only the disposable fixture config is converted to the pinned custom compatible-provider family and private loopback because the native OpenRouter family uses its fixed official endpoint",
+    "production_openrouter_wire_claim": false,
+    "buildkit_frontend": "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
+    "docker_build": "local BuildKit linux/arm64 image built from zeroclaw/Dockerfile using fixed-checksum official runtime and license downloads",
+    "checks": [
+      "native startup, migration, configuration generation, and loopback health",
+      "pinned Alpine linux/arm64 Mozilla CA bundle checked at ca-certificates 20261020-r0; no emSign root entries",
+      "root-only 0600 options, migration receipts, and fingerprint ownership; daemon UID cannot read options",
+      "legacy /data/workspace sealed root:root 0700; daemon UID cannot traverse pre-existing workspace content",
+      "unprivileged daemon identity and Supervisor-token environment removal",
+      "gateway health reports pairing required",
+      "authenticated primary and explicit reasoning routes through the pinned custom compatible-provider family to synthetic loopback; no production OpenRouter wire claim",
+      "memory_recall-only provider tool allowlist with HA MCP disabled",
+      "graceful persistence restart and stale RPC socket recovery after SIGKILL, including daemon health and marker persistence"
+    ],
+    "image_published": false,
+    "image_signature_status": "not_signed",
+    "qualifier_changed_active_descriptor_or_binary": false
+  },
+  "ha_app_artifact": {
+    "status": "local_candidate_qualified_not_published",
+    "sha256": null,
+    "reproducible_build_status": "not_run",
+    "signature_status": "not_signed",
+    "note": "This is a local ARM64 Home Assistant app image built from the pinned official runtime archive. The app image was not published or signed, and the official upstream Rust executable was not independently reproduced. The separate integration work updated the local descriptor; this qualification itself did not change the descriptor or active binary."
+  }
+}

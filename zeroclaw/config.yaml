@@ -1,207 +1,59 @@
 name: ZeroClaw Agent
-version: 3.1.4.0
+version: "4.0.0.0"
 slug: zeroclaw
-description: AI home automation agent — read-only by default with broker-gated actions
+description: Native ZeroClaw with owner Telegram access and read-only Home Assistant MCP
 url: https://github.com/Nafjan/zeroclaw-ha-addon
-# The signed generic GHCR image is the production source.  Keep this aligned
-# with release.yml; Supervisor appends the version tag from this file.
 image: ghcr.io/nafjan/zeroclaw-ha-addon
 arch:
   - aarch64
-init: false
+homeassistant: "2026.11.0"
+breaking_versions:
+  - "4.0.0.0"
+init: true
 startup: application
 boot: auto
-homeassistant_api: true
-hassio_api: true
-# The typed capability broker uses the least-privileged Supervisor role.
-# Do not widen this to admin/manager/homeassistant: the broker is the only
-# component that consumes SUPERVISOR_TOKEN and still enforces typed policy.
-hassio_role: default
+backup: cold
+tmpfs: true
 options:
-  # --- Provider credentials (OpenRouter required; other providers optional) ---
   openrouter_api_key: ""
-  # Optional independent fallback credentials. Empty profiles are fail-closed
-  # and never receive a request.
-  nvidia_api_key: ""
-  ark_api_key: ""
-  # The broker keeps provider keys in the root-owned local model gateway.
-  # direct_temporary remains schema-compatible only so an upgrade can migrate
-  # an older saved options object; run.sh forces it into broker mode in memory.
-  provider_key_mode: broker
-  # Deprecated compatibility option. Prefer the Supervisor-provided token.
-  ha_token: ""
-  # Telegram is optional; when configured it requires telegram_allowed_users.
   telegram_bot_token: ""
-  # Comma-separated Telegram user IDs. The first ID is the sole approval owner
-  # for transactional action tickets; additional IDs may query the agent.
-  telegram_allowed_users: ""
-
-  # --- Models ---
+  telegram_owner_id: ""
+  ha_mcp_enabled: false
+  ha_mcp_url: ""
+  ha_mcp_token: ""
   default_model: "~deepseek/deepseek-v4-flash-latest"
   complex_model: openrouter/fusion
-  openrouter_auto_model: openrouter/auto
   openrouter_fusion_preset: general-budget
-  openrouter_auto_cost_tier: medium
-  nvidia_model: meta/llama-3.3-70b-instruct
-  ark_fast_model: deepseek-v4-flash-ga-260731
-  ark_reasoning_model: glm-5-2-260617
-  ark_pro_model: deepseek-v4-pro-ga-260813
-  # Optional current free-tier model IDs. These are only eligible for
-  # requests with no tools or tool-call continuation. The NVIDIA catalog model
-  # is served through OpenRouter, not the direct NVIDIA profile. Free fallback
-  # is an explicit opt-in so an older options object cannot silently downgrade.
-  openrouter_free_model: nvidia/nemotron-3.5-lightning:free
-  openrouter_free_router_model: openrouter/free
-  nvidia_free_model: ""
-  ark_free_model: ""
-  provider_fallback_enabled: true
-  provider_free_fallback_enabled: false
-  # Optional cross-vendor edges remain off until the corresponding provider
-  # contract has been tested and the operator explicitly enables it.
-  provider_nvidia_fallback_enabled: false
-  provider_ark_fallback_enabled: false
-  log_level: info
-
-  # --- Cost / safety budgets ---
-  # The broker reserves a worst-case 65536-input/2048-output request at its
-  # conservative $0.10/1K-token ceiling before contacting an upstream. Keep
-  # the default above that one-request reservation so the documented full
-  # context path and its free fallback are actually usable.
+  automatic_model_routing: false
   daily_cost_limit_usd: 10.0
   monthly_cost_limit_usd: 40.0
-  max_actions_per_hour: 200
-  # Root provider broker admission limits; these are independent of planner
-  # settings and remain enforced when a client calls the local gateway.
-  provider_max_requests_per_hour: 120
-  # A full 65536-input/2048-output reservation is 67584 tokens. Keep enough
-  # room for a failed primary reservation plus one same-profile free fallback;
-  # the separate dollar caps remain the spend control.
-  provider_daily_token_budget: 200000
-  provider_openrouter_max_requests_per_hour: 120
-  provider_openrouter_daily_token_budget: 200000
-  provider_nvidia_max_requests_per_hour: 60
-  provider_nvidia_daily_token_budget: 200000
-  provider_ark_max_requests_per_hour: 60
-  provider_ark_daily_token_budget: 200000
-
-  # --- Agent runtime budgets ---
+  provider_max_tokens: 2048
   max_tool_iterations: 8
+  max_actions_per_hour: 200
   max_history_messages: 30
   max_context_tokens: 16000
-  provider_max_tokens: 2048
-  provider_max_input_tokens: 65536
   response_cache_ttl_minutes: 2
   conversation_retention_days: 30
-
-  # --- Home context (used in SOUL.md and world-state) ---
-  home_location: ""
-  home_languages: "en"
-  quiet_hours: "23:00-06:00"
-  confirmation_temp_delta_c: 3
-
-  # --- Reports & observer ---
-  # UTC in the current release; keep location/timezone policy out of the image.
-  daily_report_time: "08:00"
-  daily_report_enabled: false
-  observer_enabled: false
-  observer_interval_minutes: 15
-
-  # --- Phase switches ---
-  # Reserved: the broker-only release does not map the host HA /config tree.
-  enable_learning_loops: false
-  # Enabling writes never bypasses approval: every write still requires a
-  # root-sealed, actor-bound Telegram ticket in the production runtime.
-  enable_write_actions: false
-
-  # --- Audit & undo ---
-  enable_undo: true
-  audit_retention_days: 30
-
-  # --- Policy engine ---
-  policy_mode: balanced
-  policy_quiet_hours_require_confirm: true
-  policy_bulk_action_threshold: 3
-  policy_climate_delta_confirm_c: 3
-  policy_extra_deny: []
-  policy_extra_confirm: []
-  policy_extra_allow: []
-  # Reserved for a future broker-owned trust ledger. Keeping it off avoids
-  # implying that repeated approvals can remove the mandatory approval gate.
-  policy_trust_enabled: false
-  policy_trust_promote_after: 5
-
 schema:
   openrouter_api_key: password
-  nvidia_api_key: password
-  ark_api_key: password
-  provider_key_mode: list(direct_temporary|broker)
-  ha_token: password
   telegram_bot_token: password
-  telegram_allowed_users: str
+  telegram_owner_id: str
+  # Upgrade compatibility only. The first legacy ID becomes the sole owner
+  # until telegram_owner_id is explicitly supplied. Additional IDs lose access.
+  telegram_allowed_users: str?
+  ha_mcp_enabled: bool
+  ha_mcp_url: str
+  ha_mcp_token: password
   default_model: str
   complex_model: str
-  openrouter_auto_model: str
   openrouter_fusion_preset: list(general-high|general-budget|general-fast)
-  openrouter_auto_cost_tier: list(low|medium|high|xhigh|max)
-  nvidia_model: str
-  ark_fast_model: str
-  ark_reasoning_model: str
-  ark_pro_model: str
-  openrouter_free_model: str
-  openrouter_free_router_model: str
-  nvidia_free_model: str
-  ark_free_model: str
-  provider_fallback_enabled: bool
-  provider_free_fallback_enabled: bool
-  provider_nvidia_fallback_enabled: bool
-  provider_ark_fallback_enabled: bool
-  log_level: list(debug|info|warn|error)
-
-  daily_cost_limit_usd: float
-  monthly_cost_limit_usd: float
-  max_actions_per_hour: int(50,1000)
-  provider_max_requests_per_hour: int(1,1000)
-  provider_daily_token_budget: int(1024,10000000)
-  provider_openrouter_max_requests_per_hour: int(1,1000)
-  provider_openrouter_daily_token_budget: int(1024,10000000)
-  provider_nvidia_max_requests_per_hour: int(1,1000)
-  provider_nvidia_daily_token_budget: int(1024,10000000)
-  provider_ark_max_requests_per_hour: int(1,1000)
-  provider_ark_daily_token_budget: int(1024,10000000)
-
+  automatic_model_routing: bool
+  daily_cost_limit_usd: float(0.01,1000000)
+  monthly_cost_limit_usd: float(0.01,1000000)
+  provider_max_tokens: int(512,8192)
   max_tool_iterations: int(2,20)
+  max_actions_per_hour: int(50,1000)
   max_history_messages: int(5,100)
   max_context_tokens: int(2000,128000)
-  provider_max_tokens: int(512,8192)
-  provider_max_input_tokens: int(1024,128000)
   response_cache_ttl_minutes: int(0,60)
   conversation_retention_days: int(1,365)
-
-  home_location: str
-  home_languages: str
-  quiet_hours: str
-  confirmation_temp_delta_c: int(1,20)
-
-  daily_report_time: str
-  daily_report_enabled: bool
-  observer_enabled: bool
-  observer_interval_minutes: int(5,120)
-
-  enable_learning_loops: bool
-  enable_write_actions: bool
-
-  enable_undo: bool
-  audit_retention_days: int(1,365)
-
-  policy_mode: list(strict|balanced|permissive|custom)
-  policy_quiet_hours_require_confirm: bool
-  policy_bulk_action_threshold: int(2,50)
-  policy_climate_delta_confirm_c: int(1,20)
-  policy_extra_deny:
-    - str
-  policy_extra_confirm:
-    - str
-  policy_extra_allow:
-    - str
-  policy_trust_enabled: bool
-  policy_trust_promote_after: int(2,50)

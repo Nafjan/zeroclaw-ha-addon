@@ -1,92 +1,122 @@
-# Pin the multi-arch manifest; update deliberately with a digest review.
-FROM ghcr.io/home-assistant/base:3.24@sha256:94ff231402a5e7ad2a82e261ad5fa4ffae7d7bb095c3febb2edbdf309c9b6aca
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM docker.io/library/alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 
-ARG BUILD_VERSION
-ARG BUILD_ARCH
-ARG ZEROCLAW_SHA256
-ARG ZEROCLAW_SOURCE_COMMIT
-ARG ADDON_SOURCE_COMMIT
-ARG ZEROCLAW_SOURCE_DATE_EPOCH
-ARG ZEROCLAW_LLVM_RNG_SEED
-ARG REQUIRE_VERIFIED_ARTIFACT
-ARG ZEROCLAW_STATE_SCHEMA
-ARG ALLOW_TEST_PROVIDER_OVERRIDE=false
+ARG TARGETARCH
+ARG APP_SOURCE_REVISION=local-uncommitted
+ARG APP_VERSION=4.0.0.0
 
-# Every value that influences release identity or provenance is mandatory.  An
-# out-of-band build must fail before it can produce an installable image.
+LABEL org.opencontainers.image.title="ZeroClaw Home Assistant app" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/Nafjan/zeroclaw-ha-addon" \
+      org.opencontainers.image.revision="${APP_SOURCE_REVISION}" \
+      org.opencontainers.image.base.name="docker.io/library/alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4" \
+      org.opencontainers.image.upstream.revision="99bd353c756f4e64f381cfe9c3002ebff32f3055" \
+      io.hass.version="${APP_VERSION}" \
+      io.hass.type="app" \
+      io.hass.arch="aarch64" \
+      io.zeroclaw.app.source.revision="${APP_SOURCE_REVISION}" \
+      io.zeroclaw.runtime.source.repository="https://github.com/zeroclaw-labs/zeroclaw" \
+      io.zeroclaw.runtime.source.revision="99bd353c756f4e64f381cfe9c3002ebff32f3055" \
+      io.zeroclaw.runtime.version="0.8.7" \
+      io.zeroclaw.runtime.target="aarch64-unknown-linux-musl" \
+      io.zeroclaw.runtime.release-archive-sha256="eab013d82ed333689698a328b104ecaf5f5a76b046af30ab25482f0181518f3d" \
+      io.zeroclaw.runtime.binary-sha256="f33279b7b42b54e56ea9dd1cc722e6d09e3c05533b6f70147d1f6d4dc204972f"
+
 RUN set -eu; \
-    printf '%s' "${BUILD_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; \
-    printf '%s' "${BUILD_ARCH}" | grep -Eq '^aarch64$'; \
-    printf '%s' "${ZEROCLAW_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; \
-    printf '%s' "${ZEROCLAW_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; \
-    printf '%s' "${ADDON_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; \
-    printf '%s' "${ZEROCLAW_SOURCE_DATE_EPOCH}" | grep -Eq '^[1-9][0-9]+$'; \
-    printf '%s' "${ZEROCLAW_LLVM_RNG_SEED}" | grep -Eq '^[0-9]+$'; \
-    printf '%s' "${ZEROCLAW_STATE_SCHEMA}" | grep -Eq '^[1-9][0-9]{0,2}$'; \
-    case "${REQUIRE_VERIFIED_ARTIFACT}" in true|false) : ;; *) exit 1 ;; esac; \
-    case "${ALLOW_TEST_PROVIDER_OVERRIDE}" in true|false) : ;; *) exit 1 ;; esac
+    test "$TARGETARCH" = arm64; \
+    printf '%s' "$APP_SOURCE_REVISION" | grep -Eq '^(local-uncommitted(-dirty)?|[0-9a-f]{40}(-dirty-local-qualification)?)$' || { \
+        echo 'APP_SOURCE_REVISION must be a full commit or an explicit local label' >&2; exit 1; \
+    }; \
+    printf '%s' "$APP_VERSION" | grep -Eq '^(4\.0\.0\.0|4\.0\.0-dev\.g[0-9a-f]{12}\.[0-9]+\.[1-9][0-9]*)$' || { \
+        echo 'APP_VERSION must be stable 4.0.0.0 or a validated 4.0.0-dev candidate version' >&2; exit 1; \
+    }; \
+    apk add --no-cache \
+        ca-certificates=20261020-r0 \
+        python3=3.14.10-r1 \
+        su-exec=0.3-r0; \
+    addgroup -S -g 1000 zeroclaw; \
+    adduser -S -D -H -u 1000 -G zeroclaw -h /data/native zeroclaw; \
+    mkdir -p /data /opt/zeroclaw/native /usr/share/licenses/zeroclaw-runtime; \
+    chown root:zeroclaw /data; \
+    chmod 0750 /data /opt/zeroclaw /opt/zeroclaw/native
 
-ENV ZEROCLAW_ADDON_VERSION="${BUILD_VERSION}"
-ENV ZEROCLAW_STATE_SCHEMA="${ZEROCLAW_STATE_SCHEMA}"
-ENV ZEROCLAW_ADDON_SOURCE_COMMIT="${ADDON_SOURCE_COMMIT}"
+# BuildKit verifies each remote file before it is placed in the image. The
+# runtime archive and source license files are pinned to the upstream 0.8.7
+# source/release; the extracted executable is checked again below.
+ADD --checksum=sha256:eab013d82ed333689698a328b104ecaf5f5a76b046af30ab25482f0181518f3d \
+    https://github.com/zeroclaw-labs/zeroclaw/releases/download/v0.8.7/zeroclaw-aarch64-unknown-linux-musl.tar.gz \
+    /tmp/zeroclaw-aarch64-unknown-linux-musl.tar.gz
+ADD --checksum=sha256:69ad6d0b3c96424e823dd77c3625682fefbf7cc2871a624fa38f5d762c4bcc94 \
+    https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/99bd353c756f4e64f381cfe9c3002ebff32f3055/LICENSE-MIT \
+    /usr/share/licenses/zeroclaw-runtime/LICENSE-MIT
+ADD --checksum=sha256:62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a \
+    https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/99bd353c756f4e64f381cfe9c3002ebff32f3055/LICENSE-APACHE \
+    /usr/share/licenses/zeroclaw-runtime/LICENSE-APACHE
+ADD --checksum=sha256:e4c0a853eb087c74679d9a1dd831101f19441ba05814cf37ccffedcb52ac368f \
+    https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/99bd353c756f4e64f381cfe9c3002ebff32f3055/NOTICE \
+    /usr/share/licenses/zeroclaw-runtime/NOTICE
 
-LABEL \
-    io.hass.version="${BUILD_VERSION}" \
-    io.hass.type="app" \
-    io.hass.arch="${BUILD_ARCH}" \
-    org.opencontainers.image.title="ZeroClaw Home Assistant app" \
-    org.opencontainers.image.version="${BUILD_VERSION}" \
-    org.opencontainers.image.source="https://github.com/Nafjan/zeroclaw-ha-addon" \
-    org.opencontainers.image.revision="${ADDON_SOURCE_COMMIT}" \
-    org.opencontainers.image.upstream.revision="${ZEROCLAW_SOURCE_COMMIT}" \
-    org.opencontainers.image.build.source-date-epoch="${ZEROCLAW_SOURCE_DATE_EPOCH}" \
-    org.opencontainers.image.build.llvm-rng-seed="${ZEROCLAW_LLVM_RNG_SEED}"
+RUN python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path, PurePosixPath
+import stat
+import tarfile
 
-# Static musl binary — no runtime dependencies needed
-RUN apk add --no-cache \
-    ca-certificates=20260611-r0 \
-    curl=8.22.0-r0 \
-    jq=1.8.2-r0 \
-    yq-go=4.53.3-r1 \
-    findutils=4.10.0-r1 \
-    coreutils=9.11-r0 \
-    su-exec=0.3-r0 \
-    && addgroup -S zeroclaw \
-    && adduser -S -D -H -s /sbin/nologin -G zeroclaw zeroclaw
+archive_path = Path("/tmp/zeroclaw-aarch64-unknown-linux-musl.tar.gz")
+destination = Path("/usr/local/bin/zeroclaw")
+expected = "f33279b7b42b54e56ea9dd1cc722e6d09e3c05533b6f70147d1f6d4dc204972f"
+try:
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        candidates = [member for member in archive.getmembers()
+                      if PurePosixPath(member.name).name == "zeroclaw"]
+        if len(candidates) != 1 or not candidates[0].isfile():
+            raise SystemExit("official archive must contain exactly one regular zeroclaw binary")
+        member = candidates[0]
+        path = PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts or member.size > 256 * 1024 * 1024:
+            raise SystemExit("official archive contains an unsafe zeroclaw path or size")
+        source = archive.extractfile(member)
+        if source is None:
+            raise SystemExit("official archive binary could not be read")
+        payload = source.read(256 * 1024 * 1024 + 1)
+except (OSError, tarfile.TarError) as error:
+    raise SystemExit("official runtime archive could not be read safely") from error
 
-COPY zeroclaw-bin /usr/local/bin/zeroclaw
-COPY binary-manifest.json /usr/share/zeroclaw/binary-manifest.json
-COPY state-schema /usr/share/zeroclaw/state-schema
-RUN echo "${ZEROCLAW_SHA256}  /usr/local/bin/zeroclaw" | sha256sum -c - \
-    && test "$(jq -r '.sha256' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SHA256}" \
-    && test "$(jq -r '.source_commit' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SOURCE_COMMIT}" \
-    && test "$(jq -r '.source_date_epoch' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_SOURCE_DATE_EPOCH}" \
-    && test "$(jq -r '.llvm_rng_seed' /usr/share/zeroclaw/binary-manifest.json)" = "${ZEROCLAW_LLVM_RNG_SEED}" \
-    && test "$(tr -d '\\r\\n' < /usr/share/zeroclaw/state-schema)" = "${ZEROCLAW_STATE_SCHEMA}" \
-    && case "${REQUIRE_VERIFIED_ARTIFACT}" in true) test "$(jq -r '.artifact_status' /usr/share/zeroclaw/binary-manifest.json)" = "verified" ;; false) : ;; esac \
-    && chmod +x /usr/local/bin/zeroclaw
+digest = hashlib.sha256(payload).hexdigest()
+if digest != expected:
+    raise SystemExit("official runtime executable digest did not match the pinned 0.8.7 binary")
+with destination.open("xb") as output:
+    output.write(payload)
+os.chmod(destination, 0o555)
+archive_path.unlink()
+PY
+RUN printf '%s  %s\n' \
+        '69ad6d0b3c96424e823dd77c3625682fefbf7cc2871a624fa38f5d762c4bcc94' \
+        /usr/share/licenses/zeroclaw-runtime/LICENSE-MIT | sha256sum -c - \
+    && printf '%s  %s\n' \
+        '62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a' \
+        /usr/share/licenses/zeroclaw-runtime/LICENSE-APACHE | sha256sum -c - \
+    && printf '%s  %s\n' \
+        'e4c0a853eb087c74679d9a1dd831101f19441ba05814cf37ccffedcb52ac368f' \
+        /usr/share/licenses/zeroclaw-runtime/NOTICE | sha256sum -c - \
+    && chmod 0444 /usr/share/licenses/zeroclaw-runtime/LICENSE-MIT \
+        /usr/share/licenses/zeroclaw-runtime/LICENSE-APACHE \
+        /usr/share/licenses/zeroclaw-runtime/NOTICE
 
-# The deterministic provider endpoint used by the arm64 acceptance test is a
-# test-image capability, never a runtime option. Release builds leave this
-# marker absent, so ambient SMOKE_* or ZEROCLAW_* variables cannot redirect a
-# production broker to an arbitrary endpoint.
-RUN if [ "${ALLOW_TEST_PROVIDER_OVERRIDE}" = "true" ]; then \
-        printf '%s\n' 'zeroclaw-ci-test-hooks-v1' > /usr/share/zeroclaw/test-hooks-enabled; \
-        chmod 0444 /usr/share/zeroclaw/test-hooks-enabled; \
-    else \
-        rm -f /usr/share/zeroclaw/test-hooks-enabled; \
-    fi
+COPY --chown=root:root native/entrypoint.sh /usr/local/bin/zeroclaw-entrypoint
+COPY --chown=root:root native/config.py /opt/zeroclaw/native/config.py
+COPY --chown=root:root native/migrate.py /opt/zeroclaw/native/migrate.py
+COPY --chown=root:root native/ha_preflight.py /opt/zeroclaw/native/ha_preflight.py
+RUN chmod 0555 /usr/local/bin/zeroclaw-entrypoint \
+    && chmod 0444 /opt/zeroclaw/native/config.py \
+        /opt/zeroclaw/native/migrate.py \
+        /opt/zeroclaw/native/ha_preflight.py
 
-# Policy library — pure-shell verdict decider, covered by bats tests
-COPY lib/ /opt/zeroclaw/lib/
-RUN chmod +x /opt/zeroclaw/lib/*.sh
+EXPOSE 42617/tcp
 
-COPY run.sh /
-RUN chmod +x /run.sh
+HEALTHCHECK --interval=30s --timeout=4s --start-period=45s --retries=3 \
+    CMD ["su-exec", "zeroclaw:zeroclaw", "env", "-i", "HOME=/data/native", "PATH=/usr/local/bin:/usr/bin:/bin", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:42617/health', timeout=2).read(1)"]
 
-RUN mkdir -p /data/memory /data/logs /data/tools
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD /opt/zeroclaw/lib/healthcheck.sh
-
-CMD ["/run.sh"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/zeroclaw-entrypoint"]

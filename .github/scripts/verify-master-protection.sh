@@ -27,6 +27,7 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 protection="$(gh api \
+    --header 'Accept: application/vnd.github+json' \
     --header 'X-GitHub-Api-Version: 2026-03-10' \
     "repos/${repository}/branches/${branch}/protection")" || {
     echo "branch protection could not be read; refusing release preflight" >&2
@@ -35,7 +36,15 @@ protection="$(gh api \
 
 printf '%s' "$protection" | jq -e '
     (.required_status_checks.strict == true) and
-    ((["Bats unit tests","Shell parsing and ShellCheck","Build and smoke-test arm64 image"] - (.required_status_checks.contexts // [])) | length == 0) and
+    (([
+        "Bats unit tests",
+        "Shell parsing and ShellCheck",
+        "Build and smoke-test arm64 image",
+        "Native HA MCP and state compatibility"
+    ] - (
+        (.required_status_checks.contexts // []) +
+        ((.required_status_checks.checks // []) | map(.context))
+    )) | length == 0) and
     (.enforce_admins.enabled == true) and
     (.required_linear_history.enabled == true) and
     (.allow_force_pushes.enabled == false) and

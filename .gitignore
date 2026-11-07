@@ -11,6 +11,8 @@ reviews/
 
 # Build artifacts
 *.tar.gz
+__pycache__/
+*.py[cod]
 
 # The canonical Supervisor app lives in zeroclaw/.  These legacy root-level
 # copies are retained locally for reference but must not be published as a
@@ -22,3 +24,6 @@ reviews/
 /run.sh
 /CHANGELOG.md
 /repository.yaml
+# Local-only notes and review receipts
+/PII-REMEDIATION-PLAN.md
+/zeroclaw/EXECUTION-GOAL.md

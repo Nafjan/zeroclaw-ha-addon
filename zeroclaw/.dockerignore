@@ -1,0 +1,9 @@
+# The app image is assembled from pinned upstream downloads plus these native
+# bootstrap helpers. Keep legacy payloads and local evidence out of context.
+**
+!Dockerfile
+!native/
+!native/config.py
+!native/migrate.py
+!native/ha_preflight.py
+!native/entrypoint.sh
