@@ -99,6 +99,6 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' 3cc7f1c859a67524d5496260d29806190bc7127d2877a479a5496ce34b9b401a "$archive" | sha256sum -c -
       - name: Exercise real Home Assistant and native ZeroClaw MCP
-        run: python3 zeroclaw/tests/ha_native_mcp_smoke.py --pull --native-interop --zeroclaw-archive "$RUNNER_TEMP/zeroclaw-x86_64-unknown-linux-musl.tar.gz"
+        run: sudo -n python3 zeroclaw/tests/ha_native_mcp_smoke.py --pull --native-interop --zeroclaw-archive "$RUNNER_TEMP/zeroclaw-x86_64-unknown-linux-musl.tar.gz"
       - name: Exercise old/new runtime memory migration, restart and rollback
         run: python3 zeroclaw/tests/state_migration_smoke.py --old-binary zeroclaw/tests/fixtures/zeroclaw-0.7.5-aarch64 --new-archive "$RUNNER_TEMP/zeroclaw-x86_64-unknown-linux-musl.tar.gz"
