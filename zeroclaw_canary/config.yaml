@@ -1,0 +1,59 @@
+name: ZeroClaw Agent Canary
+version: "4.0.0-dev.gfc19d559e658.42446687743.1"
+slug: zeroclaw_canary
+description: Isolated native candidate with fresh app data and integrations disabled.
+url: https://github.com/Nafjan/zeroclaw-ha-addon
+image: ghcr.io/nafjan/zeroclaw-ha-addon
+arch:
+  - aarch64
+homeassistant: "2026.11.0"
+breaking_versions:
+  - "4.0.0.0"
+init: true
+startup: application
+boot: manual
+backup: cold
+tmpfs: true
+options:
+  openrouter_api_key: "canary-bootstrap-no-provider"
+  telegram_bot_token: ""
+  telegram_owner_id: ""
+  ha_mcp_enabled: false
+  ha_mcp_url: ""
+  ha_mcp_token: ""
+  default_model: "~deepseek/deepseek-v4-flash-latest"
+  complex_model: openrouter/fusion
+  openrouter_fusion_preset: general-budget
+  automatic_model_routing: false
+  daily_cost_limit_usd: 10.0
+  monthly_cost_limit_usd: 40.0
+  provider_max_tokens: 2048
+  max_tool_iterations: 8
+  max_actions_per_hour: 200
+  max_history_messages: 30
+  max_context_tokens: 16000
+  response_cache_ttl_minutes: 2
+  conversation_retention_days: 30
+schema:
+  openrouter_api_key: password
+  telegram_bot_token: password
+  telegram_owner_id: str
+  # Upgrade compatibility only. The first legacy ID becomes the sole owner
+  # until telegram_owner_id is explicitly supplied. Additional IDs lose access.
+  telegram_allowed_users: str?
+  ha_mcp_enabled: bool
+  ha_mcp_url: str
+  ha_mcp_token: password
+  default_model: str
+  complex_model: str
+  openrouter_fusion_preset: list(general-high|general-budget|general-fast)
+  automatic_model_routing: bool
+  daily_cost_limit_usd: float(0.01,1000000)
+  monthly_cost_limit_usd: float(0.01,1000000)
+  provider_max_tokens: int(512,8192)
+  max_tool_iterations: int(2,20)
+  max_actions_per_hour: int(50,1000)
+  max_history_messages: int(5,100)
+  max_context_tokens: int(2000,128000)
+  response_cache_ttl_minutes: int(0,60)
+  conversation_retention_days: int(1,365)
